@@ -35,7 +35,6 @@ pub struct Translated {
 
 /// 翻訳方向 (source, target) を決める。常に設定通り(cfg.source_lang → cfg.target_lang)に固定し、
 /// 原文の内容による自動判定・反転は行わない。
-
 /// request/response JSON に含まれうる設定済みAPIキーを伏字化する (SPEC §2.4)
 pub(crate) fn mask_keys(cfg: &Config, s: &str) -> String {
     let mut out = s.to_string();

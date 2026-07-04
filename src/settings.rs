@@ -1,6 +1,7 @@
 // 設定画面 (SPEC §12)
 use crate::config::Config;
 use crate::util::{self, to_wide};
+use crate::ui_helpers::*;
 use std::cell::RefCell;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -10,18 +11,16 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
 };
-use windows::Win32::UI::Controls::EM_SETPASSWORDCHAR;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
-    CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, ES_AUTOHSCROLL, ES_PASSWORD, GetWindowTextLengthW,
-    GetWindowTextW, HMENU, IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_OK,
+    BM_GETCHECK, BM_SETCHECK, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
+    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
+    DestroyWindow, GetWindowTextLengthW,
+    GetWindowTextW, IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_OK,
     MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SW_SHOW, SW_SHOWNORMAL, SendMessageW,
     SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
 };
 use windows::core::{PCWSTR, w};
 
@@ -65,9 +64,6 @@ const IDC_ONNX_VARIANT: i32 = 136;
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
 const WM_ONNX_DONE: u32 = WM_APP + 11;
-/// ● (U+25CF): APIキー入力欄のマスク文字
-const PASSWORD_CHAR: usize = 0x25CF;
-
 /// 各APIキーの発行ページ(実際に確認済みの現行URL)
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
@@ -142,119 +138,6 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
             let _ = SetForegroundWindow(h);
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn ctl(parent: HWND, instance: HINSTANCE, class: PCWSTR, text: &str, style: WINDOW_STYLE, x: i32, y: i32, w: i32, h: i32, id: i32) -> HWND {
-    unsafe {
-        let wide = to_wide(text);
-        CreateWindowExW(
-            Default::default(),
-            class,
-            PCWSTR(wide.as_ptr()),
-            WS_CHILD | WS_VISIBLE | style,
-            x,
-            y,
-            w,
-            h,
-            Some(parent),
-            Some(HMENU(id as usize as *mut _)),
-            Some(instance),
-            None,
-        )
-        .unwrap_or_default()
-    }
-}
-
-fn label(parent: HWND, instance: HINSTANCE, text: &str, x: i32, y: i32, w: i32) {
-    ctl(parent, instance, w!("STATIC"), text, WINDOW_STYLE(0), x, y, w, 20, 0);
-}
-
-fn edit(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32) -> HWND {
-    ctl(
-        parent,
-        instance,
-        w!("EDIT"),
-        "",
-        WS_BORDER | WS_TABSTOP | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
-        x,
-        y,
-        w,
-        22,
-        id,
-    )
-}
-
-/// 複数行エディット (Geminiプロンプト用)
-fn multiline(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, h: i32, id: i32) -> HWND {
-    const ES_MULTILINE: u32 = 0x0004;
-    const ES_AUTOVSCROLL: u32 = 0x0040;
-    ctl(
-        parent,
-        instance,
-        w!("EDIT"),
-        "",
-        WS_BORDER | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE | ES_AUTOVSCROLL),
-        x,
-        y,
-        w,
-        h,
-        id,
-    )
-}
-
-/// APIキー入力欄。安全のため ● でマスク表示する(内部の実値はそのまま保持される)
-fn password_edit(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32) -> HWND {
-    let h = ctl(
-        parent,
-        instance,
-        w!("EDIT"),
-        "",
-        WS_BORDER | WS_TABSTOP | WINDOW_STYLE((ES_AUTOHSCROLL | ES_PASSWORD) as u32),
-        x,
-        y,
-        w,
-        22,
-        id,
-    );
-    unsafe {
-        SendMessageW(h, EM_SETPASSWORDCHAR, Some(WPARAM(PASSWORD_CHAR)), Some(LPARAM(0)));
-    }
-    h
-}
-
-fn combo(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32) -> HWND {
-    ctl(
-        parent,
-        instance,
-        w!("COMBOBOX"),
-        "",
-        WS_TABSTOP | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
-        x,
-        y,
-        w,
-        200,
-        id,
-    )
-}
-
-fn button(parent: HWND, instance: HINSTANCE, text: &str, x: i32, y: i32, w: i32, id: i32) -> HWND {
-    ctl(parent, instance, w!("BUTTON"), text, WS_TABSTOP, x, y, w, 26, id)
-}
-
-fn checkbox(parent: HWND, instance: HINSTANCE, text: &str, x: i32, y: i32, w: i32, id: i32) -> HWND {
-    ctl(
-        parent,
-        instance,
-        w!("BUTTON"),
-        text,
-        WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
-        x,
-        y,
-        w,
-        22,
-        id,
-    )
 }
 
 fn build_controls(h: HWND, inst: HINSTANCE) {

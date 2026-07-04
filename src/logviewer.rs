@@ -3,6 +3,7 @@
 // 全削除・最新に更新・外部画像ビューア起動。
 use crate::logdb::{self, RecogRow, TransRow};
 use crate::util::to_wide;
+use crate::ui_helpers::*;
 use std::cell::RefCell;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -350,24 +351,7 @@ unsafe extern "system" fn detail_wndproc(h: HWND, msg: u32, wparam: WPARAM, lpar
 }
 
 fn btn(parent: HWND, inst: HINSTANCE, text: &str, id: i32) -> HWND {
-    unsafe {
-        let wide = to_wide(text);
-        CreateWindowExW(
-            Default::default(),
-            w!("BUTTON"),
-            PCWSTR(wide.as_ptr()),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            0,
-            0,
-            0,
-            0,
-            Some(parent),
-            Some(HMENU(id as usize as *mut _)),
-            Some(inst),
-            None,
-        )
-        .unwrap_or_default()
-    }
+    ctl(parent, inst, w!("BUTTON"), text, WS_TABSTOP, 0, 0, 0, 0, id)
 }
 
 fn dlg_item(h: HWND, id: i32) -> HWND {
@@ -375,23 +359,7 @@ fn dlg_item(h: HWND, id: i32) -> HWND {
 }
 
 fn combo(parent: HWND, inst: HINSTANCE, id: i32) -> HWND {
-    unsafe {
-        CreateWindowExW(
-            Default::default(),
-            w!("COMBOBOX"),
-            w!(""),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
-            0,
-            0,
-            0,
-            0,
-            Some(parent),
-            Some(HMENU(id as usize as *mut _)),
-            Some(inst),
-            None,
-        )
-        .unwrap_or_default()
-    }
+    ctl(parent, inst, w!("COMBOBOX"), "", WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST as u32), 0, 0, 0, 0, id)
 }
 
 fn combo_add(cb: HWND, text: &str) {
@@ -486,7 +454,6 @@ struct Geo {
     row1_y: i32,
     ocr_btn_y: i32,
     trans_btn_y: i32,
-    row2_y: i32,
 }
 
 fn geometry(h: HWND) -> Geo {
@@ -527,7 +494,7 @@ fn geometry(h: HWND) -> Geo {
     let detail_text = RECT { left: PAD, top: detail_top, right: PAD + text_w, bottom: area_bottom };
     let img_left = PAD + text_w + PAD;
     let img = RECT { left: img_left, top: detail_top, right: w - PAD, bottom: area_bottom };
-    Geo { recog, sp1, trans, sp2, detail_text, img, row1_y, ocr_btn_y, trans_btn_y, row2_y }
+    Geo { recog, sp1, trans, sp2, detail_text, img, row1_y, ocr_btn_y, trans_btn_y }
 }
 
 fn in_rect(r: &RECT, x: i32, y: i32) -> bool {

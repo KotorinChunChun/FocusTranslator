@@ -76,14 +76,14 @@ fn sample_bgr(img: &Captured, x: f32, y: f32) -> [f32; 3] {
         img.bgra[idx] as f32
     };
     let mut out = [0f32; 3];
-    for c in 0..3 {
+    for (c, out_val) in out.iter_mut().enumerate() {
         let v00 = px(x0, y0, c);
         let v10 = px(x1, y0, c);
         let v01 = px(x0, y1, c);
         let v11 = px(x1, y1, c);
         let top = v00 * (1.0 - fx) + v10 * fx;
         let bot = v01 * (1.0 - fx) + v11 * fx;
-        out[c] = top * (1.0 - fy) + bot * fy;
+        *out_val = top * (1.0 - fy) + bot * fy;
     }
     out
 }
@@ -274,10 +274,8 @@ fn run_rec(eng: &Engine, img: &Captured, b: &TextBox) -> Result<String, String> 
                 best_i = i;
             }
         }
-        if best_i != 0 && best_i as i64 != last_idx {
-            if let Some(ch) = eng.dict.get(best_i - 1) {
-                text.push_str(ch);
-            }
+        if best_i != 0 && best_i as i64 != last_idx && let Some(ch) = eng.dict.get(best_i - 1) {
+            text.push_str(ch);
         }
         last_idx = best_i as i64;
     }
