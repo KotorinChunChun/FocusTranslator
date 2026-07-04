@@ -34,11 +34,6 @@ pub struct Translated {
     pub detail: TransDetail,
 }
 
-/// ローカル翻訳モデルの有無 (%APPDATA%\FocusTranslator\models\onnx_translate\)
-pub fn local_model_available() -> bool {
-    crate::onnx_translate_install::installed()
-}
-
 /// 翻訳方向 (source, target) を決める。
 /// 基本は cfg.source_lang → cfg.target_lang。ただし原文がCJKを含み target=ja のときは
 /// ja→en へ反転(ローカルONNXが ja⇄en のみ対応のため実用的なヒューリスティック)。
@@ -129,7 +124,7 @@ fn translate_once(
     target: &str,
 ) -> Result<(String, TransDetail), String> {
     match engine {
-        "local" => translate_local(text, target).map(|t| (t, TransDetail::default())),
+        "local" => translate_local(cfg, text, target).map(|t| (t, TransDetail::default())),
         "deepl" => translate_deepl(cfg, text, target),
         "google" => translate_google(cfg, text, target),
         "gemini" => translate_gemini(cfg, text, source, target),
@@ -137,9 +132,10 @@ fn translate_once(
     }
 }
 
-/// ローカルONNX翻訳 (opus-mt-ja-en / opus-mt-en-jap, ort によるONNX Runtime推論)。
-fn translate_local(text: &str, target: &str) -> Result<String, String> {
-    crate::onnx_translate::translate(text, target == "ja")
+/// ローカルONNX翻訳 (Opus-MT / FuguMT / NLLB-200 のいずれか、ort によるONNX Runtime推論)。
+fn translate_local(cfg: &Config, text: &str, target: &str) -> Result<String, String> {
+    let variant = crate::onnx_translate_install::Variant::from_key(&cfg.local_model_variant);
+    crate::onnx_translate::translate(text, target == "ja", variant)
 }
 
 fn translate_deepl(cfg: &Config, text: &str, target: &str) -> Result<(String, TransDetail), String> {

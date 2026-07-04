@@ -42,6 +42,8 @@ pub struct Config {
     pub debug_mode: bool,
     /// 認識ログの保持上限件数
     pub log_max_records: u32,
+    /// ローカルONNX翻訳のモデル種別: "opus_mt" | "fugu_mt" | "nllb200"
+    pub local_model_variant: String,
 }
 
 /// Gemini翻訳プロンプトの既定値
@@ -77,6 +79,7 @@ impl Default for Config {
             log_enabled: false,
             debug_mode: false,
             log_max_records: 5000,
+            local_model_variant: "opus_mt".into(),
         }
     }
 }
@@ -133,7 +136,9 @@ impl Config {
             "yomitoku" => !self.yomitoku_url.trim().is_empty(),
             "ndl" => !self.ndl_url.trim().is_empty(),
             "gemini" => !self.gemini_key_enc.is_empty(),
-            "local" => crate::translate::local_model_available(),
+            "local" => crate::onnx_translate_install::installed(
+                crate::onnx_translate_install::Variant::from_key(&self.local_model_variant),
+            ),
             "deepl" => !self.deepl_key_enc.is_empty(),
             "google" => !self.google_key_enc.is_empty(),
             _ => false,

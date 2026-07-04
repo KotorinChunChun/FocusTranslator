@@ -59,6 +59,7 @@ const IDC_GPROMPT_TR: i32 = 131;
 const IDC_GPROMPT_OCR: i32 = 132;
 const IDC_GPROMPT_RESET: i32 = 133;
 const IDC_OPEN_LOG: i32 = 134;
+const IDC_ONNX_VARIANT: i32 = 135;
 
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
@@ -282,8 +283,10 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     label(h, inst, "既定翻訳エンジン", lx, y + 2, 150);
     combo(h, inst, cx, y, 150, IDC_TR);
     y += step;
-    // ローカルONNX翻訳 導入状況 + ワンクリックインストール (SPEC §7.2, §13)
-    label(h, inst, "ローカルONNX翻訳", lx, y + 2, 150);
+    // ローカルONNX翻訳 モデル選択 + 導入状況 + ワンクリックインストール (SPEC §7.2, §13)
+    label(h, inst, "ローカルONNX翻訳モデル", lx, y + 2, 150);
+    combo(h, inst, cx, y, 250, IDC_ONNX_VARIANT);
+    y += step;
     ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 140, 20, IDC_ONNX_STATUS);
     button(h, inst, "インストール", cx + 146, y - 2, 104, IDC_ONNX_INSTALL);
     y += step;
@@ -468,6 +471,16 @@ fn populate(h: HWND) {
     );
     combo_fill(h, IDC_SRCLANG, &LANGS, LANGS.iter().position(|k| *k == cfg.source_lang).unwrap_or(1));
     combo_fill(h, IDC_LANG, &LANGS, LANGS.iter().position(|k| *k == cfg.target_lang).unwrap_or(0));
+    let onnx_disp: Vec<&str> = crate::onnx_translate_install::Variant::ALL.iter().map(|v| v.display()).collect();
+    combo_fill(
+        h,
+        IDC_ONNX_VARIANT,
+        &onnx_disp,
+        crate::onnx_translate_install::Variant::ALL
+            .iter()
+            .position(|v| v.key() == cfg.local_model_variant)
+            .unwrap_or(0),
+    );
     set_text(h, IDC_DEEPL, &cfg.deepl_key());
     set_text(h, IDC_GOOGLE, &cfg.google_key());
     set_text(h, IDC_GEMINI, &cfg.gemini_key());
@@ -494,9 +507,15 @@ fn refresh_paddle_status(h: HWND) {
     }
 }
 
-/// ローカルONNX翻訳モデルの導入状況をステータス欄・ボタンに反映する
+/// 設定画面で現在選択中のローカル翻訳モデル種別
+fn selected_onnx_variant(h: HWND) -> crate::onnx_translate_install::Variant {
+    let all = crate::onnx_translate_install::Variant::ALL;
+    all[combo_sel(h, IDC_ONNX_VARIANT).min(all.len() - 1)]
+}
+
+/// ローカルONNX翻訳モデル(選択中の種別)の導入状況をステータス欄・ボタンに反映する
 fn refresh_onnx_status(h: HWND) {
-    let installed = crate::onnx_translate_install::installed();
+    let installed = crate::onnx_translate_install::installed(selected_onnx_variant(h));
     set_text(h, IDC_ONNX_STATUS, if installed { "導入済み" } else { "未導入" });
     unsafe {
         let _ = EnableWindow(get_dlg_item(h, IDC_ONNX_INSTALL), !installed);
@@ -504,7 +523,13 @@ fn refresh_onnx_status(h: HWND) {
 }
 
 /// インストールボタン押下時の共通処理: ボタン無効化→バックグラウンドDL→完了時に done_msg を通知
-fn start_install(h: HWND, status_id: i32, button_id: i32, done_msg: u32, install_fn: fn() -> Result<(), String>) {
+fn start_install(
+    h: HWND,
+    status_id: i32,
+    button_id: i32,
+    done_msg: u32,
+    install_fn: impl FnOnce() -> Result<(), String> + Send + 'static,
+) {
     unsafe {
         let _ = EnableWindow(get_dlg_item(h, button_id), false);
     }
@@ -573,6 +598,7 @@ fn save(h: HWND) {
     cfg.default_translator = TR_KEYS[combo_sel(h, IDC_TR).min(TR_KEYS.len() - 1)].to_string();
     cfg.source_lang = LANGS[combo_sel(h, IDC_SRCLANG).min(LANGS.len() - 1)].to_string();
     cfg.target_lang = LANGS[combo_sel(h, IDC_LANG).min(LANGS.len() - 1)].to_string();
+    cfg.local_model_variant = selected_onnx_variant(h).key().to_string();
     cfg.deepl_key_enc = util::dpapi_encrypt(get_text(h, IDC_DEEPL).trim());
     cfg.google_key_enc = util::dpapi_encrypt(get_text(h, IDC_GOOGLE).trim());
     cfg.gemini_key_enc = util::dpapi_encrypt(get_text(h, IDC_GEMINI).trim());
@@ -728,13 +754,20 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     );
                 }
                 IDC_ONNX_INSTALL => {
+                    let variant = selected_onnx_variant(h);
                     start_install(
                         h,
                         IDC_ONNX_STATUS,
                         IDC_ONNX_INSTALL,
                         WM_ONNX_DONE,
-                        crate::onnx_translate_install::install,
+                        move || crate::onnx_translate_install::install_variant(variant),
                     );
+                }
+                IDC_ONNX_VARIANT => {
+                    let notif = ((wparam.0 >> 16) & 0xFFFF) as u32;
+                    if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE {
+                        refresh_onnx_status(h);
+                    }
                 }
                 IDC_DEEPL_URL => open_url(h, DEEPL_KEY_URL),
                 IDC_GOOGLE_URL => open_url(h, GOOGLE_KEY_URL),
