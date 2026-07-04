@@ -7,8 +7,9 @@ use std::cell::RefCell;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLOR_BTNFACE, CreateFontW, DEFAULT_CHARSET,
-    DEFAULT_PITCH, DIB_RGB_COLORS, FF_DONTCARE, FW_NORMAL, HALFTONE, HBRUSH, InvalidateRect,
-    SetStretchBltMode, StretchDIBits,
+    DEFAULT_PITCH, DIB_RGB_COLORS, FF_DONTCARE, FW_NORMAL, GetMonitorInfoW, HALFTONE, HBRUSH,
+    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, SetStretchBltMode,
+    StretchDIBits,
 };
 use windows::Win32::UI::Controls::{
     INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
@@ -22,12 +23,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateWindowExW,
-    DefWindowProcW, DestroyWindow, GetClientRect, GetDlgItem, HMENU, IDC_ARROW,
-    IDC_SIZENS, IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW, SetCursor,
-    SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, SetWindowTextW, ShowWindow,
-    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_TOPMOST,
-    WS_HSCROLL, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    DefWindowProcW, DestroyWindow, GetClientRect, GetDlgItem, GetWindowRect, HMENU, IDC_ARROW,
+    IDC_SIZENS, IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW, SWP_NOACTIVATE,
+    SetCursor, SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, SetWindowPos,
+    SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR, WM_SIZE, WNDCLASSW,
+    WS_BORDER, WS_CHILD, WS_EX_TOPMOST, WS_HSCROLL, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -930,14 +932,58 @@ thread_local! {
     static IMG1: RefCell<Option<(u32, u32, Vec<u8>)>> = const { RefCell::new(None) };
     static IMG1_SCROLL: RefCell<(i32, i32)> = const { RefCell::new((0, 0)) };
     static IMG1_REGISTERED: RefCell<bool> = const { RefCell::new(false) };
+    static IMG1_HWND: RefCell<Option<isize>> = const { RefCell::new(None) };
 }
 
-/// 現在の画像を原寸(1:1)表示する別ウィンドウを開く
+/// 親ウィンドウの隣(画面に余裕がある方向)に配置する座標を計算する
+fn place_beside_parent(parent: HWND, cw: i32, ch: i32) -> (i32, i32) {
+    unsafe {
+        let mut prect = RECT::default();
+        let _ = GetWindowRect(parent, &mut prect);
+        let hmon = MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let _ = GetMonitorInfoW(hmon, &mut mi);
+        let work = mi.rcWork;
+        let space_right = work.right - prect.right;
+        let space_left = prect.left - work.left;
+        let y = prect.top.max(work.top).min((work.bottom - ch).max(work.top));
+        let x = if space_right >= space_left {
+            (prect.right).min(work.right - cw).max(work.left)
+        } else {
+            (prect.left - cw).max(work.left)
+        };
+        (x, y)
+    }
+}
+
+/// 現在の画像を原寸(1:1)表示する別ウィンドウを開く(既存があれば再利用し1つまでに制限)
 fn open_image_1to1(parent: HWND) {
     let img = STATE.with(|s| s.borrow().image.clone());
     let Some((iw, ih, _)) = img.as_ref().map(|(a, b, _)| (*a, *b, ())) else { return };
     IMG1.with(|c| *c.borrow_mut() = img);
     IMG1_SCROLL.with(|c| *c.borrow_mut() = (0, 0));
+
+    // 既存の1:1表示ウィンドウがあれば再利用する(2つ以上開かない)
+    let existing = IMG1_HWND.with(|c| *c.borrow());
+    if let Some(raw) = existing {
+        let h = HWND(raw as *mut _);
+        if unsafe { IsWindow(Some(h)) }.as_bool() {
+            let cw = (iw as i32 + 20).min(1400);
+            let ch = (ih as i32 + 40).min(900);
+            let (x, y) = place_beside_parent(parent, cw, ch);
+            unsafe {
+                let _ = SetWindowPos(h, None, x, y, cw, ch, SWP_NOACTIVATE);
+                let _ = InvalidateRect(Some(h), None, true);
+                let _ = ShowWindow(h, SW_SHOW);
+                let _ = SetForegroundWindow(h);
+            }
+            return;
+        }
+    }
+
     let inst = unsafe {
         HINSTANCE(
             windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
@@ -965,13 +1011,14 @@ fn open_image_1to1(parent: HWND) {
         // 画像サイズに合わせる(画面サイズにクランプ、スクロールバー付き)
         let cw = (iw as i32 + 20).min(1400);
         let ch = (ih as i32 + 40).min(900);
+        let (x, y) = place_beside_parent(parent, cw, ch);
         if let Ok(iwnd) = CreateWindowExW(
             WS_EX_TOPMOST,
             class,
             w!("画像 (原寸 1:1 / ホイール・矢印でスクロール)"),
             WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
+            x,
+            y,
             cw,
             ch,
             Some(parent),
@@ -979,6 +1026,7 @@ fn open_image_1to1(parent: HWND) {
             Some(inst),
             None,
         ) {
+            IMG1_HWND.with(|c| *c.borrow_mut() = Some(iwnd.0 as isize));
             let _ = ShowWindow(iwnd, SW_SHOW);
         }
     }
