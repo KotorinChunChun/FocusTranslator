@@ -36,7 +36,8 @@ src/
 ├── translate.rs 翻訳エンジン群 (DeepL / Google / Gemini / ローカル) + キャッシュ
 ├── overlay.rs   結果オーバーレイ (原文小・訳文大・チップ列、部分ヒットテスト)
 ├── region.rs    範囲指定モードの選択オーバーレイ
-├── settings.rs  設定画面 (ホットキー/エンジン/APIキー/URL/常駐/ログ)
+├── settings.rs  設定画面 (ホットキー/エンジン/APIキー[マスク表示]/URL/常駐/ログ/PaddleOCR導入)
+├── paddle_install.rs  PaddleOCR(RapidOCR配布ONNX)モデルのSHA256検証付きダウンロード
 ├── tray.rs      タスクトレイ常駐
 ├── config.rs    設定永続化 (%APPDATA%\FocusTranslator\config.json)
 └── util.rs      DPAPI暗号化、クリップボード、計測ログ
@@ -49,7 +50,7 @@ src/
 | Windows.Media.Ocr | OCR (既定) | ✅ 実装済み |
 | YomiToku / NDL-OCR | OCR (外部サーバー) | ✅ HTTPクライアント実装済み (`POST /ocr`, `GET /health`) |
 | Gemini | OCR+翻訳統合 | ✅ 実装済み (画像→原文+訳文一括) |
-| PaddleOCR | OCR | ⏳ スキャフォールドのみ (モデル未同梱のためチップはグレーアウト) |
+| PaddleOCR | OCR | ⏳ モデル導入(設定画面からワンクリックDL+SHA256検証、[paddle_install.rs](src/paddle_install.rs))は実装済み。ONNX Runtime推論は次版 |
 | DeepL / Google / Gemini | 翻訳 | ✅ 実装済み (REST) |
 | ローカルONNX翻訳 | 翻訳 (既定) | ⏳ モデル配布基盤が未整備のため推論は次版。未導入時はエラー表示し、クラウドエンジンへの切替を案内 |
 
@@ -60,8 +61,14 @@ src/
 - 既定構成 (Windows OCR + ローカル翻訳) では外部送信なし。
 - クラウド/外部サーバーエンジンの初回利用時に送信種別ごと(テキスト/画像/外部OCRサーバー)の同意ダイアログを表示。`127.0.0.1` へのサーバーURLはローカル送信として扱う。
 - 同意なしにホールドモードの既定エンジンが外部送信することはない(未同意時はローカルエンジンへ自動代替)。
-- APIキーは DPAPI で暗号化して保存。キー・送信テキスト・画像はログに出さない。
+- APIキーは DPAPI で暗号化して保存。キー・送信テキスト・画像はログに出さない。設定画面の入力欄も ● でマスク表示。
 - 計測ログ(設定で有効化)はステージ別所要時間のみ記録。
+
+## PaddleOCRモデルの導入
+
+設定画面の「PaddleOCR」行で導入状況を確認でき、未導入時は「インストール」ボタンでワンクリック導入できる。
+配布元は [RapidAI/RapidOCR](https://github.com/RapidAI/RapidOCR)(ModelScope)公開の PP-OCRv4 mobile 版 ONNX(検出/日本語認識/辞書の3ファイル、計約14MB)。ダウンロード後にSHA256を検証し、一致した場合のみ `%APPDATA%\FocusTranslator\models\paddleocr\` に配置する(不一致時は破棄しエラー表示)。
+推論(ONNX Runtime連携)自体は次版対応で、導入済みの状態でPaddleOCRチップを選択すると「推論は未実装です」と表示される。
 
 ## 実測値 (開発環境でのスモークテスト)
 
@@ -71,7 +78,7 @@ src/
 ## SPECからの逸脱・未実装事項
 
 - **ローカルONNX翻訳の推論** (M3): モデル選定・配布(チェックサム検証付きダウンロード)が前提のため次版。エンジン基盤・キャッシュ・フォールバック(クラウド失敗→local バッジ)は実装済み。
-- **PaddleOCR** (M0): 同上。
+- **PaddleOCR** (M0): モデル導入(ダウンロード+チェックサム検証)は実装済み。推論(ONNX Runtime)は次版。
 - **行矩形逸脱の監視**: UIAの行矩形ではなくカーソル移動距離(48px)で再認識をトリガする簡易実装。
 - **候補展開・解説ボタン** (SPEC §10): 初版UIでは未実装(コピー・閉じる・チップ切替は実装済み)。
 - **自動更新・インストーラ** (SPEC §13): 未実装(単一EXE配布)。

@@ -10,14 +10,17 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
 };
+use windows::Win32::UI::Controls::EM_SETPASSWORDCHAR;
+use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
     CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, ES_AUTOHSCROLL, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW,
-    IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_OK, MB_YESNO, MessageBoxW, PostMessageW,
-    RegisterClassW, SW_SHOW, SendMessageW, SetForegroundWindow, ShowWindow, WINDOW_STYLE,
-    WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_EX_TOPMOST, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    DestroyWindow, ES_AUTOHSCROLL, ES_PASSWORD, GetWindowTextLengthW,
+    GetWindowTextW, HMENU, IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_OK,
+    MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SW_SHOW, SendMessageW,
+    SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
@@ -40,6 +43,13 @@ const IDC_SAVE: i32 = 116;
 const IDC_CLOSE: i32 = 117;
 const IDC_TEST_YOMI: i32 = 118;
 const IDC_TEST_NDL: i32 = 119;
+const IDC_PADDLE_STATUS: i32 = 120;
+const IDC_PADDLE_INSTALL: i32 = 121;
+
+/// PaddleOCRインストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
+const WM_PADDLE_DONE: u32 = WM_APP + 10;
+/// ● (U+25CF): APIキー入力欄のマスク文字
+const PASSWORD_CHAR: usize = 0x25CF;
 
 const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
 const OCR_KEYS: [&str; 5] = ["win", "paddle", "yomitoku", "ndl", "gemini"];
@@ -96,7 +106,7 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             520,
-            600,
+            636,
             None,
             None,
             Some(instance),
@@ -152,6 +162,26 @@ fn edit(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32) -> H
     )
 }
 
+/// APIキー入力欄。安全のため ● でマスク表示する(内部の実値はそのまま保持される)
+fn password_edit(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32) -> HWND {
+    let h = ctl(
+        parent,
+        instance,
+        w!("EDIT"),
+        "",
+        WS_BORDER | WS_TABSTOP | WINDOW_STYLE((ES_AUTOHSCROLL | ES_PASSWORD) as u32),
+        x,
+        y,
+        w,
+        22,
+        id,
+    );
+    unsafe {
+        SendMessageW(h, EM_SETPASSWORDCHAR, Some(WPARAM(PASSWORD_CHAR)), Some(LPARAM(0)));
+    }
+    h
+}
+
 fn combo(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32) -> HWND {
     ctl(
         parent,
@@ -205,6 +235,11 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     label(h, inst, "既定OCRエンジン", lx, y + 2, 150);
     combo(h, inst, cx, y, 150, IDC_OCR);
     y += step;
+    // PaddleOCR 導入状況 + ワンクリックインストール (SPEC §7.1, §13)
+    label(h, inst, "PaddleOCR", lx, y + 2, 150);
+    ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 140, 20, IDC_PADDLE_STATUS);
+    button(h, inst, "インストール", cx + 146, y - 2, 104, IDC_PADDLE_INSTALL);
+    y += step;
     label(h, inst, "既定翻訳エンジン", lx, y + 2, 150);
     combo(h, inst, cx, y, 150, IDC_TR);
     y += step;
@@ -212,13 +247,13 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     combo(h, inst, cx, y, 80, IDC_LANG);
     y += step;
     label(h, inst, "DeepL APIキー", lx, y + 2, 150);
-    edit(h, inst, cx, y, cw, IDC_DEEPL);
+    password_edit(h, inst, cx, y, cw, IDC_DEEPL);
     y += step;
     label(h, inst, "Google APIキー", lx, y + 2, 150);
-    edit(h, inst, cx, y, cw, IDC_GOOGLE);
+    password_edit(h, inst, cx, y, cw, IDC_GOOGLE);
     y += step;
     label(h, inst, "Gemini APIキー", lx, y + 2, 150);
-    edit(h, inst, cx, y, cw, IDC_GEMINI);
+    password_edit(h, inst, cx, y, cw, IDC_GEMINI);
     y += step;
     label(h, inst, "Geminiモデル", lx, y + 2, 150);
     edit(h, inst, cx, y, cw, IDC_GMODEL);
@@ -373,6 +408,16 @@ fn populate(h: HWND) {
     set_text(h, IDC_NDL, &cfg.ndl_url);
     check_set(h, IDC_AUTOSTART, cfg.autostart);
     check_set(h, IDC_PERFLOG, cfg.perf_log);
+    refresh_paddle_status(h);
+}
+
+/// PaddleOCRの導入状況をステータス欄・ボタンに反映する
+fn refresh_paddle_status(h: HWND) {
+    let installed = crate::paddle_install::installed();
+    set_text(h, IDC_PADDLE_STATUS, if installed { "導入済み" } else { "未導入" });
+    unsafe {
+        let _ = EnableWindow(get_dlg_item(h, IDC_PADDLE_INSTALL), !installed);
+    }
 }
 
 fn save(h: HWND) {
@@ -520,6 +565,28 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         );
                     }
                 }
+                IDC_PADDLE_INSTALL => {
+                    unsafe {
+                        let _ = EnableWindow(get_dlg_item(h, IDC_PADDLE_INSTALL), false);
+                    }
+                    set_text(h, IDC_PADDLE_STATUS, "ダウンロード中…");
+                    let hwnd_isize = h.0 as isize;
+                    std::thread::spawn(move || {
+                        let result = crate::paddle_install::install();
+                        let (w, l) = match result {
+                            Ok(()) => (1usize, 0isize),
+                            Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
+                        };
+                        unsafe {
+                            let _ = PostMessageW(
+                                Some(HWND(hwnd_isize as *mut _)),
+                                WM_PADDLE_DONE,
+                                WPARAM(w),
+                                LPARAM(l),
+                            );
+                        }
+                    });
+                }
                 IDC_TEST_YOMI | IDC_TEST_NDL => {
                     let url =
                         get_text(h, if id == IDC_TEST_YOMI { IDC_YOMI } else { IDC_NDL });
@@ -543,6 +610,27 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     }
                 }
                 _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_PADDLE_DONE => {
+            if wparam.0 == 1 {
+                refresh_paddle_status(h);
+                unsafe {
+                    MessageBoxW(
+                        Some(h),
+                        w!("PaddleOCRのモデルをインストールしました。"),
+                        w!("Focus Translator"),
+                        MB_OK | MB_ICONINFORMATION,
+                    );
+                }
+            } else {
+                let msg = unsafe { *Box::from_raw(lparam.0 as *mut String) };
+                refresh_paddle_status(h);
+                unsafe {
+                    let wide = to_wide(&msg);
+                    MessageBoxW(Some(h), PCWSTR(wide.as_ptr()), w!("インストールエラー"), MB_OK);
+                }
             }
             LRESULT(0)
         }

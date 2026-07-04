@@ -104,7 +104,7 @@ impl Config {
     pub fn engine_available(&self, key: &str) -> bool {
         match key {
             "win" => true,
-            "paddle" => false, // 初版はモデル未同梱のため無効
+            "paddle" => crate::paddle_install::installed(),
             "yomitoku" => !self.yomitoku_url.trim().is_empty(),
             "ndl" => !self.ndl_url.trim().is_empty(),
             "gemini" => !self.gemini_key_enc.is_empty(),

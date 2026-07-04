@@ -1,6 +1,6 @@
 // OCR エンジン群 (SPEC §7.1)
 // - win:      Windows.Media.Ocr (既定・ローカル)
-// - paddle:   PaddleOCR (初版はモデル未同梱のためスキャフォールドのみ)
+// - paddle:   PaddleOCR (モデル導入は paddle_install 参照。ONNX Runtime推論は次版対応)
 // - yomitoku / ndl: 外部OCRサーバー (HTTP POST /ocr, GET /health)
 // - gemini:   OCR+翻訳統合 (画像→原文+訳文を一括取得)
 use crate::capture::Captured;
@@ -22,7 +22,13 @@ pub struct OcrOutput {
 pub fn run(engine: &str, cfg: &Config, img: &Captured, focus_y: Option<f32>) -> Result<OcrOutput, String> {
     match engine {
         "win" => ocr_windows(img, focus_y).map(|t| OcrOutput { text: t, translation: None }),
-        "paddle" => Err("PaddleOCR は初版ではモデル未同梱のため利用できません".into()),
+        "paddle" => {
+            if crate::paddle_install::installed() {
+                Err("PaddleOCRの推論は未実装です(次版で対応)".into())
+            } else {
+                Err("PaddleOCRのモデルが未導入です。設定画面からインストールしてください".into())
+            }
+        }
         "yomitoku" => {
             ocr_http(&cfg.yomitoku_url, img).map(|t| OcrOutput { text: t, translation: None })
         }

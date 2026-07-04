@@ -7,6 +7,7 @@ mod capture;
 mod config;
 mod ocr;
 mod overlay;
+mod paddle_install;
 mod region;
 mod settings;
 mod translate;
@@ -516,7 +517,7 @@ fn handle_chip(id: usize) {
 
 fn engine_unavailable_msg(key: &str) -> String {
     match key {
-        "paddle" => "PaddleOCR は初版では利用できません".into(),
+        "paddle" => "PaddleOCRのモデルが未導入です。設定画面からインストールしてください".into(),
         "local" => "ローカル翻訳モデルが未導入です(設定画面を確認)".into(),
         "yomitoku" | "ndl" => {
             "サーバーURLが未設定です。設定画面で接続テストを実行してください".into()
