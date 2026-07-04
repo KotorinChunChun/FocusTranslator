@@ -13,9 +13,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::Controls::{
     INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
-    LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVS_EX_FULLROWSELECT,
-    LVS_REPORT, LVS_SINGLESEL, NMHDR,
+    LVIF_STATE, LVIF_TEXT, LVITEMW, LIST_VIEW_ITEM_STATE_FLAGS, LVM_DELETEALLITEMS, LVM_GETNEXTITEM,
+    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW,
+    LVM_SETITEMW, LVM_ENSUREVISIBLE, LVN_ITEMCHANGED, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SINGLESEL,
+    NMHDR,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, ReleaseCapture, SetCapture,
@@ -407,20 +408,19 @@ fn layout(h: HWND) {
         mv(IDC_BTN_REFRESH, w - (bw + gap) * 2 - PAD, y1, bw, BTN_H);
         mv(IDC_BTN_CLEAR, w - (bw + gap) - PAD, y1, bw + 8, BTN_H);
 
-        // 下段ボタン行(再OCR/再翻訳/削除)
-        let y2 = g.row2_y;
+        // OCR結果リスト直下: 再OCR・削除ボタン行
+        let y_ocr_btn = g.ocr_btn_y;
         let cbw = 110;
         let mut x = PAD;
-        mv(IDC_OCR_COMBO, x, y2, cbw, 200);
+        mv(IDC_OCR_COMBO, x, y_ocr_btn, cbw, 200);
         x += cbw + 4;
-        mv(IDC_BTN_REOCR, x, y2, 80, BTN_H);
-        x += 80 + gap * 2;
-        mv(IDC_TR_COMBO, x, y2, cbw, 200);
-        x += cbw + 4;
-        mv(IDC_BTN_RETRANS, x, y2, 80, BTN_H);
-        // 右寄せ: 選択削除2種
-        mv(IDC_BTN_DEL_RECOG, w - (110 + gap) * 2 - PAD, y2, 110, BTN_H);
-        mv(IDC_BTN_DEL_TRANS, w - 110 - PAD, y2, 110, BTN_H);
+        mv(IDC_BTN_REOCR, x, y_ocr_btn, 80, BTN_H);
+        x += 80 + gap;
+        mv(IDC_BTN_DEL_RECOG, x, y_ocr_btn, 110, BTN_H);
+        // 右寄せ: 再翻訳関連
+        mv(IDC_TR_COMBO, w - (cbw + 80 + 110 + gap * 3) - PAD, y_ocr_btn, cbw, 200);
+        mv(IDC_BTN_RETRANS, w - (80 + 110 + gap * 2) - PAD, y_ocr_btn, 80, BTN_H);
+        mv(IDC_BTN_DEL_TRANS, w - 110 - PAD, y_ocr_btn, 110, BTN_H);
     }
 }
 
@@ -437,6 +437,7 @@ struct Geo {
     detail_text: RECT,
     img: RECT,
     row1_y: i32,
+    ocr_btn_y: i32,
     row2_y: i32,
 }
 
@@ -457,20 +458,27 @@ fn geometry(h: HWND) -> Geo {
     let area_bottom = row1_y - PAD;
     let area_h = (area_bottom - area_top).max(60);
 
-    let a = area_top + (area_h as f32 * split_a) as i32;
-    let b = area_top + (area_h as f32 * split_b) as i32;
+    // OCR結果リストの底 + ボタンエリア
+    let recog_bottom = area_top + (area_h as f32 * split_a) as i32;
+    let ocr_btn_y = recog_bottom + PAD;
+    let sp1_top = ocr_btn_y + BTN_H + PAD;
+
+    // 翻訳結果リストの計算(split_bはarea_topからの相対位置)
+    let trans_bottom = area_top + (area_h as f32 * split_b) as i32;
+    let sp2_top = trans_bottom;
+    let detail_top = sp2_top + SPLITTER;
+
     let lw = w - PAD * 2;
 
-    let recog = RECT { left: PAD, top: area_top, right: PAD + lw, bottom: a };
-    let sp1 = RECT { left: PAD, top: a, right: PAD + lw, bottom: a + SPLITTER };
-    let trans = RECT { left: PAD, top: a + SPLITTER, right: PAD + lw, bottom: b };
-    let sp2 = RECT { left: PAD, top: b, right: PAD + lw, bottom: b + SPLITTER };
-    let detail_top = b + SPLITTER;
+    let recog = RECT { left: PAD, top: area_top, right: PAD + lw, bottom: recog_bottom };
+    let sp1 = RECT { left: PAD, top: sp1_top, right: PAD + lw, bottom: sp1_top + SPLITTER };
+    let trans = RECT { left: PAD, top: sp1_top + SPLITTER, right: PAD + lw, bottom: trans_bottom };
+    let sp2 = RECT { left: PAD, top: sp2_top, right: PAD + lw, bottom: sp2_top + SPLITTER };
     let text_w = (w as f32 * 0.60) as i32 - PAD;
     let detail_text = RECT { left: PAD, top: detail_top, right: PAD + text_w, bottom: area_bottom };
     let img_left = PAD + text_w + PAD;
     let img = RECT { left: img_left, top: detail_top, right: w - PAD, bottom: area_bottom };
-    Geo { recog, sp1, trans, sp2, detail_text, img, row1_y, row2_y }
+    Geo { recog, sp1, trans, sp2, detail_text, img, row1_y, ocr_btn_y, row2_y }
 }
 
 fn in_rect(r: &RECT, x: i32, y: i32) -> bool {
@@ -534,6 +542,20 @@ fn lv_selected(lvh: HWND) -> Option<usize> {
             Some(LPARAM(LVNI_SELECTED as isize)),
         );
         if r.0 < 0 { None } else { Some(r.0 as usize) }
+    }
+}
+
+fn lv_select(lvh: HWND, idx: i32) {
+    unsafe {
+        let mut item = LVITEMW {
+            mask: LVIF_STATE,
+            iItem: idx,
+            state: LIST_VIEW_ITEM_STATE_FLAGS(0x0003),  // LVIS_SELECTED | LVIS_FOCUSED
+            stateMask: LIST_VIEW_ITEM_STATE_FLAGS(0x0003),
+            ..Default::default()
+        };
+        SendMessageW(lvh, LVM_SETITEMW, Some(WPARAM(0)), Some(LPARAM(&mut item as *mut _ as isize)));
+        SendMessageW(lvh, LVM_ENSUREVISIBLE, Some(WPARAM(idx as usize)), Some(LPARAM(0)));
     }
 }
 
@@ -1195,7 +1217,21 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             unsafe { DefWindowProcW(h, msg, wparam, lparam) }
         }
         WM_APP_RELOAD => {
+            // 再OCR/再翻訳後のリロード: 前の選択アイテムを復元する
+            let sel_recog_before = STATE.with(|s| s.borrow().sel_recog);
             reload();
+            // 前の選択インデックスを復元(アイテムが削除されている可能性も考慮)
+            if let Some(old_idx) = sel_recog_before {
+                let recog_lv = dlg_item(h, IDC_RECOG_LV);
+                let count = unsafe {
+                    SendMessageW(recog_lv, windows::Win32::UI::Controls::LVM_GETITEMCOUNT, Some(WPARAM(0)), Some(LPARAM(0))).0 as i32
+                };
+                if count > 0 {
+                    let new_idx = if (old_idx as i32) < count { old_idx } else { 0 };
+                    lv_select(recog_lv, new_idx as i32);
+                    on_recog_selected(new_idx);
+                }
+            }
             LRESULT(0)
         }
         WM_NOTIFY => {
@@ -1250,6 +1286,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 IDC_BTN_REOCR => start_reocr(h),
                 IDC_BTN_RETRANS => start_retranslate(h),
                 IDC_BTN_DEL_RECOG => {
+                    let sel_idx = STATE.with(|s| s.borrow().sel_recog);
                     let id = STATE.with(|s| {
                         let st = s.borrow();
                         st.sel_recog.and_then(|i| st.recogs.get(i)).map(|r| r.id)
@@ -1257,19 +1294,43 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     if let Some(id) = id {
                         logdb::delete_recognition(id);
                         reload();
+                        // 削除後、次のアイテムをフォーカス
+                        if let Some(old_idx) = sel_idx {
+                            let recog_lv = dlg_item(h, IDC_RECOG_LV);
+                            let count = unsafe {
+                                SendMessageW(recog_lv, windows::Win32::UI::Controls::LVM_GETITEMCOUNT, Some(WPARAM(0)), Some(LPARAM(0))).0 as i32
+                            };
+                            let new_idx = if (old_idx as i32) < count { old_idx } else if count > 0 { (count - 1) as usize } else { 0 };
+                            if count > 0 && (new_idx as i32) < count {
+                                lv_select(recog_lv, new_idx as i32);
+                                on_recog_selected(new_idx);
+                            }
+                        }
                     }
                 }
                 IDC_BTN_DEL_TRANS => {
-                    let (tid, recog_idx) = STATE.with(|s| {
+                    let (tid, recog_idx, sel_trans_idx) = STATE.with(|s| {
                         let st = s.borrow();
                         let tid = st.sel_trans.and_then(|i| st.trans.get(i)).map(|t| t.id);
-                        (tid, st.sel_recog)
+                        (tid, st.sel_recog, st.sel_trans)
                     });
                     if let Some(tid) = tid {
                         logdb::delete_translation(tid);
                         // 翻訳候補一覧だけ更新
                         if let Some(idx) = recog_idx {
                             on_recog_selected(idx);
+                            // 削除後、次のアイテムをフォーカス
+                            if let Some(old_idx) = sel_trans_idx {
+                                let trans_lv = dlg_item(h, IDC_TRANS_LV);
+                                let count = unsafe {
+                                    SendMessageW(trans_lv, windows::Win32::UI::Controls::LVM_GETITEMCOUNT, Some(WPARAM(0)), Some(LPARAM(0))).0 as i32
+                                };
+                                let new_idx = if (old_idx as i32) < count { old_idx } else if count > 0 { (count - 1) as usize } else { 0 };
+                                if count > 0 && (new_idx as i32) < count {
+                                    lv_select(trans_lv, new_idx as i32);
+                                    on_trans_selected(new_idx);
+                                }
+                            }
                         }
                     }
                 }
