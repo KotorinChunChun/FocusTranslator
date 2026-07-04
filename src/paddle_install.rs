@@ -1,7 +1,7 @@
 // PaddleOCR (RapidOCR配布 ONNX) モデルの導入確認とワンクリックインストール (SPEC §7.1, §13)
 // 検出/認識/辞書の3ファイルを SHA256 検証のうえダウンロードする。
 // 配布元: RapidAI/RapidOCR (ModelScope, PP-OCRv4 mobile)。日本語+ラテン文字の横書きを想定。
-// ONNX Runtime による推論本体は未実装(次版対応)。ここではモデル導入までを担う。
+// ONNX Runtime による推論本体は paddle_ocr モジュールを参照。ここではモデル導入までを担う。
 use crate::util;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
@@ -34,7 +34,7 @@ const FILES: [ModelFile; 3] = [
     },
 ];
 
-fn dir() -> PathBuf {
+pub fn dir() -> PathBuf {
     util::config_dir().join("models").join("paddleocr")
 }
 
