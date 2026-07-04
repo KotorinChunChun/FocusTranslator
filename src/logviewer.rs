@@ -16,15 +16,18 @@ use windows::Win32::UI::Controls::{
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVN_ITEMCHANGED, LVS_EX_FULLROWSELECT,
     LVS_REPORT, LVS_SINGLESEL, NMHDR,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, ReleaseCapture, SetCapture,
+};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
-    GetDlgItem, HMENU, IDC_ARROW, IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO,
-    MessageBoxW, SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, SetWindowTextW,
-    ShowWindow, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_NOTIFY, WM_SIZE, WNDCLASSW,
-    WS_BORDER, WS_CHILD, WS_EX_TOPMOST, WS_HSCROLL, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
-    WS_VSCROLL,
+    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateWindowExW,
+    DefWindowProcW, DestroyWindow, GetClientRect, GetDlgItem, HMENU, IDC_ARROW,
+    IDC_SIZENS, IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW, SetCursor,
+    SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, SetWindowTextW, ShowWindow,
+    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_TOPMOST,
+    WS_HSCROLL, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -37,6 +40,31 @@ const IDC_BTN_RES: i32 = 212;
 const IDC_BTN_IMG: i32 = 213;
 const IDC_BTN_REFRESH: i32 = 214;
 const IDC_BTN_CLEAR: i32 = 215;
+const IDC_OCR_COMBO: i32 = 220;
+const IDC_TR_COMBO: i32 = 221;
+const IDC_BTN_REOCR: i32 = 222;
+const IDC_BTN_RETRANS: i32 = 223;
+const IDC_BTN_DEL_RECOG: i32 = 224;
+const IDC_BTN_DEL_TRANS: i32 = 225;
+
+/// 再OCR/再翻訳のワーカースレッド完了通知(ビューア限定メッセージ)
+const WM_APP_RELOAD: u32 = WM_APP + 30;
+
+/// 再OCRエンジン(内部キー / 表示名)
+const OCR_ENGINES: [(&str, &str); 5] = [
+    ("win", "Windows OCR"),
+    ("paddle", "PaddleOCR"),
+    ("yomitoku", "YomiToku"),
+    ("ndl", "NDL-OCR"),
+    ("gemini", "Gemini"),
+];
+/// 再翻訳エンジン(内部キー / 表示名)
+const TR_ENGINES: [(&str, &str); 4] = [
+    ("local", "ローカルONNX"),
+    ("deepl", "DeepL"),
+    ("google", "Google"),
+    ("gemini", "Gemini"),
+];
 
 #[derive(Clone, Copy, PartialEq)]
 enum DetailView {
@@ -53,6 +81,11 @@ struct State {
     detail_view: DetailView,
     /// 現在表示中画像のデコード済みRGBA (幅, 高さ, ピクセル)
     image: Option<(u32, u32, Vec<u8>)>,
+    /// 認識/翻訳境界の上部エリアに対する累積比率
+    split_a: f32,
+    split_b: f32,
+    /// スプリッタードラッグ中(1=認識/翻訳境界, 2=翻訳/詳細境界)
+    dragging: u8,
 }
 
 thread_local! {
@@ -61,6 +94,7 @@ thread_local! {
     static STATE: RefCell<State> = const { RefCell::new(State {
         recogs: Vec::new(), trans: Vec::new(), sel_recog: None, sel_trans: None,
         detail_view: DetailView::Text, image: None,
+        split_a: 0.38, split_b: 0.66, dragging: 0,
     }) };
 }
 
@@ -224,6 +258,24 @@ fn build(h: HWND, inst: HINSTANCE) {
     btn(h, inst, "最新に更新", IDC_BTN_REFRESH);
     btn(h, inst, "ログを全削除", IDC_BTN_CLEAR);
 
+    // 下段: 再OCR/再翻訳エンジンのコンボと実行ボタン、選択削除
+    let ocr_combo = combo(h, inst, IDC_OCR_COMBO);
+    for (_, disp) in OCR_ENGINES {
+        combo_add(ocr_combo, disp);
+    }
+    combo_set(ocr_combo, 0);
+    btn(h, inst, "再OCR", IDC_BTN_REOCR);
+
+    let tr_combo = combo(h, inst, IDC_TR_COMBO);
+    for (_, disp) in TR_ENGINES {
+        combo_add(tr_combo, disp);
+    }
+    combo_set(tr_combo, 0);
+    btn(h, inst, "再翻訳", IDC_BTN_RETRANS);
+
+    btn(h, inst, "選択した認識を削除", IDC_BTN_DEL_RECOG);
+    btn(h, inst, "選択した翻訳を削除", IDC_BTN_DEL_TRANS);
+
     // フォント適用
     unsafe {
         let font = CreateFontW(
@@ -277,23 +329,53 @@ fn dlg_item(h: HWND, id: i32) -> HWND {
     unsafe { GetDlgItem(Some(h), id).unwrap_or_default() }
 }
 
+fn combo(parent: HWND, inst: HINSTANCE, id: i32) -> HWND {
+    unsafe {
+        CreateWindowExW(
+            Default::default(),
+            w!("COMBOBOX"),
+            w!(""),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
+            0,
+            0,
+            0,
+            0,
+            Some(parent),
+            Some(HMENU(id as usize as *mut _)),
+            Some(inst),
+            None,
+        )
+        .unwrap_or_default()
+    }
+}
+
+fn combo_add(cb: HWND, text: &str) {
+    unsafe {
+        let wide = to_wide(text);
+        SendMessageW(cb, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide.as_ptr() as isize)));
+    }
+}
+
+fn combo_set(cb: HWND, idx: usize) {
+    unsafe {
+        SendMessageW(cb, CB_SETCURSEL, Some(WPARAM(idx)), Some(LPARAM(0)));
+    }
+}
+
+fn combo_sel(h: HWND, id: i32) -> usize {
+    unsafe {
+        let r = SendMessageW(dlg_item(h, id), CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
+        if r.0 < 0 { 0 } else { r.0 as usize }
+    }
+}
+
 /// ウィンドウサイズに合わせて子コントロールを配置
 fn layout(h: HWND) {
     unsafe {
         let mut rc = RECT::default();
         let _ = GetClientRect(h, &mut rc);
         let w = rc.right;
-        let ht = rc.bottom;
-        let pad = 8;
-        let btn_h = 28;
-        let btn_row_y = ht - btn_h - pad;
-        // 3段: 認識(上) 30%、翻訳(中) 25%、詳細(下) 残り
-        let recog_h = (ht as f32 * 0.30) as i32;
-        let trans_h = (ht as f32 * 0.25) as i32;
-        let detail_top = pad + recog_h + pad + trans_h + pad;
-        let detail_h = (btn_row_y - pad) - detail_top;
-        // 詳細は左テキスト60% / 右画像40%
-        let detail_text_w = (w as f32 * 0.60) as i32 - pad;
+        let g = geometry(h);
 
         let mv = |id: i32, x: i32, y: i32, cw: i32, ch: i32| {
             let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
@@ -306,21 +388,91 @@ fn layout(h: HWND) {
                 windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
             );
         };
-        mv(IDC_RECOG_LV, pad, pad, w - pad * 2, recog_h);
-        mv(IDC_TRANS_LV, pad, pad + recog_h + pad, w - pad * 2, trans_h);
-        mv(IDC_DETAIL, pad, detail_top, detail_text_w, detail_h.max(20));
-        // 画像領域は WM_PAINT で描くのでコントロールは無し(右側の座標は paint で参照)
+        let rh = |r: &RECT| r.bottom - r.top;
+        mv(IDC_RECOG_LV, g.recog.left, g.recog.top, w - PAD * 2, rh(&g.recog));
+        mv(IDC_TRANS_LV, g.trans.left, g.trans.top, w - PAD * 2, rh(&g.trans));
+        mv(IDC_DETAIL, g.detail_text.left, g.detail_text.top, g.detail_text.right - g.detail_text.left, rh(&g.detail_text).max(20));
+        // 画像領域は WM_PAINT で描く(座標は geometry の img を参照)
 
-        let by = btn_row_y;
+        // 上段ボタン行(表示切替・画像)
         let bw = 96;
         let gap = 6;
-        mv(IDC_BTN_SRC, pad, by, bw, btn_h);
-        mv(IDC_BTN_REQ, pad + (bw + gap), by, bw, btn_h);
-        mv(IDC_BTN_RES, pad + (bw + gap) * 2, by, bw, btn_h);
-        mv(IDC_BTN_IMG, pad + (bw + gap) * 3, by, bw, btn_h);
-        mv(IDC_BTN_REFRESH, w - (bw + gap) * 2 - pad, by, bw, btn_h);
-        mv(IDC_BTN_CLEAR, w - (bw + gap) - pad, by, bw + 8, btn_h);
+        let y1 = g.row1_y;
+        mv(IDC_BTN_SRC, PAD, y1, bw, BTN_H);
+        mv(IDC_BTN_REQ, PAD + (bw + gap), y1, bw, BTN_H);
+        mv(IDC_BTN_RES, PAD + (bw + gap) * 2, y1, bw, BTN_H);
+        mv(IDC_BTN_IMG, PAD + (bw + gap) * 3, y1, bw, BTN_H);
+        mv(IDC_BTN_REFRESH, w - (bw + gap) * 2 - PAD, y1, bw, BTN_H);
+        mv(IDC_BTN_CLEAR, w - (bw + gap) - PAD, y1, bw + 8, BTN_H);
+
+        // 下段ボタン行(再OCR/再翻訳/削除)
+        let y2 = g.row2_y;
+        let cbw = 110;
+        let mut x = PAD;
+        mv(IDC_OCR_COMBO, x, y2, cbw, 200);
+        x += cbw + 4;
+        mv(IDC_BTN_REOCR, x, y2, 80, BTN_H);
+        x += 80 + gap * 2;
+        mv(IDC_TR_COMBO, x, y2, cbw, 200);
+        x += cbw + 4;
+        mv(IDC_BTN_RETRANS, x, y2, 80, BTN_H);
+        // 右寄せ: 選択削除2種
+        mv(IDC_BTN_DEL_RECOG, w - (110 + gap) * 2 - PAD, y2, 110, BTN_H);
+        mv(IDC_BTN_DEL_TRANS, w - 110 - PAD, y2, 110, BTN_H);
     }
+}
+
+const PAD: i32 = 8;
+const BTN_H: i32 = 28;
+const SPLITTER: i32 = 6;
+
+/// 各領域の矩形(レイアウト・描画・ヒットテストで共有)
+struct Geo {
+    recog: RECT,
+    sp1: RECT,
+    trans: RECT,
+    sp2: RECT,
+    detail_text: RECT,
+    img: RECT,
+    row1_y: i32,
+    row2_y: i32,
+}
+
+fn geometry(h: HWND) -> Geo {
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = GetClientRect(h, &mut rc);
+    }
+    let w = rc.right;
+    let ht = rc.bottom;
+    let (split_a, split_b) = STATE.with(|s| {
+        let st = s.borrow();
+        (st.split_a, st.split_b)
+    });
+    let row2_y = ht - BTN_H - PAD;
+    let row1_y = row2_y - BTN_H - 4;
+    let area_top = PAD;
+    let area_bottom = row1_y - PAD;
+    let area_h = (area_bottom - area_top).max(60);
+
+    let a = area_top + (area_h as f32 * split_a) as i32;
+    let b = area_top + (area_h as f32 * split_b) as i32;
+    let lw = w - PAD * 2;
+
+    let recog = RECT { left: PAD, top: area_top, right: PAD + lw, bottom: a };
+    let sp1 = RECT { left: PAD, top: a, right: PAD + lw, bottom: a + SPLITTER };
+    let trans = RECT { left: PAD, top: a + SPLITTER, right: PAD + lw, bottom: b };
+    let sp2 = RECT { left: PAD, top: b, right: PAD + lw, bottom: b + SPLITTER };
+    let detail_top = b + SPLITTER;
+    let text_w = (w as f32 * 0.60) as i32 - PAD;
+    let detail_text = RECT { left: PAD, top: detail_top, right: PAD + text_w, bottom: area_bottom };
+    let img_left = PAD + text_w + PAD;
+    let img = RECT { left: img_left, top: detail_top, right: w - PAD, bottom: area_bottom };
+    Geo { recog, sp1, trans, sp2, detail_text, img, row1_y, row2_y }
+}
+
+fn in_rect(r: &RECT, x: i32, y: i32) -> bool {
+    x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
 
 fn fmt_ts(ts_ms: i64) -> String {
@@ -555,24 +707,16 @@ fn decode_png(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
 
 /// 詳細下段の右側に画像を縮小描画する
 fn paint_image(h: HWND) {
+    // geometry() は STATE を借用するので、image の借用より先に取得する
+    let g = geometry(h);
     STATE.with(|s| {
         let st = s.borrow();
         let Some((iw, ih, rgba)) = st.image.as_ref() else { return };
         unsafe {
-            let mut rc = RECT::default();
-            let _ = GetClientRect(h, &mut rc);
-            let w = rc.right;
-            let ht = rc.bottom;
-            let pad = 8;
-            let btn_h = 28;
-            let btn_row_y = ht - btn_h - pad;
-            let recog_h = (ht as f32 * 0.30) as i32;
-            let trans_h = (ht as f32 * 0.25) as i32;
-            let detail_top = pad + recog_h + pad + trans_h + pad;
-            let detail_h = (btn_row_y - pad) - detail_top;
-            let img_left = (w as f32 * 0.60) as i32 + pad;
-            let img_w = w - img_left - pad;
-            let img_h = detail_h.max(20);
+            let img_left = g.img.left;
+            let detail_top = g.img.top;
+            let img_w = (g.img.right - g.img.left).max(1);
+            let img_h = (g.img.bottom - g.img.top).max(20);
 
             // アスペクト比維持で img_w×img_h に収める
             let scale = (img_w as f32 / *iw as f32).min(img_h as f32 / *ih as f32).min(1.0);
@@ -627,6 +771,19 @@ fn paint_image(h: HWND) {
     });
 }
 
+/// スプリッター2本を薄い罫線で描く(ドラッグ位置の視認用)
+fn paint_splitters(h: HWND) {
+    let g = geometry(h);
+    unsafe {
+        let hdc = windows::Win32::Graphics::Gdi::GetDC(Some(h));
+        let brush = windows::Win32::Graphics::Gdi::CreateSolidBrush(COLORREF(0x00909090));
+        windows::Win32::Graphics::Gdi::FillRect(hdc, &g.sp1, brush);
+        windows::Win32::Graphics::Gdi::FillRect(hdc, &g.sp2, brush);
+        let _ = windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(brush.0));
+        let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(h), hdc);
+    }
+}
+
 fn open_current_image() {
     let path = STATE.with(|s| {
         let st = s.borrow();
@@ -650,6 +807,257 @@ fn open_current_image() {
     }
 }
 
+/// 保存PNG(RGBA)を capture::Captured(BGRA)へ変換
+fn rgba_to_captured(iw: u32, ih: u32, rgba: &[u8]) -> crate::capture::Captured {
+    let mut bgra = vec![0u8; rgba.len()];
+    for (o, px) in bgra.chunks_mut(4).zip(rgba.chunks(4)) {
+        o[0] = px[2];
+        o[1] = px[1];
+        o[2] = px[0];
+        o[3] = px[3];
+    }
+    crate::capture::Captured { width: iw, height: ih, bgra }
+}
+
+/// 選択した認識ログの画像を、指定エンジンで再OCRして新規ログに追記する(ワーカースレッド)。
+fn start_reocr(h: HWND) {
+    let sel = STATE.with(|s| {
+        let st = s.borrow();
+        st.sel_recog.and_then(|i| st.recogs.get(i)).map(|r| (r.id, r.image_path.clone()))
+    });
+    let Some((recog_id, image_path)) = sel else {
+        unsafe { MessageBoxW(Some(h), w!("認識ログを選択してください。"), w!("再OCR"), MB_OK); }
+        return;
+    };
+    let Some(rel) = image_path else {
+        unsafe { MessageBoxW(Some(h), w!("この認識ログには画像がありません(デバッグモードで記録した画像のみ再OCRできます)。"), w!("再OCR"), MB_OK); }
+        return;
+    };
+    let engine = OCR_ENGINES[combo_sel(h, IDC_OCR_COMBO).min(OCR_ENGINES.len() - 1)].0.to_string();
+    let hwnd_isize = h.0 as isize;
+    let _ = recog_id;
+    std::thread::spawn(move || {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            );
+        }
+        let cfg = crate::config::Config::load();
+        let path = logdb::logs_dir().join(&rel);
+        if let Some((iw, ih, rgba)) = decode_png(&path) {
+            let cap = rgba_to_captured(iw, ih, &rgba);
+            let t0 = std::time::Instant::now();
+            let (text, err): (Option<String>, Option<String>) =
+                match crate::ocr::run(&engine, &cfg, &cap, None) {
+                    Ok(o) => (Some(o.text), None),
+                    Err(e) => (None, Some(e)),
+                };
+            let ms = t0.elapsed().as_millis();
+            // 再OCR結果を新規認識ログとして追記(デバッグ時は画像も再保存)
+            logdb::log_recognition(
+                "review", "ocr", &engine, ms, text.as_deref(), err.as_deref(),
+                Some(&cap), cfg.debug_mode,
+            );
+        }
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                Some(HWND(hwnd_isize as *mut _)),
+                WM_APP_RELOAD,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    });
+}
+
+/// 選択した翻訳ログ(の属する認識の原文)を、指定エンジンで再翻訳して追記する(ワーカースレッド)。
+fn start_retranslate(h: HWND) {
+    let sel = STATE.with(|s| {
+        let st = s.borrow();
+        st.sel_recog.and_then(|i| st.recogs.get(i)).map(|r| (r.id, r.source_text.clone()))
+    });
+    let Some((recog_id, source)) = sel else {
+        unsafe { MessageBoxW(Some(h), w!("認識ログを選択してください。"), w!("再翻訳"), MB_OK); }
+        return;
+    };
+    if source.trim().is_empty() {
+        unsafe { MessageBoxW(Some(h), w!("原文が空のため再翻訳できません。"), w!("再翻訳"), MB_OK); }
+        return;
+    }
+    let engine = TR_ENGINES[combo_sel(h, IDC_TR_COMBO).min(TR_ENGINES.len() - 1)].0.to_string();
+    let hwnd_isize = h.0 as isize;
+    std::thread::spawn(move || {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            );
+        }
+        let cfg = crate::config::Config::load();
+        let t0 = std::time::Instant::now();
+        match crate::translate::translate(&engine, &cfg, &source) {
+            Ok(t) => {
+                let ms = t0.elapsed().as_millis();
+                logdb::log_translation(
+                    Some(recog_id), &t.engine, &t.source_lang, &t.target_lang, ms, t.cache_hit,
+                    Some(&t.text), None, t.detail.request_json.as_deref(),
+                    t.detail.response_json.as_deref(), t.detail.tokens_in, t.detail.tokens_out,
+                );
+            }
+            Err(e) => {
+                let ms = t0.elapsed().as_millis();
+                logdb::log_translation(
+                    Some(recog_id), &engine, &cfg.source_lang, &cfg.target_lang, ms, false,
+                    None, Some(&e), None, None, None, None,
+                );
+            }
+        }
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                Some(HWND(hwnd_isize as *mut _)),
+                WM_APP_RELOAD,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    });
+}
+
+// ---- 画像1:1表示ウィンドウ ----
+
+thread_local! {
+    static IMG1: RefCell<Option<(u32, u32, Vec<u8>)>> = const { RefCell::new(None) };
+    static IMG1_SCROLL: RefCell<(i32, i32)> = const { RefCell::new((0, 0)) };
+    static IMG1_REGISTERED: RefCell<bool> = const { RefCell::new(false) };
+}
+
+/// 現在の画像を原寸(1:1)表示する別ウィンドウを開く
+fn open_image_1to1(parent: HWND) {
+    let img = STATE.with(|s| s.borrow().image.clone());
+    let Some((iw, ih, _)) = img.as_ref().map(|(a, b, _)| (*a, *b, ())) else { return };
+    IMG1.with(|c| *c.borrow_mut() = img);
+    IMG1_SCROLL.with(|c| *c.borrow_mut() = (0, 0));
+    let inst = unsafe {
+        HINSTANCE(
+            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                .map(|m| m.0)
+                .unwrap_or(std::ptr::null_mut()),
+        )
+    };
+    unsafe {
+        let class = w!("FocusTranslatorImageView");
+        IMG1_REGISTERED.with(|r| {
+            if !*r.borrow() {
+                let wc = WNDCLASSW {
+                    lpfnWndProc: Some(img_wndproc),
+                    hInstance: inst,
+                    hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                    hIcon: crate::app_icon(),
+                    hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as usize as *mut _),
+                    lpszClassName: class,
+                    ..Default::default()
+                };
+                RegisterClassW(&wc);
+                *r.borrow_mut() = true;
+            }
+        });
+        // 画像サイズに合わせる(画面サイズにクランプ、スクロールバー付き)
+        let cw = (iw as i32 + 20).min(1400);
+        let ch = (ih as i32 + 40).min(900);
+        if let Ok(iwnd) = CreateWindowExW(
+            WS_EX_TOPMOST,
+            class,
+            w!("画像 (原寸 1:1 / ホイール・矢印でスクロール)"),
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            cw,
+            ch,
+            Some(parent),
+            None,
+            Some(inst),
+            None,
+        ) {
+            let _ = ShowWindow(iwnd, SW_SHOW);
+        }
+    }
+}
+
+unsafe extern "system" fn img_wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_MOUSEWHEEL};
+    // スクロールは SCROLLINFO を使わず、ホイール/矢印キーでオフセットを動かす簡易方式
+    match msg {
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let shift = (wparam.0 & 0x0004) != 0; // MK_SHIFT で横スクロール
+            IMG1_SCROLL.with(|c| {
+                let mut sc = c.borrow_mut();
+                let step = delta / 120 * 48;
+                if shift { sc.0 = (sc.0 - step).max(0); } else { sc.1 = (sc.1 - step).max(0); }
+            });
+            unsafe { let _ = InvalidateRect(Some(h), None, true); }
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            let vk = wparam.0 as i32;
+            IMG1_SCROLL.with(|c| {
+                let mut sc = c.borrow_mut();
+                match vk {
+                    0x25 => sc.0 = (sc.0 - 40).max(0), // ←
+                    0x27 => sc.0 += 40,                // →
+                    0x26 => sc.1 = (sc.1 - 40).max(0), // ↑
+                    0x28 => sc.1 += 40,                // ↓
+                    _ => {}
+                }
+            });
+            unsafe { let _ = InvalidateRect(Some(h), None, true); }
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_PAINT => {
+            unsafe {
+                let mut ps = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
+                let hdc = windows::Win32::Graphics::Gdi::BeginPaint(h, &mut ps);
+                IMG1.with(|c| {
+                    if let Some((iw, ih, rgba)) = c.borrow().as_ref() {
+                        let (sx, sy) = IMG1_SCROLL.with(|s| *s.borrow());
+                        let mut bgra = vec![0u8; rgba.len()];
+                        for (o, px) in bgra.chunks_mut(4).zip(rgba.chunks(4)) {
+                            o[0] = px[2]; o[1] = px[1]; o[2] = px[0]; o[3] = px[3];
+                        }
+                        let bmi = BITMAPINFO {
+                            bmiHeader: BITMAPINFOHEADER {
+                                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                                biWidth: *iw as i32,
+                                biHeight: -(*ih as i32),
+                                biPlanes: 1,
+                                biBitCount: 32,
+                                biCompression: BI_RGB.0,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        };
+                        // 原寸(1:1)でスクロールオフセット分ずらして描画
+                        StretchDIBits(
+                            hdc, -sx, -sy, *iw as i32, *ih as i32,
+                            0, 0, *iw as i32, *ih as i32,
+                            Some(bgra.as_ptr() as *const _), &bmi, DIB_RGB_COLORS,
+                            windows::Win32::Graphics::Gdi::SRCCOPY,
+                        );
+                    }
+                });
+                let _ = windows::Win32::Graphics::Gdi::EndPaint(h, &ps);
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            unsafe { let _ = DestroyWindow(h); }
+            LRESULT(0)
+        }
+        _ => unsafe { DefWindowProcW(h, msg, wparam, lparam) },
+    }
+}
+
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_SIZE => {
@@ -664,8 +1072,82 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 let mut ps = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
                 let _ = windows::Win32::Graphics::Gdi::BeginPaint(h, &mut ps);
                 paint_image(h);
+                paint_splitters(h);
                 let _ = windows::Win32::Graphics::Gdi::EndPaint(h, &ps);
             }
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let g = geometry(h);
+            if in_rect(&g.sp1, x, y) {
+                STATE.with(|s| s.borrow_mut().dragging = 1);
+                unsafe { SetCapture(h); }
+            } else if in_rect(&g.sp2, x, y) {
+                STATE.with(|s| s.borrow_mut().dragging = 2);
+                unsafe { SetCapture(h); }
+            } else if in_rect(&g.img, x, y) {
+                // 画像領域クリック → 原寸(1:1)表示ウィンドウ
+                open_image_1to1(h);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let dragging = STATE.with(|s| s.borrow().dragging);
+            if dragging != 0 {
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let mut rc = RECT::default();
+                unsafe { let _ = GetClientRect(h, &mut rc); }
+                let ht = rc.bottom;
+                let area_top = PAD;
+                let area_bottom = (ht - BTN_H - PAD) - (BTN_H + 4) - PAD;
+                let area_h = (area_bottom - area_top).max(60) as f32;
+                let frac = ((y - area_top) as f32 / area_h).clamp(0.1, 0.9);
+                STATE.with(|s| {
+                    let mut st = s.borrow_mut();
+                    if dragging == 1 {
+                        st.split_a = frac.min(st.split_b - 0.05);
+                    } else {
+                        st.split_b = frac.max(st.split_a + 0.05);
+                    }
+                });
+                layout(h);
+                unsafe { let _ = InvalidateRect(Some(h), None, true); }
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let was = STATE.with(|s| {
+                let mut st = s.borrow_mut();
+                let d = st.dragging;
+                st.dragging = 0;
+                d
+            });
+            if was != 0 {
+                unsafe { let _ = ReleaseCapture(); }
+            }
+            LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            // スプリッター上では上下リサイズカーソル
+            let mut pt = windows::Win32::Foundation::POINT::default();
+            unsafe { let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt); }
+            let mut cpt = pt;
+            unsafe { let _ = windows::Win32::Graphics::Gdi::ScreenToClient(h, &mut cpt); }
+            let g = geometry(h);
+            if in_rect(&g.sp1, cpt.x, cpt.y) || in_rect(&g.sp2, cpt.x, cpt.y) {
+                unsafe {
+                    if let Ok(c) = LoadCursorW(None, IDC_SIZENS) {
+                        SetCursor(Some(c));
+                    }
+                }
+                return LRESULT(1);
+            }
+            unsafe { DefWindowProcW(h, msg, wparam, lparam) }
+        }
+        WM_APP_RELOAD => {
+            reload();
             LRESULT(0)
         }
         WM_NOTIFY => {
@@ -714,6 +1196,32 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         reload();
                         unsafe {
                             MessageBoxW(Some(h), w!("ログを削除しました。"), w!("Focus Translator"), MB_OK);
+                        }
+                    }
+                }
+                IDC_BTN_REOCR => start_reocr(h),
+                IDC_BTN_RETRANS => start_retranslate(h),
+                IDC_BTN_DEL_RECOG => {
+                    let id = STATE.with(|s| {
+                        let st = s.borrow();
+                        st.sel_recog.and_then(|i| st.recogs.get(i)).map(|r| r.id)
+                    });
+                    if let Some(id) = id {
+                        logdb::delete_recognition(id);
+                        reload();
+                    }
+                }
+                IDC_BTN_DEL_TRANS => {
+                    let (tid, recog_idx) = STATE.with(|s| {
+                        let st = s.borrow();
+                        let tid = st.sel_trans.and_then(|i| st.trans.get(i)).map(|t| t.id);
+                        (tid, st.sel_recog)
+                    });
+                    if let Some(tid) = tid {
+                        logdb::delete_translation(tid);
+                        // 翻訳候補一覧だけ更新
+                        if let Some(idx) = recog_idx {
+                            on_recog_selected(idx);
                         }
                     }
                 }

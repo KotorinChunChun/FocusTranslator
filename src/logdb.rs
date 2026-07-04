@@ -319,6 +319,33 @@ pub fn clear_all() {
     }
 }
 
+/// 認識ログ1件を削除(紐づく翻訳ログと画像も削除)。
+pub fn delete_recognition(id: i64) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    // 画像パスを取得して削除
+    let img: Option<String> = guard
+        .query_row(
+            "SELECT image_path FROM recognition_logs WHERE id=?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    if let Some(rel) = img {
+        let _ = std::fs::remove_file(logs_dir().join(rel));
+    }
+    let _ = guard.execute("DELETE FROM translation_logs WHERE recognition_id=?1", rusqlite::params![id]);
+    let _ = guard.execute("DELETE FROM recognition_logs WHERE id=?1", rusqlite::params![id]);
+}
+
+/// 翻訳ログ1件を削除。
+pub fn delete_translation(id: i64) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    let _ = guard.execute("DELETE FROM translation_logs WHERE id=?1", rusqlite::params![id]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
