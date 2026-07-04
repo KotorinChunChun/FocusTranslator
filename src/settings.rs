@@ -40,26 +40,27 @@ const IDC_NDL: i32 = 112;
 const IDC_AUTOSTART: i32 = 113;
 const IDC_PERFLOG: i32 = 114;
 const IDC_CONSENT_RESET: i32 = 115;
-const IDC_SAVE: i32 = 116;
-const IDC_CLOSE: i32 = 117;
-const IDC_TEST_YOMI: i32 = 118;
-const IDC_TEST_NDL: i32 = 119;
-const IDC_PADDLE_STATUS: i32 = 120;
-const IDC_PADDLE_INSTALL: i32 = 121;
-const IDC_ONNX_STATUS: i32 = 122;
-const IDC_ONNX_INSTALL: i32 = 123;
-const IDC_DEEPL_URL: i32 = 124;
-const IDC_GOOGLE_URL: i32 = 125;
-const IDC_GEMINI_URL: i32 = 126;
-const IDC_SRCLANG: i32 = 127;
-const IDC_LOG_ENABLED: i32 = 128;
-const IDC_DEBUG_MODE: i32 = 129;
-const IDC_LOG_MAX: i32 = 130;
-const IDC_GPROMPT_TR: i32 = 131;
-const IDC_GPROMPT_OCR: i32 = 132;
-const IDC_GPROMPT_RESET: i32 = 133;
-const IDC_OPEN_LOG: i32 = 134;
-const IDC_ONNX_VARIANT: i32 = 135;
+const IDC_APPLY: i32 = 116;
+const IDC_SAVE: i32 = 117;
+const IDC_CLOSE: i32 = 118;
+const IDC_TEST_YOMI: i32 = 119;
+const IDC_TEST_NDL: i32 = 120;
+const IDC_PADDLE_STATUS: i32 = 121;
+const IDC_PADDLE_INSTALL: i32 = 122;
+const IDC_ONNX_STATUS: i32 = 123;
+const IDC_ONNX_INSTALL: i32 = 124;
+const IDC_DEEPL_URL: i32 = 125;
+const IDC_GOOGLE_URL: i32 = 126;
+const IDC_GEMINI_URL: i32 = 127;
+const IDC_SRCLANG: i32 = 128;
+const IDC_LOG_ENABLED: i32 = 129;
+const IDC_DEBUG_MODE: i32 = 130;
+const IDC_LOG_MAX: i32 = 131;
+const IDC_GPROMPT_TR: i32 = 132;
+const IDC_GPROMPT_OCR: i32 = 133;
+const IDC_GPROMPT_RESET: i32 = 134;
+const IDC_OPEN_LOG: i32 = 135;
+const IDC_ONNX_VARIANT: i32 = 136;
 
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
@@ -341,8 +342,9 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     y += step;
     button(h, inst, "外部送信の同意状態をリセット", lx, y, 220, IDC_CONSENT_RESET);
     y += step + 10;
-    button(h, inst, "保存", cx + 60, y, 90, IDC_SAVE);
-    button(h, inst, "閉じる", cx + 160, y, 90, IDC_CLOSE);
+    button(h, inst, "適用", cx + 60, y, 80, IDC_APPLY);
+    button(h, inst, "保存", cx + 146, y, 80, IDC_SAVE);
+    button(h, inst, "閉じる", cx + 232, y, 80, IDC_CLOSE);
 
     // フォント設定
     unsafe {
@@ -701,6 +703,18 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
             match id {
+                IDC_APPLY => {
+                    save(h);
+                    // main へ設定再読込を通知
+                    unsafe {
+                        let _ = PostMessageW(
+                            Some(crate::main_hwnd()),
+                            crate::WM_APP_CFG,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    }
+                }
                 IDC_SAVE => {
                     save(h);
                     // main へ設定再読込を通知
