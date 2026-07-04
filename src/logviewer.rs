@@ -663,8 +663,7 @@ fn on_recog_selected(idx: usize) {
             _ => String::new(),
         };
         let text = if t.success {
-            let cache = if t.cache_hit { "[cache] " } else { "" };
-            format!("{cache}{}", t.translated_text)
+            t.translated_text.clone()
         } else {
             format!("[エラー] {}", t.error)
         };
