@@ -15,22 +15,22 @@ use windows::Win32::UI::Controls::{
     INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
     LVIF_STATE, LVIF_TEXT, LVITEMW, LIST_VIEW_ITEM_STATE_FLAGS, LVM_DELETEALLITEMS, LVM_GETNEXTITEM,
     LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW,
-    LVM_SETITEMW, LVM_ENSUREVISIBLE, LVN_ITEMCHANGED, LVS_EX_FULLROWSELECT, LVS_REPORT, LVS_SINGLESEL,
-    NMHDR,
+    LVM_SETITEMW, LVM_ENSUREVISIBLE, LVN_ITEMCHANGED, LVS_EX_FULLROWSELECT, LVS_REPORT,
+    LVS_SHOWSELALWAYS, LVS_SINGLESEL, NMHDR,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, ReleaseCapture, SetCapture,
+    EnableWindow, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateWindowExW,
-    DefWindowProcW, DestroyWindow, GetClientRect, GetDlgItem, GetWindowRect, HMENU, IDC_ARROW,
-    IDC_SIZENS, IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW, SWP_NOACTIVATE,
-    SetCursor, SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, SetWindowPos,
-    SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR, WM_SIZE, WNDCLASSW,
-    WS_BORDER, WS_CHILD, WS_EX_TOPMOST, WS_HSCROLL, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
-    WS_VSCROLL,
+    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CW_USEDEFAULT, CallWindowProcW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_WNDPROC, GetClientRect, GetDlgItem,
+    GetWindowRect, HMENU, IDC_ARROW, IDC_SIZENS, IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK,
+    MB_YESNO, MessageBoxW, SWP_NOACTIVATE, SetCursor, SW_SHOW, SW_SHOWNORMAL, SendMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD,
+    WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -171,7 +171,10 @@ fn lv(parent: HWND, inst: HINSTANCE, id: i32) -> HWND {
             Default::default(),
             w!("SysListView32"),
             w!(""),
-            WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(LVS_REPORT | LVS_SINGLESEL),
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_BORDER
+                | WINDOW_STYLE(LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS),
             0,
             0,
             0,
@@ -228,12 +231,13 @@ fn build(h: HWND, inst: HINSTANCE) {
     add_col(trans, 4, "tok入/出", 70);
     add_col(trans, 5, "訳文", 480);
 
-    // 詳細エディット (複数行・読み取り専用)
+    // 詳細エディット (複数行・読み取り専用・右端で折り返し)
+    // WS_HSCROLL/ES_AUTOHSCROLLを付けないことで、右端での自動改行(ワードラップ)が有効になる。
     unsafe {
         const ES_MULTILINE: u32 = 0x0004;
         const ES_READONLY: u32 = 0x0800;
         const ES_AUTOVSCROLL: u32 = 0x0040;
-        let _ = CreateWindowExW(
+        if let Ok(detail) = CreateWindowExW(
             Default::default(),
             w!("EDIT"),
             w!(""),
@@ -241,7 +245,6 @@ fn build(h: HWND, inst: HINSTANCE) {
                 | WS_VISIBLE
                 | WS_BORDER
                 | WS_VSCROLL
-                | WS_HSCROLL
                 | WINDOW_STYLE(ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL),
             0,
             0,
@@ -251,7 +254,9 @@ fn build(h: HWND, inst: HINSTANCE) {
             Some(HMENU(IDC_DETAIL as usize as *mut _)),
             Some(inst),
             None,
-        );
+        ) {
+            subclass_detail(detail);
+        }
     }
 
     btn(h, inst, "原文/訳文", IDC_BTN_SRC);
@@ -305,6 +310,43 @@ unsafe extern "system" fn set_font_proc(child: HWND, lparam: LPARAM) -> windows:
         );
     }
     true.into()
+}
+
+thread_local! {
+    /// 詳細エディットのサブクラス化前の元WNDPROC(Ctrl+Aの全選択対応のため)
+    static DETAIL_OLDPROC: RefCell<isize> = const { RefCell::new(0) };
+}
+
+/// 詳細エディットをサブクラス化し、Ctrl+Aで全選択できるようにする
+/// (標準EDITコントロールはCtrl+Cのコピーは既定で動作するがCtrl+Aは未対応のため)
+fn subclass_detail(edit: HWND) {
+    unsafe {
+        let old = SetWindowLongPtrW(edit, GWLP_WNDPROC, detail_wndproc as *const () as isize);
+        DETAIL_OLDPROC.with(|c| *c.borrow_mut() = old);
+    }
+}
+
+unsafe extern "system" fn detail_wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    const EM_SETSEL: u32 = 0x00B1;
+    if msg == WM_KEYDOWN && wparam.0 == 'A' as usize {
+        let ctrl_down = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+        if ctrl_down {
+            unsafe {
+                SendMessageW(h, EM_SETSEL, Some(WPARAM(0)), Some(LPARAM(-1isize)));
+            }
+            return LRESULT(0);
+        }
+    }
+    let old = DETAIL_OLDPROC.with(|c| *c.borrow());
+    unsafe {
+        CallWindowProcW(
+            std::mem::transmute::<isize, windows::Win32::UI::WindowsAndMessaging::WNDPROC>(old),
+            h,
+            msg,
+            wparam,
+            lparam,
+        )
+    }
 }
 
 fn btn(parent: HWND, inst: HINSTANCE, text: &str, id: i32) -> HWND {
@@ -417,10 +459,15 @@ fn layout(h: HWND) {
         mv(IDC_BTN_REOCR, x, y_ocr_btn, 80, BTN_H);
         x += 80 + gap;
         mv(IDC_BTN_DEL_RECOG, x, y_ocr_btn, 110, BTN_H);
-        // 右寄せ: 再翻訳関連
-        mv(IDC_TR_COMBO, w - (cbw + 80 + 110 + gap * 3) - PAD, y_ocr_btn, cbw, 200);
-        mv(IDC_BTN_RETRANS, w - (80 + 110 + gap * 2) - PAD, y_ocr_btn, 80, BTN_H);
-        mv(IDC_BTN_DEL_TRANS, w - 110 - PAD, y_ocr_btn, 110, BTN_H);
+
+        // 翻訳結果リスト直下: 再翻訳・削除ボタン行
+        let y_trans_btn = g.trans_btn_y;
+        let mut x = PAD;
+        mv(IDC_TR_COMBO, x, y_trans_btn, cbw, 200);
+        x += cbw + 4;
+        mv(IDC_BTN_RETRANS, x, y_trans_btn, 80, BTN_H);
+        x += 80 + gap;
+        mv(IDC_BTN_DEL_TRANS, x, y_trans_btn, 110, BTN_H);
     }
 }
 
@@ -438,6 +485,7 @@ struct Geo {
     img: RECT,
     row1_y: i32,
     ocr_btn_y: i32,
+    trans_btn_y: i32,
     row2_y: i32,
 }
 
@@ -463,9 +511,10 @@ fn geometry(h: HWND) -> Geo {
     let ocr_btn_y = recog_bottom + PAD;
     let sp1_top = ocr_btn_y + BTN_H + PAD;
 
-    // 翻訳結果リストの計算(split_bはarea_topからの相対位置)
+    // 翻訳結果リストの計算(split_bはarea_topからの相対位置) + 翻訳操作ボタン行
     let trans_bottom = area_top + (area_h as f32 * split_b) as i32;
-    let sp2_top = trans_bottom;
+    let trans_btn_y = trans_bottom + PAD;
+    let sp2_top = trans_btn_y + BTN_H + PAD;
     let detail_top = sp2_top + SPLITTER;
 
     let lw = w - PAD * 2;
@@ -478,7 +527,7 @@ fn geometry(h: HWND) -> Geo {
     let detail_text = RECT { left: PAD, top: detail_top, right: PAD + text_w, bottom: area_bottom };
     let img_left = PAD + text_w + PAD;
     let img = RECT { left: img_left, top: detail_top, right: w - PAD, bottom: area_bottom };
-    Geo { recog, sp1, trans, sp2, detail_text, img, row1_y, ocr_btn_y, row2_y }
+    Geo { recog, sp1, trans, sp2, detail_text, img, row1_y, ocr_btn_y, trans_btn_y, row2_y }
 }
 
 fn in_rect(r: &RECT, x: i32, y: i32) -> bool {
