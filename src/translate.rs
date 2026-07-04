@@ -4,7 +4,6 @@
 // 結果はメモリ内キャッシュ (SPEC: キャッシュヒット時 100〜200ms台)。
 // ログDB用に送受信JSON・トークン・言語・実際に使ったエンジンも返す。
 use crate::config::Config;
-use crate::util;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -34,16 +33,8 @@ pub struct Translated {
     pub detail: TransDetail,
 }
 
-/// 翻訳方向 (source, target) を決める。
-/// 基本は cfg.source_lang → cfg.target_lang。ただし原文がCJKを含み target=ja のときは
-/// ja→en へ反転(ローカルONNXが ja⇄en のみ対応のため実用的なヒューリスティック)。
-fn decide_langs(cfg: &Config, text: &str) -> (String, String) {
-    if util::contains_cjk(text) && cfg.target_lang == "ja" {
-        ("ja".into(), "en".into())
-    } else {
-        (cfg.source_lang.clone(), cfg.target_lang.clone())
-    }
-}
+/// 翻訳方向 (source, target) を決める。常に設定通り(cfg.source_lang → cfg.target_lang)に固定し、
+/// 原文の内容による自動判定・反転は行わない。
 
 /// request/response JSON に含まれうる設定済みAPIキーを伏字化する (SPEC §2.4)
 pub(crate) fn mask_keys(cfg: &Config, s: &str) -> String {
@@ -58,7 +49,7 @@ pub(crate) fn mask_keys(cfg: &Config, s: &str) -> String {
 
 /// 指定エンジンで翻訳。クラウド失敗時は local へフォールバック (SPEC §11)。
 pub fn translate(engine: &str, cfg: &Config, text: &str) -> Result<Translated, String> {
-    let (source, target) = decide_langs(cfg, text);
+    let (source, target) = (cfg.source_lang.clone(), cfg.target_lang.clone());
     let key = (engine.to_string(), target.clone(), text.to_string());
 
     // キャッシュ確認
