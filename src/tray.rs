@@ -11,6 +11,7 @@ use windows::core::w;
 
 pub const CMD_SETTINGS: usize = 1;
 pub const CMD_REGION: usize = 2;
+pub const CMD_LOGVIEWER: usize = 3;
 pub const CMD_EXIT: usize = 4;
 
 fn make_nid(hwnd: HWND) -> NOTIFYICONDATAW {
@@ -48,6 +49,7 @@ pub fn show_menu(hwnd: HWND) -> usize {
         };
         let _ = AppendMenuW(menu, MF_STRING, CMD_SETTINGS, w!("設定..."));
         let _ = AppendMenuW(menu, MF_STRING, CMD_REGION, w!("範囲指定翻訳"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_LOGVIEWER, w!("ログビューア"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT, w!("終了"));
 

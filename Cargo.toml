@@ -12,6 +12,7 @@ png = "0.18"
 sha2 = "0.10"
 ort = { version = "2.0.0-rc.12", features = ["copy-dylibs", "download-binaries", "ndarray"] }
 tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dependencies.windows]
 version = "0.62.2"

@@ -54,6 +54,8 @@ src/
 ├── paddle_install.rs         PaddleOCR(RapidOCR配布ONNX)モデルのSHA256検証付きダウンロード
 ├── onnx_translate_install.rs ローカルONNX翻訳(opus-mt ja⇄en)モデルのSHA256検証付きダウンロード
 ├── onnx_translate.rs         ローカルONNX翻訳の推論本体 (ort + tokenizers、貪欲法デコード)
+├── logdb.rs     実行ログのSQLite記録 (認識/翻訳ログ, rusqlite bundled, WAL)
+├── logviewer.rs ログビューア (3段ドリルダウン + 画像小表示, ListView)
 ├── tray.rs      タスクトレイ常駐
 ├── config.rs    設定永続化 (%APPDATA%\FocusTranslator\config.json)
 └── util.rs      DPAPI暗号化、クリップボード、計測ログ
@@ -102,6 +104,23 @@ src/
 - DeepL: https://www.deepl.com/en/your-account/keys
 - Google Trans (Google Cloud Translation API): https://console.cloud.google.com/apis/credentials
 - Gemini: https://aistudio.google.com/api-keys
+
+## 実行ログ機能 (SQLite)
+
+OCR・翻訳の履歴を SQLite に記録し、アプリ内のログビューアで時系列閲覧できる。詳細仕様は [FocusTranslator_LOG_SPECv0.1.md](FocusTranslator_LOG_SPECv0.1.md)。
+
+- **既定OFF**。設定画面「実行ログを記録」をONにすると `%APPDATA%\FocusTranslator\logs\focustranslator.db` に記録が始まる。ONの間は**原文・訳文が平文で保存される**点に注意(外部送信はしない・ローカルのみ)。
+- **デバッグモード**(別途ON): OCR実行時のキャプチャ画像を `logs\images\{id}.png` に保存し、ログと紐付ける(UIA経路は画像なし)。
+- 記録内容: 認識(モード/方式/エンジン/時間/認識テキスト/画像)と、それに紐づく翻訳(エンジン/翻訳方向/時間/トークン数/訳文/**送信・受信の生JSON**)。1つの認識に複数の翻訳(エンジン切替のたび)が 1:N でぶら下がる。
+- **APIキーのマスク**: 認証ヘッダは記録せず、生JSON中に設定済みキー文字列があれば `***MASKED***` に置換してから保存する。
+- **ログビューア**(タスクトレイ →「ログビューア」、または設定画面の「ログビューアを開く」): 上段=認識一覧、中段=選択した認識の翻訳候補一覧、下段=選択した翻訳の原文/訳文・送信JSON・受信JSON をボタンで切替表示。デバッグ画像があれば下段右に縮小表示し、「画像を開く」で外部ビューアでも開ける。「ログを全削除」で全レコード+画像を消去。
+- 保持上限(既定5000件)を超えると古い認識ログ・翻訳ログ・画像を自動削除する。
+- SQLiteは rusqlite の bundled 機能で静的リンクするため外部DLL不要。`logs\focustranslator.db` は WAL モードのため、アプリ動作中でも VSCode の SQLite 拡張等で読み取り閲覧できる。画像は `logs\images\*.png` の実ファイルなので VSCode/エクスプローラーでそのままプレビュー可能。
+
+## 翻訳元言語 / Geminiプロンプト
+
+- 設定画面で翻訳元言語(既定 en)・訳先言語を選べる。原文がCJKを含み訳先がjaのときは自動で ja→en に反転する(ローカルONNXが ja⇄en のみ対応のため)。
+- Geminiの翻訳プロンプト・OCR統合プロンプトを設定画面で編集できる。プレースホルダ `{{source_lang}}` `{{target_lang}}` `{{text}}` が設定値・原文で置換される。「既定に戻す」ボタンあり。
 
 ## 実測値 (開発環境でのスモークテスト)
 

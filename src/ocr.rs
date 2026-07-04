@@ -12,16 +12,28 @@ use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
 
 /// OCR結果(gemini 統合モードは訳文も返す)
+#[derive(Default)]
 pub struct OcrOutput {
     pub text: String,
     pub translation: Option<String>,
+    /// Gemini統合モードの生応答JSON(APIキーマスク済み。ログDB用)。他エンジンはNone。
+    pub raw_response: Option<String>,
+    /// Gemini統合モードのトークン数(ログDB用)
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+}
+
+impl OcrOutput {
+    fn text_only(text: String) -> Self {
+        OcrOutput { text, ..Default::default() }
+    }
 }
 
 /// 指定エンジンでOCRを実行する。
 /// focus_y: 帯内の注目Y座標(単一行選択用)。None なら全行を段落結合。
 pub fn run(engine: &str, cfg: &Config, img: &Captured, focus_y: Option<f32>) -> Result<OcrOutput, String> {
     match engine {
-        "win" => ocr_windows(img, focus_y).map(|t| OcrOutput { text: t, translation: None }),
+        "win" => ocr_windows(img, focus_y).map(OcrOutput::text_only),
         "paddle" => {
             if crate::paddle_install::installed() {
                 Err("PaddleOCRの推論は未実装です(次版で対応)".into())
@@ -29,10 +41,8 @@ pub fn run(engine: &str, cfg: &Config, img: &Captured, focus_y: Option<f32>) -> 
                 Err("PaddleOCRのモデルが未導入です。設定画面からインストールしてください".into())
             }
         }
-        "yomitoku" => {
-            ocr_http(&cfg.yomitoku_url, img).map(|t| OcrOutput { text: t, translation: None })
-        }
-        "ndl" => ocr_http(&cfg.ndl_url, img).map(|t| OcrOutput { text: t, translation: None }),
+        "yomitoku" => ocr_http(&cfg.yomitoku_url, img).map(OcrOutput::text_only),
+        "ndl" => ocr_http(&cfg.ndl_url, img).map(OcrOutput::text_only),
         "gemini" => gemini_ocr_translate(cfg, img),
         other => Err(format!("不明なOCRエンジン: {other}")),
     }
@@ -214,11 +224,11 @@ pub fn gemini_ocr_translate(cfg: &Config, img: &Captured) -> Result<OcrOutput, S
     }
     let png = crate::capture::to_png(img);
     let b64 = B64.encode(&png);
-    let target = if cfg.target_lang == "en" { "English" } else { "Japanese" };
-    let prompt = format!(
-        "Extract the text in this image and translate it to {target}. \
-         Respond with JSON only: {{\"source\": \"<extracted text>\", \"translation\": \"<translation>\"}}"
-    );
+    // Gemini統合プロンプトは設定値のテンプレートを使う ({{source_lang}}/{{target_lang}} を置換)
+    let prompt = cfg
+        .gemini_ocr_prompt
+        .replace("{{source_lang}}", &cfg.source_lang)
+        .replace("{{target_lang}}", &cfg.target_lang);
     let body = serde_json::json!({
         "contents": [{ "parts": [
             { "text": prompt },
@@ -238,6 +248,9 @@ pub fn gemini_ocr_translate(cfg: &Config, img: &Captured) -> Result<OcrOutput, S
         .body_mut()
         .read_json()
         .map_err(|e| format!("Gemini応答の解析失敗: {e}"))?;
+    let raw_response = Some(crate::translate::mask_keys(cfg, &v.to_string()));
+    let tokens_in = v["usageMetadata"]["promptTokenCount"].as_i64();
+    let tokens_out = v["usageMetadata"]["candidatesTokenCount"].as_i64();
     let text = v["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
         .ok_or("Gemini応答にテキストがありません")?;
@@ -251,5 +264,8 @@ pub fn gemini_ocr_translate(cfg: &Config, img: &Captured) -> Result<OcrOutput, S
     Ok(OcrOutput {
         text: source,
         translation: if translation.is_empty() { None } else { Some(translation) },
+        raw_response,
+        tokens_in,
+        tokens_out,
     })
 }

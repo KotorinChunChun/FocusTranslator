@@ -21,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SW_SHOW, SW_SHOWNORMAL, SendMessageW,
     SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
     WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -51,6 +51,14 @@ const IDC_ONNX_INSTALL: i32 = 123;
 const IDC_DEEPL_URL: i32 = 124;
 const IDC_GOOGLE_URL: i32 = 125;
 const IDC_GEMINI_URL: i32 = 126;
+const IDC_SRCLANG: i32 = 127;
+const IDC_LOG_ENABLED: i32 = 128;
+const IDC_DEBUG_MODE: i32 = 129;
+const IDC_LOG_MAX: i32 = 130;
+const IDC_GPROMPT_TR: i32 = 131;
+const IDC_GPROMPT_OCR: i32 = 132;
+const IDC_GPROMPT_RESET: i32 = 133;
+const IDC_OPEN_LOG: i32 = 134;
 
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
@@ -118,8 +126,8 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
             WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            520,
-            668,
+            640,
+            890,
             None,
             None,
             Some(instance),
@@ -171,6 +179,24 @@ fn edit(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32) -> H
         y,
         w,
         22,
+        id,
+    )
+}
+
+/// 複数行エディット (Geminiプロンプト用)
+fn multiline(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, h: i32, id: i32) -> HWND {
+    const ES_MULTILINE: u32 = 0x0004;
+    const ES_AUTOVSCROLL: u32 = 0x0040;
+    ctl(
+        parent,
+        instance,
+        w!("EDIT"),
+        "",
+        WS_BORDER | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE | ES_AUTOVSCROLL),
+        x,
+        y,
+        w,
+        h,
         id,
     )
 }
@@ -261,8 +287,10 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 140, 20, IDC_ONNX_STATUS);
     button(h, inst, "インストール", cx + 146, y - 2, 104, IDC_ONNX_INSTALL);
     y += step;
-    label(h, inst, "訳先言語", lx, y + 2, 150);
-    combo(h, inst, cx, y, 80, IDC_LANG);
+    label(h, inst, "翻訳元言語 / 訳先言語", lx, y + 2, 160);
+    combo(h, inst, cx, y, 80, IDC_SRCLANG);
+    label(h, inst, "→", cx + 86, y + 2, 16);
+    combo(h, inst, cx + 104, y, 80, IDC_LANG);
     y += step;
     // APIキー入力欄の右に、発行ページを開くボタンを配置
     let key_w = 190;
@@ -281,6 +309,14 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     label(h, inst, "Geminiモデル", lx, y + 2, 150);
     edit(h, inst, cx, y, cw, IDC_GMODEL);
     y += step;
+    // Geminiプロンプト(翻訳/OCR統合)。{{source_lang}} {{target_lang}} {{text}} を置換
+    label(h, inst, "Gemini翻訳プロンプト", lx, y + 2, 160);
+    multiline(h, inst, cx, y, cw, 44, IDC_GPROMPT_TR);
+    y += 50;
+    label(h, inst, "Gemini OCRプロンプト", lx, y + 2, 160);
+    multiline(h, inst, cx, y, cw, 44, IDC_GPROMPT_OCR);
+    button(h, inst, "既定に戻す", lx, y + 48, 110, IDC_GPROMPT_RESET);
+    y += 76;
     label(h, inst, "YomiToku サーバーURL", lx, y + 2, 160);
     edit(h, inst, cx, y, 190, IDC_YOMI);
     button(h, inst, "テスト", cx + 196, y - 2, 54, IDC_TEST_YOMI);
@@ -291,6 +327,14 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     y += step;
     checkbox(h, inst, "起動時に常駐する", lx, y, 200, IDC_AUTOSTART);
     checkbox(h, inst, "計測ログを有効化", cx + 40, y, 200, IDC_PERFLOG);
+    y += step;
+    // 実行ログ (SQLite) 設定
+    checkbox(h, inst, "実行ログを記録 (原文/訳文を平文保存)", lx, y, 280, IDC_LOG_ENABLED);
+    y += 26;
+    checkbox(h, inst, "デバッグモード (OCR画像をPNG保存)", lx, y, 280, IDC_DEBUG_MODE);
+    label(h, inst, "保持上限", cx + 130, y + 2, 60);
+    edit(h, inst, cx + 190, y, 60, IDC_LOG_MAX);
+    button(h, inst, "ログビューアを開く", cx + 256, y - 2, 110, IDC_OPEN_LOG);
     y += step;
     button(h, inst, "外部送信の同意状態をリセット", lx, y, 220, IDC_CONSENT_RESET);
     y += step + 10;
@@ -422,15 +466,21 @@ fn populate(h: HWND) {
         &TR_DISP,
         TR_KEYS.iter().position(|k| *k == cfg.default_translator).unwrap_or(0),
     );
+    combo_fill(h, IDC_SRCLANG, &LANGS, LANGS.iter().position(|k| *k == cfg.source_lang).unwrap_or(1));
     combo_fill(h, IDC_LANG, &LANGS, LANGS.iter().position(|k| *k == cfg.target_lang).unwrap_or(0));
     set_text(h, IDC_DEEPL, &cfg.deepl_key());
     set_text(h, IDC_GOOGLE, &cfg.google_key());
     set_text(h, IDC_GEMINI, &cfg.gemini_key());
     set_text(h, IDC_GMODEL, &cfg.gemini_model);
+    set_text(h, IDC_GPROMPT_TR, &cfg.gemini_translate_prompt);
+    set_text(h, IDC_GPROMPT_OCR, &cfg.gemini_ocr_prompt);
     set_text(h, IDC_YOMI, &cfg.yomitoku_url);
     set_text(h, IDC_NDL, &cfg.ndl_url);
     check_set(h, IDC_AUTOSTART, cfg.autostart);
     check_set(h, IDC_PERFLOG, cfg.perf_log);
+    check_set(h, IDC_LOG_ENABLED, cfg.log_enabled);
+    check_set(h, IDC_DEBUG_MODE, cfg.debug_mode);
+    set_text(h, IDC_LOG_MAX, &cfg.log_max_records.to_string());
     refresh_paddle_status(h);
     refresh_onnx_status(h);
 }
@@ -521,6 +571,7 @@ fn save(h: HWND) {
     }
     cfg.default_ocr = OCR_KEYS[combo_sel(h, IDC_OCR).min(OCR_KEYS.len() - 1)].to_string();
     cfg.default_translator = TR_KEYS[combo_sel(h, IDC_TR).min(TR_KEYS.len() - 1)].to_string();
+    cfg.source_lang = LANGS[combo_sel(h, IDC_SRCLANG).min(LANGS.len() - 1)].to_string();
     cfg.target_lang = LANGS[combo_sel(h, IDC_LANG).min(LANGS.len() - 1)].to_string();
     cfg.deepl_key_enc = util::dpapi_encrypt(get_text(h, IDC_DEEPL).trim());
     cfg.google_key_enc = util::dpapi_encrypt(get_text(h, IDC_GOOGLE).trim());
@@ -529,10 +580,21 @@ fn save(h: HWND) {
     if !gm.is_empty() {
         cfg.gemini_model = gm;
     }
+    let gpt = get_text(h, IDC_GPROMPT_TR);
+    if !gpt.trim().is_empty() {
+        cfg.gemini_translate_prompt = gpt;
+    }
+    let gpo = get_text(h, IDC_GPROMPT_OCR);
+    if !gpo.trim().is_empty() {
+        cfg.gemini_ocr_prompt = gpo;
+    }
     cfg.yomitoku_url = get_text(h, IDC_YOMI).trim().to_string();
     cfg.ndl_url = get_text(h, IDC_NDL).trim().to_string();
     cfg.autostart = check_get(h, IDC_AUTOSTART);
     cfg.perf_log = check_get(h, IDC_PERFLOG);
+    cfg.log_enabled = check_get(h, IDC_LOG_ENABLED);
+    cfg.debug_mode = check_get(h, IDC_DEBUG_MODE);
+    cfg.log_max_records = get_text(h, IDC_LOG_MAX).trim().parse().unwrap_or(5000).clamp(100, 100000);
 
     // 既定エンジンがクラウド/外部送信を伴う場合はここで同意を確認 (SPEC §9)
     confirm_default_consents(h, &mut cfg);
@@ -677,6 +739,20 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 IDC_DEEPL_URL => open_url(h, DEEPL_KEY_URL),
                 IDC_GOOGLE_URL => open_url(h, GOOGLE_KEY_URL),
                 IDC_GEMINI_URL => open_url(h, GEMINI_KEY_URL),
+                IDC_GPROMPT_RESET => {
+                    set_text(h, IDC_GPROMPT_TR, crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT);
+                    set_text(h, IDC_GPROMPT_OCR, crate::config::DEFAULT_GEMINI_OCR_PROMPT);
+                }
+                IDC_OPEN_LOG => {
+                    let inst = unsafe {
+                        windows::Win32::Foundation::HINSTANCE(
+                            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                                .map(|m| m.0)
+                                .unwrap_or(std::ptr::null_mut()),
+                        )
+                    };
+                    crate::logviewer::open(inst);
+                }
                 IDC_TEST_YOMI | IDC_TEST_NDL => {
                     let url =
                         get_text(h, if id == IDC_TEST_YOMI { IDC_YOMI } else { IDC_NDL });

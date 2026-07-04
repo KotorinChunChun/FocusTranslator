@@ -5,6 +5,8 @@
 
 mod capture;
 mod config;
+mod logdb;
+mod logviewer;
 mod ocr;
 mod onnx_translate;
 mod onnx_translate_install;
@@ -210,6 +212,9 @@ fn main() {
             if settings::is_open() && IsDialogMessageW(settings::hwnd(), &msg).as_bool() {
                 continue;
             }
+            if logviewer::is_open() && IsDialogMessageW(logviewer::hwnd(), &msg).as_bool() {
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -278,6 +283,10 @@ fn handle_command(hwnd: HWND, cmd: usize) {
         tray::CMD_REGION => {
             let inst = with_app(|app| app.instance).unwrap_or_default();
             region::start(inst, hwnd);
+        }
+        tray::CMD_LOGVIEWER => {
+            let inst = with_app(|app| app.instance).unwrap_or_default();
+            logviewer::open(inst);
         }
         tray::CMD_EXIT => unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);

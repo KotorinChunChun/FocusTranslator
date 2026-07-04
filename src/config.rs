@@ -18,10 +18,16 @@ pub struct Config {
     pub default_translator: String,
     /// 訳先言語 (原文がCJKの場合は自動で "en" へ反転)
     pub target_lang: String,
+    /// 翻訳元言語 (既定 en)
+    pub source_lang: String,
     pub deepl_key_enc: String,
     pub google_key_enc: String,
     pub gemini_key_enc: String,
     pub gemini_model: String,
+    /// Gemini翻訳プロンプト。プレースホルダ {{source_lang}} {{target_lang}} {{text}}
+    pub gemini_translate_prompt: String,
+    /// Gemini OCR+翻訳統合プロンプト。プレースホルダ {{source_lang}} {{target_lang}}
+    pub gemini_ocr_prompt: String,
     pub yomitoku_url: String,
     pub ndl_url: String,
     /// 外部送信同意: テキスト送信 / 画像送信 / 外部OCRサーバー送信
@@ -30,7 +36,20 @@ pub struct Config {
     pub consent_ext_ocr: bool,
     pub autostart: bool,
     pub perf_log: bool,
+    /// 実行ログをSQLiteに記録する (既定OFF)
+    pub log_enabled: bool,
+    /// デバッグモード: OCR時にキャプチャ画像をPNG保存 (既定OFF)
+    pub debug_mode: bool,
+    /// 認識ログの保持上限件数
+    pub log_max_records: u32,
 }
+
+/// Gemini翻訳プロンプトの既定値
+pub const DEFAULT_GEMINI_TRANSLATE_PROMPT: &str =
+    "Translate the following text from {{source_lang}} to {{target_lang}}. Output only the translation.\n\n{{text}}";
+/// Gemini OCR+翻訳統合プロンプトの既定値
+pub const DEFAULT_GEMINI_OCR_PROMPT: &str =
+    "Extract the text in this image and translate it from {{source_lang}} to {{target_lang}}. Respond with JSON only: {\"source\": \"<extracted text>\", \"translation\": \"<translation>\"}";
 
 impl Default for Config {
     fn default() -> Self {
@@ -41,10 +60,13 @@ impl Default for Config {
             default_ocr: "win".into(),
             default_translator: "local".into(),
             target_lang: "ja".into(),
+            source_lang: "en".into(),
             deepl_key_enc: String::new(),
             google_key_enc: String::new(),
             gemini_key_enc: String::new(),
             gemini_model: "gemini-3.5-flash".into(),
+            gemini_translate_prompt: DEFAULT_GEMINI_TRANSLATE_PROMPT.into(),
+            gemini_ocr_prompt: DEFAULT_GEMINI_OCR_PROMPT.into(),
             yomitoku_url: String::new(),
             ndl_url: String::new(),
             consent_text: false,
@@ -52,6 +74,9 @@ impl Default for Config {
             consent_ext_ocr: false,
             autostart: false,
             perf_log: false,
+            log_enabled: false,
+            debug_mode: false,
+            log_max_records: 5000,
         }
     }
 }

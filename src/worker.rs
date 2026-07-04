@@ -51,6 +51,69 @@ fn init_com() {
     }
 }
 
+/// 認識ログを記録し recognition_id を返す(ログOFF時は None)。
+#[allow(clippy::too_many_arguments)]
+fn log_recog(
+    cfg: &Config,
+    mode: &str,
+    method: &str,
+    engine: &str,
+    ms: u128,
+    text: Option<&str>,
+    error: Option<&str>,
+    image: Option<&Captured>,
+) -> Option<i64> {
+    if !cfg.log_enabled {
+        return None;
+    }
+    let id = crate::logdb::log_recognition(mode, method, engine, ms, text, error, image, cfg.debug_mode);
+    crate::logdb::rotate(cfg.log_max_records);
+    id
+}
+
+/// 翻訳成功ログを記録する(ログOFF時は何もしない)。
+fn log_trans_ok(cfg: &Config, recog_id: Option<i64>, ms: u128, t: &translate::Translated) {
+    if !cfg.log_enabled {
+        return;
+    }
+    crate::logdb::log_translation(
+        recog_id,
+        &t.engine,
+        &t.source_lang,
+        &t.target_lang,
+        ms,
+        t.cache_hit,
+        Some(&t.text),
+        None,
+        t.detail.request_json.as_deref(),
+        t.detail.response_json.as_deref(),
+        t.detail.tokens_in,
+        t.detail.tokens_out,
+    );
+}
+
+/// 翻訳失敗ログを記録する。
+fn log_trans_err(cfg: &Config, recog_id: Option<i64>, engine: &str, ms: u128, err: &str) {
+    if !cfg.log_enabled {
+        return;
+    }
+    crate::logdb::log_translation(
+        recog_id, engine, &cfg.source_lang, &cfg.target_lang, ms, false, None, Some(err),
+        None, None, None, None,
+    );
+}
+
+/// Gemini統合モードの翻訳ログを記録する(OCR側で取得した生応答・トークンを使う)。
+fn log_trans_gemini(cfg: &Config, recog_id: Option<i64>, ms: u128, tr: &str, o: &ocr::OcrOutput) {
+    if !cfg.log_enabled {
+        return;
+    }
+    crate::logdb::log_translation(
+        recog_id, "gemini", &cfg.source_lang, &cfg.target_lang, ms, false,
+        Some(tr), None, None, o.raw_response.as_deref(), o.tokens_in, o.tokens_out,
+    );
+}
+
 /// 同意が無いクラウド/外部OCRエンジンをローカルへ置き換える (SPEC §9: 同意なしで外部送信しない)
 fn effective_ocr(cfg: &Config) -> String {
     let e = cfg.default_ocr.as_str();
@@ -110,6 +173,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         if let Some(text) = uia::line_at_point(x, y) {
             let ms = t0.elapsed().as_millis();
             util::perf_log(cfg.perf_log, &format!("source UIA {ms}ms"));
+            let recog_id = log_recog(&cfg, "hold", "uia", "uia", ms, Some(&text), None, None);
             post(main, generation, WorkerMsg::Source {
                 text: text.clone(),
                 method: "UIA",
@@ -118,7 +182,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 anchor: (x, y),
                 ms,
             });
-            run_translation(generation, &cfg, &text, main);
+            run_translation(generation, &cfg, &text, main, recog_id);
             return;
         }
 
@@ -127,57 +191,69 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         let band = match capture_band(x, y, target, 1200, 160) {
             Ok(b) => b,
             Err(e) => {
+                log_recog(&cfg, "hold", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
                 post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y) });
                 return;
             }
         };
-        let mut out = ocr::run(&engine, &cfg, &band.img, Some(band.focus_y));
+        let mut used = band;
+        let mut out = ocr::run(&engine, &cfg, &used.img, Some(used.focus_y));
         if out.is_err() {
             // 帯を拡大して再試行 (SPEC §6.3)
             if let Ok(wide) = capture_band(x, y, target, 1800, 340) {
                 out = ocr::run(&engine, &cfg, &wide.img, Some(wide.focus_y));
+                used = wide;
             }
         }
         match out {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("source OCR({engine}) {ms}ms"));
+                let recog_id =
+                    log_recog(&cfg, "hold", "ocr", &engine, ms, Some(&o.text), None, Some(&used.img));
                 post(main, generation, WorkerMsg::Source {
                     text: o.text.clone(),
                     method: "OCR",
-                    img: Some(Arc::new(band.img)),
+                    img: Some(Arc::new(used.img)),
                     pin: false,
                     anchor: (x, y),
                     ms,
                 });
-                if let Some(tr) = o.translation {
+                if let Some(tr) = &o.translation {
                     // Gemini統合モード: 訳文も同時取得済み
+                    let tms = t0.elapsed().as_millis();
+                    log_trans_gemini(&cfg, recog_id, tms, tr, &o);
                     post(main, generation, WorkerMsg::Translation {
-                        text: tr,
+                        text: tr.clone(),
                         badge: Some("Gemini統合".into()),
-                        ms: t0.elapsed().as_millis(),
+                        ms: tms,
                     });
                 } else {
-                    run_translation(generation, &cfg, &o.text, main);
+                    run_translation(generation, &cfg, &o.text, main, recog_id);
                 }
             }
             Err(e) => {
+                log_recog(&cfg, "hold", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
                 post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y) });
             }
         }
     });
 }
 
-fn run_translation(generation: u64, cfg: &Config, text: &str, main: isize) {
+fn run_translation(generation: u64, cfg: &Config, text: &str, main: isize, recog_id: Option<i64>) {
     let t0 = Instant::now();
     let engine = effective_translator(cfg);
     match translate::translate(&engine, cfg, text) {
         Ok(t) => {
             let ms = t0.elapsed().as_millis();
             util::perf_log(cfg.perf_log, &format!("translate {engine} {ms}ms"));
+            log_trans_ok(cfg, recog_id, ms, &t);
             post(main, generation, WorkerMsg::Translation { text: t.text, badge: t.badge, ms });
         }
-        Err(e) => post(main, generation, WorkerMsg::TranslationFailed { msg: e }),
+        Err(e) => {
+            log_trans_err(cfg, recog_id, &engine, t0.elapsed().as_millis(), &e);
+            post(main, generation, WorkerMsg::TranslationFailed { msg: e });
+        }
     }
 }
 
@@ -212,6 +288,9 @@ pub fn reocr(
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("reocr {ocr_engine} {ms}ms"));
+                // チップ操作による再OCR: mode="chip"
+                let recog_id =
+                    log_recog(&cfg, "chip", "ocr", &ocr_engine, ms, Some(&o.text), None, Some(&image));
                 post(main, generation, WorkerMsg::Source {
                     text: o.text.clone(),
                     method: "OCR",
@@ -220,38 +299,55 @@ pub fn reocr(
                     anchor,
                     ms,
                 });
-                if let Some(tr) = o.translation {
+                if let Some(tr) = &o.translation {
+                    let tms = t0.elapsed().as_millis();
+                    log_trans_gemini(&cfg, recog_id, tms, tr, &o);
                     post(main, generation, WorkerMsg::Translation {
-                        text: tr,
+                        text: tr.clone(),
                         badge: Some("Gemini統合".into()),
-                        ms: t0.elapsed().as_millis(),
+                        ms: tms,
                     });
                 } else {
-                    retranslate_inner(generation, &tr_engine, &cfg, &o.text, main);
+                    retranslate_inner(generation, &tr_engine, &cfg, &o.text, main, recog_id);
                 }
             }
-            Err(e) => post(main, generation, WorkerMsg::TranslationFailed { msg: e }),
+            Err(e) => {
+                log_recog(&cfg, "chip", "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e), None);
+                post(main, generation, WorkerMsg::TranslationFailed { msg: e });
+            }
         }
     });
 }
 
-/// 翻訳チップ切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)
+/// 翻訳チップ切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)。
+/// 原文は前サイクルのものを流用するため新規の認識ログは作らない(翻訳ログのみ、recog_id=None)。
 pub fn retranslate(generation: u64, engine: String, cfg: Config, text: String, main: isize) {
     std::thread::spawn(move || {
         init_com();
-        retranslate_inner(generation, &engine, &cfg, &text, main);
+        retranslate_inner(generation, &engine, &cfg, &text, main, None);
     });
 }
 
-fn retranslate_inner(generation: u64, engine: &str, cfg: &Config, text: &str, main: isize) {
+fn retranslate_inner(
+    generation: u64,
+    engine: &str,
+    cfg: &Config,
+    text: &str,
+    main: isize,
+    recog_id: Option<i64>,
+) {
     let t0 = Instant::now();
     match translate::translate(engine, cfg, text) {
         Ok(t) => {
             let ms = t0.elapsed().as_millis();
             util::perf_log(cfg.perf_log, &format!("translate {engine} {ms}ms"));
+            log_trans_ok(cfg, recog_id, ms, &t);
             post(main, generation, WorkerMsg::Translation { text: t.text, badge: t.badge, ms });
         }
-        Err(e) => post(main, generation, WorkerMsg::TranslationFailed { msg: e }),
+        Err(e) => {
+            log_trans_err(cfg, recog_id, engine, t0.elapsed().as_millis(), &e);
+            post(main, generation, WorkerMsg::TranslationFailed { msg: e });
+        }
     }
 }
 
@@ -315,6 +411,8 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("region OCR({engine}) {ms}ms"));
+                let recog_id =
+                    log_recog(&cfg, "region", "ocr", &engine, ms, Some(&o.text), None, Some(&img));
                 post(main, generation, WorkerMsg::Source {
                     text: o.text.clone(),
                     method: "OCR",
@@ -323,17 +421,22 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
                     anchor,
                     ms,
                 });
-                if let Some(tr) = o.translation {
+                if let Some(tr) = &o.translation {
+                    let tms = t0.elapsed().as_millis();
+                    log_trans_gemini(&cfg, recog_id, tms, tr, &o);
                     post(main, generation, WorkerMsg::Translation {
-                        text: tr,
+                        text: tr.clone(),
                         badge: Some("Gemini統合".into()),
-                        ms: t0.elapsed().as_millis(),
+                        ms: tms,
                     });
                 } else {
-                    run_translation(generation, &cfg, &o.text, main);
+                    run_translation(generation, &cfg, &o.text, main, recog_id);
                 }
             }
-            Err(e) => post(main, generation, WorkerMsg::Error { msg: e, anchor }),
+            Err(e) => {
+                log_recog(&cfg, "region", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
+                post(main, generation, WorkerMsg::Error { msg: e, anchor });
+            }
         }
     });
 }
