@@ -4,9 +4,8 @@ use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, HMENU, IDI_APPLICATION, LoadIconW,
-    MF_SEPARATOR, MF_STRING, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, HMENU, MF_SEPARATOR, MF_STRING,
+    SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
 };
 use windows::core::w;
 
@@ -23,9 +22,7 @@ fn make_nid(hwnd: HWND) -> NOTIFYICONDATAW {
         uCallbackMessage: crate::WM_APP_TRAY,
         ..Default::default()
     };
-    unsafe {
-        nid.hIcon = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
-    }
+    nid.hIcon = crate::app_icon();
     let tip: Vec<u16> = "Focus Translator".encode_utf16().collect();
     nid.szTip[..tip.len()].copy_from_slice(&tip);
     nid

@@ -12,12 +12,13 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::UI::Controls::EM_SETPASSWORDCHAR;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
     CBS_DROPDOWNLIST, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DestroyWindow, ES_AUTOHSCROLL, ES_PASSWORD, GetWindowTextLengthW,
     GetWindowTextW, HMENU, IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_OK,
-    MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SW_SHOW, SendMessageW,
+    MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SW_SHOW, SW_SHOWNORMAL, SendMessageW,
     SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
     WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST, WS_SYSMENU,
     WS_TABSTOP, WS_VISIBLE,
@@ -45,11 +46,22 @@ const IDC_TEST_YOMI: i32 = 118;
 const IDC_TEST_NDL: i32 = 119;
 const IDC_PADDLE_STATUS: i32 = 120;
 const IDC_PADDLE_INSTALL: i32 = 121;
+const IDC_ONNX_STATUS: i32 = 122;
+const IDC_ONNX_INSTALL: i32 = 123;
+const IDC_DEEPL_URL: i32 = 124;
+const IDC_GOOGLE_URL: i32 = 125;
+const IDC_GEMINI_URL: i32 = 126;
 
-/// PaddleOCRインストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
+/// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
+const WM_ONNX_DONE: u32 = WM_APP + 11;
 /// ● (U+25CF): APIキー入力欄のマスク文字
 const PASSWORD_CHAR: usize = 0x25CF;
+
+/// 各APIキーの発行ページ(実際に確認済みの現行URL)
+const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
+const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
+const GEMINI_KEY_URL: &str = "https://aistudio.google.com/api-keys";
 
 const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
 const OCR_KEYS: [&str; 5] = ["win", "paddle", "yomitoku", "ndl", "gemini"];
@@ -88,6 +100,7 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
                     lpfnWndProc: Some(wndproc),
                     hInstance: instance,
                     hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                    hIcon: crate::app_icon(),
                     hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
                         (COLOR_BTNFACE.0 + 1) as usize as *mut _,
                     ),
@@ -106,7 +119,7 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             520,
-            636,
+            668,
             None,
             None,
             Some(instance),
@@ -243,17 +256,27 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     label(h, inst, "既定翻訳エンジン", lx, y + 2, 150);
     combo(h, inst, cx, y, 150, IDC_TR);
     y += step;
+    // ローカルONNX翻訳 導入状況 + ワンクリックインストール (SPEC §7.2, §13)
+    label(h, inst, "ローカルONNX翻訳", lx, y + 2, 150);
+    ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 140, 20, IDC_ONNX_STATUS);
+    button(h, inst, "インストール", cx + 146, y - 2, 104, IDC_ONNX_INSTALL);
+    y += step;
     label(h, inst, "訳先言語", lx, y + 2, 150);
     combo(h, inst, cx, y, 80, IDC_LANG);
     y += step;
+    // APIキー入力欄の右に、発行ページを開くボタンを配置
+    let key_w = 190;
     label(h, inst, "DeepL APIキー", lx, y + 2, 150);
-    password_edit(h, inst, cx, y, cw, IDC_DEEPL);
+    password_edit(h, inst, cx, y, key_w, IDC_DEEPL);
+    button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 108, IDC_DEEPL_URL);
     y += step;
-    label(h, inst, "Google APIキー", lx, y + 2, 150);
-    password_edit(h, inst, cx, y, cw, IDC_GOOGLE);
+    label(h, inst, "Google Trans APIキー", lx, y + 2, 160);
+    password_edit(h, inst, cx, y, key_w, IDC_GOOGLE);
+    button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 108, IDC_GOOGLE_URL);
     y += step;
     label(h, inst, "Gemini APIキー", lx, y + 2, 150);
-    password_edit(h, inst, cx, y, cw, IDC_GEMINI);
+    password_edit(h, inst, cx, y, key_w, IDC_GEMINI);
+    button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 108, IDC_GEMINI_URL);
     y += step;
     label(h, inst, "Geminiモデル", lx, y + 2, 150);
     edit(h, inst, cx, y, cw, IDC_GMODEL);
@@ -409,6 +432,7 @@ fn populate(h: HWND) {
     check_set(h, IDC_AUTOSTART, cfg.autostart);
     check_set(h, IDC_PERFLOG, cfg.perf_log);
     refresh_paddle_status(h);
+    refresh_onnx_status(h);
 }
 
 /// PaddleOCRの導入状況をステータス欄・ボタンに反映する
@@ -417,6 +441,73 @@ fn refresh_paddle_status(h: HWND) {
     set_text(h, IDC_PADDLE_STATUS, if installed { "導入済み" } else { "未導入" });
     unsafe {
         let _ = EnableWindow(get_dlg_item(h, IDC_PADDLE_INSTALL), !installed);
+    }
+}
+
+/// ローカルONNX翻訳モデルの導入状況をステータス欄・ボタンに反映する
+fn refresh_onnx_status(h: HWND) {
+    let installed = crate::onnx_translate_install::installed();
+    set_text(h, IDC_ONNX_STATUS, if installed { "導入済み" } else { "未導入" });
+    unsafe {
+        let _ = EnableWindow(get_dlg_item(h, IDC_ONNX_INSTALL), !installed);
+    }
+}
+
+/// インストールボタン押下時の共通処理: ボタン無効化→バックグラウンドDL→完了時に done_msg を通知
+fn start_install(h: HWND, status_id: i32, button_id: i32, done_msg: u32, install_fn: fn() -> Result<(), String>) {
+    unsafe {
+        let _ = EnableWindow(get_dlg_item(h, button_id), false);
+    }
+    set_text(h, status_id, "ダウンロード中…");
+    let hwnd_isize = h.0 as isize;
+    std::thread::spawn(move || {
+        let result = install_fn();
+        let (w, l) = match result {
+            Ok(()) => (1usize, 0isize),
+            Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
+        };
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), done_msg, WPARAM(w), LPARAM(l));
+        }
+    });
+}
+
+/// インストール完了通知 (WM_PADDLE_DONE / WM_ONNX_DONE) の共通処理
+fn handle_install_done(h: HWND, wparam: WPARAM, lparam: LPARAM, refresh: fn(HWND), success_msg: &str) {
+    if wparam.0 == 1 {
+        refresh(h);
+        unsafe {
+            let wide = to_wide(success_msg);
+            MessageBoxW(
+                Some(h),
+                PCWSTR(wide.as_ptr()),
+                w!("Focus Translator"),
+                MB_OK | MB_ICONINFORMATION,
+            );
+        }
+    } else {
+        let msg = unsafe { *Box::from_raw(lparam.0 as *mut String) };
+        refresh(h);
+        unsafe {
+            let wide = to_wide(&msg);
+            MessageBoxW(Some(h), PCWSTR(wide.as_ptr()), w!("インストールエラー"), MB_OK);
+        }
+    }
+}
+
+/// 既定ブラウザで指定URLを開く
+fn open_url(h: HWND, url: &str) {
+    unsafe {
+        let wide_op = to_wide("open");
+        let wide_url = to_wide(url);
+        let _ = ShellExecuteW(
+            Some(h),
+            PCWSTR(wide_op.as_ptr()),
+            PCWSTR(wide_url.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 
@@ -566,27 +657,26 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     }
                 }
                 IDC_PADDLE_INSTALL => {
-                    unsafe {
-                        let _ = EnableWindow(get_dlg_item(h, IDC_PADDLE_INSTALL), false);
-                    }
-                    set_text(h, IDC_PADDLE_STATUS, "ダウンロード中…");
-                    let hwnd_isize = h.0 as isize;
-                    std::thread::spawn(move || {
-                        let result = crate::paddle_install::install();
-                        let (w, l) = match result {
-                            Ok(()) => (1usize, 0isize),
-                            Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
-                        };
-                        unsafe {
-                            let _ = PostMessageW(
-                                Some(HWND(hwnd_isize as *mut _)),
-                                WM_PADDLE_DONE,
-                                WPARAM(w),
-                                LPARAM(l),
-                            );
-                        }
-                    });
+                    start_install(
+                        h,
+                        IDC_PADDLE_STATUS,
+                        IDC_PADDLE_INSTALL,
+                        WM_PADDLE_DONE,
+                        crate::paddle_install::install,
+                    );
                 }
+                IDC_ONNX_INSTALL => {
+                    start_install(
+                        h,
+                        IDC_ONNX_STATUS,
+                        IDC_ONNX_INSTALL,
+                        WM_ONNX_DONE,
+                        crate::onnx_translate_install::install,
+                    );
+                }
+                IDC_DEEPL_URL => open_url(h, DEEPL_KEY_URL),
+                IDC_GOOGLE_URL => open_url(h, GOOGLE_KEY_URL),
+                IDC_GEMINI_URL => open_url(h, GEMINI_KEY_URL),
                 IDC_TEST_YOMI | IDC_TEST_NDL => {
                     let url =
                         get_text(h, if id == IDC_TEST_YOMI { IDC_YOMI } else { IDC_NDL });
@@ -614,24 +704,23 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             LRESULT(0)
         }
         WM_PADDLE_DONE => {
-            if wparam.0 == 1 {
-                refresh_paddle_status(h);
-                unsafe {
-                    MessageBoxW(
-                        Some(h),
-                        w!("PaddleOCRのモデルをインストールしました。"),
-                        w!("Focus Translator"),
-                        MB_OK | MB_ICONINFORMATION,
-                    );
-                }
-            } else {
-                let msg = unsafe { *Box::from_raw(lparam.0 as *mut String) };
-                refresh_paddle_status(h);
-                unsafe {
-                    let wide = to_wide(&msg);
-                    MessageBoxW(Some(h), PCWSTR(wide.as_ptr()), w!("インストールエラー"), MB_OK);
-                }
-            }
+            handle_install_done(
+                h,
+                wparam,
+                lparam,
+                refresh_paddle_status,
+                "PaddleOCRのモデルをインストールしました。",
+            );
+            LRESULT(0)
+        }
+        WM_ONNX_DONE => {
+            handle_install_done(
+                h,
+                wparam,
+                lparam,
+                refresh_onnx_status,
+                "ローカルONNX翻訳モデルをインストールしました。",
+            );
             LRESULT(0)
         }
         WM_CLOSE => {

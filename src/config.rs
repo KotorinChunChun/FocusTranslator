@@ -44,7 +44,7 @@ impl Default for Config {
             deepl_key_enc: String::new(),
             google_key_enc: String::new(),
             gemini_key_enc: String::new(),
-            gemini_model: "gemini-2.5-flash".into(),
+            gemini_model: "gemini-3.5-flash".into(),
             yomitoku_url: String::new(),
             ndl_url: String::new(),
             consent_text: false,

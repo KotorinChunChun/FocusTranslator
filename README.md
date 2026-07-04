@@ -8,7 +8,7 @@
 cargo build --release
 ```
 
-生成物: `target\release\focus-translator.exe`(単一EXE、外部DLL不要)
+生成物: `target\release\focus-translator.exe`。ONNX Runtimeは静的リンクのため通常動作(CPU推論)に外部DLLは不要。`DirectML.dll` は同梱されるが遅延ロードのDirectML実行プロバイダ用で、未使用のため無くても起動・動作する。
 
 要件: Rust stable (x86_64-pc-windows-msvc), Windows 11
 
@@ -36,8 +36,10 @@ src/
 ├── translate.rs 翻訳エンジン群 (DeepL / Google / Gemini / ローカル) + キャッシュ
 ├── overlay.rs   結果オーバーレイ (原文小・訳文大・チップ列、部分ヒットテスト)
 ├── region.rs    範囲指定モードの選択オーバーレイ
-├── settings.rs  設定画面 (ホットキー/エンジン/APIキー[マスク表示]/URL/常駐/ログ/PaddleOCR導入)
-├── paddle_install.rs  PaddleOCR(RapidOCR配布ONNX)モデルのSHA256検証付きダウンロード
+├── settings.rs  設定画面 (ホットキー/エンジン/APIキー[マスク表示+取得ページ]/URL/常駐/ログ/モデル導入)
+├── paddle_install.rs         PaddleOCR(RapidOCR配布ONNX)モデルのSHA256検証付きダウンロード
+├── onnx_translate_install.rs ローカルONNX翻訳(opus-mt ja⇄en)モデルのSHA256検証付きダウンロード
+├── onnx_translate.rs         ローカルONNX翻訳の推論本体 (ort + tokenizers、貪欲法デコード)
 ├── tray.rs      タスクトレイ常駐
 ├── config.rs    設定永続化 (%APPDATA%\FocusTranslator\config.json)
 └── util.rs      DPAPI暗号化、クリップボード、計測ログ
@@ -51,8 +53,8 @@ src/
 | YomiToku / NDL-OCR | OCR (外部サーバー) | ✅ HTTPクライアント実装済み (`POST /ocr`, `GET /health`) |
 | Gemini | OCR+翻訳統合 | ✅ 実装済み (画像→原文+訳文一括) |
 | PaddleOCR | OCR | ⏳ モデル導入(設定画面からワンクリックDL+SHA256検証、[paddle_install.rs](src/paddle_install.rs))は実装済み。ONNX Runtime推論は次版 |
-| DeepL / Google / Gemini | 翻訳 | ✅ 実装済み (REST) |
-| ローカルONNX翻訳 | 翻訳 (既定) | ⏳ モデル配布基盤が未整備のため推論は次版。未導入時はエラー表示し、クラウドエンジンへの切替を案内 |
+| DeepL / Google Trans / Gemini | 翻訳 | ✅ 実装済み (REST)。設定画面に各APIキー取得ページを開くボタンあり |
+| ローカルONNX翻訳 | 翻訳 (既定) | ✅ 実装済み。opus-mt-ja-en / opus-mt-en-jap (ONNX量子化, [onnx_translate.rs](src/onnx_translate.rs)) による貪欲法(greedy)デコード。KVキャッシュ未使用の簡易実装 |
 
 外部OCRサーバーの想定API: `POST {url}/ocr` (body: `image/png`) → `{"text": "..."}` または `{"results": [{"text": "..."}]}`、`GET {url}/health`。
 
@@ -64,11 +66,28 @@ src/
 - APIキーは DPAPI で暗号化して保存。キー・送信テキスト・画像はログに出さない。設定画面の入力欄も ● でマスク表示。
 - 計測ログ(設定で有効化)はステージ別所要時間のみ記録。
 
-## PaddleOCRモデルの導入
+## モデルの導入(ワンクリックインストール)
 
-設定画面の「PaddleOCR」行で導入状況を確認でき、未導入時は「インストール」ボタンでワンクリック導入できる。
-配布元は [RapidAI/RapidOCR](https://github.com/RapidAI/RapidOCR)(ModelScope)公開の PP-OCRv4 mobile 版 ONNX(検出/日本語認識/辞書の3ファイル、計約14MB)。ダウンロード後にSHA256を検証し、一致した場合のみ `%APPDATA%\FocusTranslator\models\paddleocr\` に配置する(不一致時は破棄しエラー表示)。
-推論(ONNX Runtime連携)自体は次版対応で、導入済みの状態でPaddleOCRチップを選択すると「推論は未実装です」と表示される。
+設定画面の「PaddleOCR」「ローカルONNX翻訳」の各行で導入状況を確認でき、未導入時は「インストール」ボタンでワンクリック導入できる。いずれもダウンロード後にSHA256を検証し、一致した場合のみ配置する(不一致時は破棄しエラー表示)。
+
+- **PaddleOCR**: 配布元は [RapidAI/RapidOCR](https://github.com/RapidAI/RapidOCR)(ModelScope)公開の PP-OCRv4 mobile 版 ONNX(検出/日本語認識/辞書の3ファイル、計約14MB)。`%APPDATA%\FocusTranslator\models\paddleocr\` に配置。OCRの推論(ONNX Runtime連携)は次版対応で、導入済みの状態でPaddleOCRチップを選択すると「推論は未実装です」と表示される。
+- **ローカルONNX翻訳**: 配布元は [Xenova/opus-mt-ja-en](https://huggingface.co/Xenova/opus-mt-ja-en) / [Xenova/opus-mt-en-jap](https://huggingface.co/Xenova/opus-mt-en-jap)(Helsinki-NLP OPUS-MTのONNX量子化版)。日→英・英→日それぞれのencoder/decoder/tokenizer、計6ファイル・約200MB。`%APPDATA%\FocusTranslator\models\onnx_translate\` に配置。導入後は実際に推論が動作する(下記「ローカルONNX翻訳の実装詳細」参照)。
+
+### ローカルONNX翻訳の実装詳細
+
+- `ort` クレート (ONNX Runtime 2.x, 静的リンク) + `tokenizers` クレートで推論する。
+- デコードは貪欲法(greedy, ビームサーチではない)。KVキャッシュは使用せず、生成ステップごとにデコーダ入力列全体を再計算する簡易実装(系列長に対しO(n²)だが実装がシンプルで確実)。
+- HFのgeneration_configにある `bad_words_ids`(自身の開始/パディングトークンの生成禁止)相当のロジックを実装している。これを入れないと一部の組み合わせで空文字列や意味不明な出力になることを検証で確認した。
+- Xenova配布のtokenizer.jsonはPrecompiledノーマライザのcharsmapを含まないため、読込時に当該ノーマライザを無効化している(既知の制約。多くの一般的な文では実用上問題ない)。
+- **既知の品質限界**: `opus-mt-en-jap` (英→日) は Helsinki-NLP OPUS-MT の中でも品質が低いモデルとして知られており、実際に検証しても翻訳が不自然になるケースが多い(例: "Thank you very much." → "あなたは多くの人を驚かせた。"のような的外れな訳)。日→英 (`opus-mt-ja-en`) は比較的良好。より高品質な翻訳が必要な場合はクラウドエンジン(DeepL/Google/Gemini)への切替を推奨する。
+
+## APIキーの取得ページ
+
+設定画面の各APIキー入力欄の右側にある「取得ページ」ボタンから、既定ブラウザで発行ページを開ける。
+
+- DeepL: https://www.deepl.com/en/your-account/keys
+- Google Trans (Google Cloud Translation API): https://console.cloud.google.com/apis/credentials
+- Gemini: https://aistudio.google.com/api-keys
 
 ## 実測値 (開発環境でのスモークテスト)
 
@@ -77,9 +96,9 @@ src/
 
 ## SPECからの逸脱・未実装事項
 
-- **ローカルONNX翻訳の推論** (M3): モデル選定・配布(チェックサム検証付きダウンロード)が前提のため次版。エンジン基盤・キャッシュ・フォールバック(クラウド失敗→local バッジ)は実装済み。
+- **ローカルONNX翻訳** (M3): モデル導入・推論とも実装済み(貪欲法デコード、KVキャッシュ未使用)。英→日方向はモデル自体の品質限界により訳文が粗い場合がある(上記参照)。
 - **PaddleOCR** (M0): モデル導入(ダウンロード+チェックサム検証)は実装済み。推論(ONNX Runtime)は次版。
-- **行矩形逸脱の監視**: UIAの行矩形ではなくカーソル移動距離(48px)で再認識をトリガする簡易実装。
+- **行矩形逸脱の監視**: ホールド中はマウス移動による再認識・表示位置の移動を行わない仕様(ユーザー要望により無効化)。次の行を見るには一度キーを離して押し直す。
 - **候補展開・解説ボタン** (SPEC §10): 初版UIでは未実装(コピー・閉じる・チップ切替は実装済み)。
 - **自動更新・インストーラ** (SPEC §13): 未実装(単一EXE配布)。
 - ゲーム / HDR / 保護コンテンツ / 排他フルスクリーン / 縦書きは SPEC §15 のとおり対象外。

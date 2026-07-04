@@ -6,6 +6,8 @@
 mod capture;
 mod config;
 mod ocr;
+mod onnx_translate;
+mod onnx_translate_install;
 mod overlay;
 mod paddle_install;
 mod region;
@@ -34,12 +36,22 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GA_ROOT, GetAncestor,
-    GetCursorPos, GetMessageW, IsDialogMessageW, KillTimer, MB_ICONWARNING, MB_OK, MSG,
-    MessageBoxW, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, WM_APP, WM_COMMAND,
-    WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WindowFromPoint,
-    WS_OVERLAPPED,
+    GetCursorPos, GetMessageW, HICON, IsDialogMessageW, KillTimer, LoadIconW, MB_ICONWARNING,
+    MB_OK, MSG, MessageBoxW, PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, WM_APP,
+    WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    WindowFromPoint, WS_OVERLAPPED,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
+
+/// 埋め込みリソース(build.rs で ID "1" として同梱)からアプリアイコンを取得する。
+/// exeアイコン・通知領域アイコン・各ウィンドウのタイトルバーアイコンで共用する。
+#[allow(clippy::manual_dangling_ptr)] // MAKEINTRESOURCE(1) 相当。実在するリソースIDを指すため意図的
+pub fn app_icon() -> HICON {
+    unsafe {
+        let inst = HINSTANCE(GetModuleHandleW(None).map(|m| m.0).unwrap_or(std::ptr::null_mut()));
+        LoadIconW(Some(inst), PCWSTR(1usize as *const u16)).unwrap_or_default()
+    }
+}
 
 // アプリ内メッセージ
 pub const WM_APP_TRAY: u32 = WM_APP + 1;
@@ -126,6 +138,7 @@ fn main() {
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: instance,
+            hIcon: app_icon(),
             lpszClassName: class,
             ..Default::default()
         };
@@ -301,16 +314,8 @@ fn tick() {
                 None
             }
             (true, true) => {
-                // ホールド継続中: カーソルが行矩形から大きく逸脱したら再認識
-                if app.mode == Mode::ShowingHold {
-                    let mut pt = POINT::default();
-                    let _ = unsafe { GetCursorPos(&mut pt) };
-                    let dx = pt.x - app.origin.x;
-                    let dy = pt.y - app.origin.y;
-                    if dx * dx + dy * dy > 48 * 48 {
-                        return start_cycle_params(app);
-                    }
-                }
+                // ホールド継続中は、マウスが動いても再認識・表示位置の移動を行わない。
+                // キーを離すまで表示はその場に固定する(ユーザー要望)。
                 None
             }
             _ => None,
@@ -518,7 +523,7 @@ fn handle_chip(id: usize) {
 fn engine_unavailable_msg(key: &str) -> String {
     match key {
         "paddle" => "PaddleOCRのモデルが未導入です。設定画面からインストールしてください".into(),
-        "local" => "ローカル翻訳モデルが未導入です(設定画面を確認)".into(),
+        "local" => "ローカル翻訳モデルが未導入です。設定画面からインストールしてください".into(),
         "yomitoku" | "ndl" => {
             "サーバーURLが未設定です。設定画面で接続テストを実行してください".into()
         }

@@ -18,9 +18,9 @@ pub struct Translated {
     pub badge: Option<String>,
 }
 
-/// ローカル翻訳モデルの有無 (%APPDATA%\FocusTranslator\models\translator.onnx)
+/// ローカル翻訳モデルの有無 (%APPDATA%\FocusTranslator\models\onnx_translate\)
 pub fn local_model_available() -> bool {
-    util::config_dir().join("models").join("translator.onnx").exists()
+    crate::onnx_translate_install::installed()
 }
 
 /// 原文から訳先言語を決める(CJK原文なら英語へ、それ以外は設定言語へ)
@@ -78,14 +78,10 @@ fn translate_once(engine: &str, cfg: &Config, text: &str, target: &str) -> Resul
     }
 }
 
-/// ローカルONNX翻訳。初版はモデル配布基盤が未整備のため、
-/// モデルファイルが存在しない場合はエラーを返す(推論実装は今後のマイルストーン)。
-fn translate_local(_text: &str, _target: &str) -> Result<String, String> {
-    if local_model_available() {
-        Err("ローカル翻訳モデルの推論は未実装です(次版で対応)".into())
-    } else {
-        Err("ローカル翻訳モデルが未導入です。設定画面からクラウドエンジンを設定してください".into())
-    }
+/// ローカルONNX翻訳 (opus-mt-ja-en / opus-mt-en-jap, ort によるONNX Runtime推論)。
+/// モデル導入(ダウンロード)は onnx_translate_install、推論本体は onnx_translate を参照。
+fn translate_local(text: &str, target: &str) -> Result<String, String> {
+    crate::onnx_translate::translate(text, target == "ja")
 }
 
 fn translate_deepl(cfg: &Config, text: &str, target: &str) -> Result<String, String> {
