@@ -12,6 +12,20 @@ cargo build --release
 
 要件: Rust stable (x86_64-pc-windows-msvc), Windows 11
 
+## 設定・モデルの保存先
+
+既定では `%APPDATA%\FocusTranslator\` (config.json, models\, ログ) に保存される。
+開発・動作確認時に実際のユーザー設定(APIキー・サーバーURL・導入済みモデル)を壊さないよう、
+環境変数 `FOCUSTRANSLATOR_DATA_DIR` を設定すると保存先を任意のディレクトリに差し替えられる。
+
+```
+set FOCUSTRANSLATOR_DATA_DIR=C:\path\to\scratch\dir
+focus-translator.exe
+```
+
+動作確認やテストを行う場合は、この環境変数で隔離したディレクトリを使い、
+`%APPDATA%\FocusTranslator\` 本体には触れないこと。
+
 ## 使い方
 
 | 操作 | 動作 |

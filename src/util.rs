@@ -15,7 +15,14 @@ pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// 設定・モデルの保存先。`FOCUSTRANSLATOR_DATA_DIR` が設定されていればそちらを使う
+/// (動作確認・自動テスト用に実際のユーザー設定と分離するため)。通常は `%APPDATA%\FocusTranslator`。
 pub fn config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("FOCUSTRANSLATOR_DATA_DIR") {
+        let p = PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&p);
+        return p;
+    }
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
     let p = PathBuf::from(base).join("FocusTranslator");
     let _ = std::fs::create_dir_all(&p);
