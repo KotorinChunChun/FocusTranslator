@@ -226,9 +226,16 @@ pub fn rotate(max_records: u32) {
         }
     }
     for id in old_ids {
-        let _ = guard.execute("DELETE FROM translation_logs WHERE recognition_id=?1", rusqlite::params![id]);
+        delete_recog_children(&guard, id);
         let _ = guard.execute("DELETE FROM recognition_logs WHERE id=?1", rusqlite::params![id]);
     }
+}
+
+/// 認識ログに紐づく子レコード(翻訳・解説)を削除する。
+/// FK の ON DELETE CASCADE は PRAGMA foreign_keys が既定OFFのため明示削除する。
+fn delete_recog_children(guard: &Connection, id: i64) {
+    let _ = guard.execute("DELETE FROM translation_logs WHERE recognition_id=?1", rusqlite::params![id]);
+    let _ = guard.execute("DELETE FROM explanations WHERE recognition_id=?1", rusqlite::params![id]);
 }
 
 // ---- ビューア用の読み出し ----
@@ -270,92 +277,55 @@ pub struct TransRow {
     pub tokens_out: Option<i64>,
 }
 
-/// 認識ログを新しい順に最大 limit 件取得
-pub fn recent_recognitions(limit: usize) -> Vec<RecogRow> {
-    let Some(m) = conn() else { return Vec::new() };
-    let Ok(guard) = m.lock() else { return Vec::new() };
-    let mut stmt = match guard.prepare(
-        "SELECT id, ts_ms, mode, method, engine, duration_ms, source_text, success, error, image_path, app_exe, app_title, uia_path
-         FROM recognition_logs ORDER BY id DESC LIMIT ?1",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let rows = stmt.query_map(rusqlite::params![limit as i64], |r| {
-        Ok(RecogRow {
-            id: r.get(0)?,
-            ts_ms: r.get(1)?,
-            mode: r.get(2)?,
-            method: r.get(3)?,
-            engine: r.get(4)?,
-            duration_ms: r.get(5)?,
-            source_text: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-            success: r.get::<_, i64>(7)? != 0,
-            error: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-            image_path: r.get(9)?,
-            app_exe: r.get(10)?,
-            app_title: r.get(11)?,
-            uia_path: r.get(12)?,
-        })
-    });
-    if let Ok(iter) = rows {
-        iter.flatten().collect()
-    } else {
-        Vec::new()
-    }
+/// recognition_logs のSELECT列 (map_recog_row と対で管理)
+const RECOG_COLS: &str =
+    "id, ts_ms, mode, method, engine, duration_ms, source_text, success, error, image_path, app_exe, app_title, uia_path";
+
+fn map_recog_row(r: &rusqlite::Row) -> rusqlite::Result<RecogRow> {
+    Ok(RecogRow {
+        id: r.get(0)?,
+        ts_ms: r.get(1)?,
+        mode: r.get(2)?,
+        method: r.get(3)?,
+        engine: r.get(4)?,
+        duration_ms: r.get(5)?,
+        source_text: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+        success: r.get::<_, i64>(7)? != 0,
+        error: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+        image_path: r.get(9)?,
+        app_exe: r.get(10)?,
+        app_title: r.get(11)?,
+        uia_path: r.get(12)?,
+    })
 }
 
+/// 認識ログを新しい順に検索取得。query は原文/訳文の部分一致、app_exe は完全一致。
+/// 両方空文字なら全件 (最大 limit 件)。
 pub fn search_recognitions(query: &str, app_exe: &str, limit: usize) -> Vec<RecogRow> {
     let Some(m) = conn() else { return Vec::new() };
     let Ok(guard) = m.lock() else { return Vec::new() };
-    let mut sql = "SELECT id, ts_ms, mode, method, engine, duration_ms, source_text, success, error, image_path, app_exe, app_title, uia_path
-                   FROM recognition_logs WHERE 1=1".to_string();
+    let mut sql = format!("SELECT {RECOG_COLS} FROM recognition_logs WHERE 1=1");
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut p_idx = 1;
 
-    let q_val: String;
     if !query.is_empty() {
         sql.push_str(&format!(" AND (source_text LIKE ?{p_idx} OR id IN (SELECT recognition_id FROM translation_logs WHERE translated_text LIKE ?{p_idx}))"));
-        q_val = format!("%{}%", query);
-        params.push(Box::new(q_val));
+        params.push(Box::new(format!("%{query}%")));
         p_idx += 1;
     }
-    let app_val: String;
     if !app_exe.is_empty() {
         sql.push_str(&format!(" AND app_exe = ?{p_idx}"));
-        app_val = app_exe.to_string();
-        params.push(Box::new(app_val));
+        params.push(Box::new(app_exe.to_string()));
         p_idx += 1;
     }
     sql.push_str(&format!(" ORDER BY id DESC LIMIT ?{p_idx}"));
     params.push(Box::new(limit as i64));
 
     let p_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| &**b).collect();
-    let mut stmt = match guard.prepare(&sql) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let rows = stmt.query_map(p_refs.as_slice(), |r| {
-        Ok(RecogRow {
-            id: r.get(0)?,
-            ts_ms: r.get(1)?,
-            mode: r.get(2)?,
-            method: r.get(3)?,
-            engine: r.get(4)?,
-            duration_ms: r.get(5)?,
-            source_text: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-            success: r.get::<_, i64>(7)? != 0,
-            error: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-            image_path: r.get(9)?,
-            app_exe: r.get(10)?,
-            app_title: r.get(11)?,
-            uia_path: r.get(12)?,
-        })
-    });
-    if let Ok(iter) = rows {
-        iter.flatten().collect()
-    } else {
-        Vec::new()
+    let Ok(mut stmt) = guard.prepare(&sql) else { return Vec::new() };
+    match stmt.query_map(p_refs.as_slice(), |r| map_recog_row(r)) {
+        Ok(iter) => iter.flatten().collect(),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -412,7 +382,7 @@ pub fn clear_all() {
     let Some(m) = conn() else { return };
     if let Ok(guard) = m.lock() {
         let _ = guard.execute_batch(
-            "DELETE FROM translation_logs; DELETE FROM recognition_logs; VACUUM;",
+            "DELETE FROM translation_logs; DELETE FROM explanations; DELETE FROM recognition_logs; VACUUM;",
         );
     }
     // images ディレクトリのPNGを削除
@@ -441,7 +411,7 @@ pub fn delete_recognition(id: i64) {
     if let Some(rel) = img {
         let _ = std::fs::remove_file(logs_dir().join(rel));
     }
-    let _ = guard.execute("DELETE FROM translation_logs WHERE recognition_id=?1", rusqlite::params![id]);
+    delete_recog_children(&guard, id);
     let _ = guard.execute("DELETE FROM recognition_logs WHERE id=?1", rusqlite::params![id]);
 }
 
@@ -450,6 +420,42 @@ pub fn delete_translation(id: i64) {
     let Some(m) = conn() else { return };
     let Ok(guard) = m.lock() else { return };
     let _ = guard.execute("DELETE FROM translation_logs WHERE id=?1", rusqlite::params![id]);
+}
+
+/// 解説文のみ取得 (SPEC v0.2 §2.2.2 キャッシュ判定用)
+pub fn get_explanation(recog_id: i64) -> Option<String> {
+    get_explanation_and_tags(recog_id).map(|(e, _)| e)
+}
+
+/// 解説文とタグを取得。未保存なら None。
+pub fn get_explanation_and_tags(recog_id: i64) -> Option<(String, String)> {
+    let m = conn()?;
+    let guard = m.lock().ok()?;
+    let mut stmt = guard
+        .prepare("SELECT explanation_text, tags FROM explanations WHERE recognition_id = ?")
+        .ok()?;
+    let mut rows = stmt.query(rusqlite::params![recog_id]).ok()?;
+    let row = rows.next().ok().flatten()?;
+    let text: String = row.get(0).unwrap_or_default();
+    let tags: String = row.get::<_, Option<String>>(1).unwrap_or_default().unwrap_or_default();
+    Some((text, tags))
+}
+
+/// 解説文を保存 (既存のタグは維持)
+pub fn save_explanation(recog_id: i64, text: &str) {
+    let tags = get_explanation_and_tags(recog_id).map(|(_, t)| t).unwrap_or_default();
+    save_explanation_and_tags(recog_id, text, &tags);
+}
+
+/// 解説文とタグを保存 (認識IDごとに1件へ置換)
+pub fn save_explanation_and_tags(recog_id: i64, text: &str, tags: &str) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    let _ = guard.execute("DELETE FROM explanations WHERE recognition_id = ?", rusqlite::params![recog_id]);
+    let _ = guard.execute(
+        "INSERT INTO explanations (recognition_id, explanation_text, tags) VALUES (?1, ?2, ?3)",
+        rusqlite::params![recog_id, text, tags],
+    );
 }
 
 #[cfg(test)]
@@ -466,64 +472,48 @@ mod tests {
         }
 
         // 認識ログ + 翻訳ログ
-        let rid = log_recognition("hold", "ocr", "win", 200, Some("hello"), None, None, false, None, None, None)
-            .expect("recognition id");
+        let rid = log_recognition(
+            "hold", "ocr", "win", 200, Some("hello"), None, None, false,
+            Some("game.exe"), Some("Game Window"), Some("Root > Panel"),
+        )
+        .expect("recognition id");
         log_translation(
             Some(rid), "llm", "en", "ja", 300, false, Some("こんにちは"), None,
             Some("{\"req\":1}"), Some("{\"res\":2}"), Some(10), Some(5),
         );
 
-        let recs = recent_recognitions(10);
+        let recs = search_recognitions("", "", 10);
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].source_text, "hello");
+        assert_eq!(recs[0].app_exe.as_deref(), Some("game.exe"));
         let trs = translations_for(rid);
         assert_eq!(trs.len(), 1);
         assert_eq!(trs[0].translated_text, "こんにちは");
         assert_eq!(trs[0].tokens_in, Some(10));
+
+        // 検索: 原文の部分一致とexe名フィルタ
+        assert_eq!(search_recognitions("hell", "", 10).len(), 1);
+        assert_eq!(search_recognitions("no-match", "", 10).len(), 0);
+        assert_eq!(search_recognitions("", "game.exe", 10).len(), 1);
+        assert_eq!(search_recognitions("", "other.exe", 10).len(), 0);
+
+        // 解説の保存・タグ維持
+        save_explanation_and_tags(rid, "解説文", "重要");
+        assert_eq!(get_explanation_and_tags(rid), Some(("解説文".into(), "重要".into())));
+        save_explanation(rid, "改訂版");
+        assert_eq!(get_explanation_and_tags(rid), Some(("改訂版".into(), "重要".into())));
 
         // ローテーション: さらに数件足して上限2に絞る
         for i in 0..3 {
             log_recognition("hold", "ocr", "win", 100, Some(&format!("line{i}")), None, None, false, None, None, None);
         }
         rotate(2);
-        assert!(recent_recognitions(100).len() <= 2, "rotate should cap records");
+        assert!(search_recognitions("", "", 100).len() <= 2, "rotate should cap records");
 
         // 全削除
         clear_all();
-        assert_eq!(recent_recognitions(100).len(), 0);
+        assert_eq!(search_recognitions("", "", 100).len(), 0);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
-}
-
-pub fn get_explanation(recog_id: i64) -> Option<String> {
-    get_explanation_and_tags(recog_id).map(|(e, _)| e)
-}
-
-pub fn get_explanation_and_tags(recog_id: i64) -> Option<(String, String)> {
-    let m = conn()?;
-    let guard = m.lock().ok()?;
-    let mut stmt = guard.prepare("SELECT explanation_text, tags FROM explanations WHERE recognition_id = ?").ok()?;
-    let mut rows = stmt.query(rusqlite::params![recog_id]).ok()?;
-    if let Some(row) = rows.next().ok().flatten() {
-        let text: String = row.get(0).unwrap_or_default();
-        let tags: String = row.get::<_, Option<String>>(1).unwrap_or_default().unwrap_or_default();
-        return Some((text, tags));
-    }
-    None
-}
-
-pub fn save_explanation(recog_id: i64, text: &str) {
-    let tags = get_explanation_and_tags(recog_id).map(|(_, t)| t).unwrap_or_default();
-    save_explanation_and_tags(recog_id, text, &tags);
-}
-
-pub fn save_explanation_and_tags(recog_id: i64, text: &str, tags: &str) {
-    let Some(m) = conn() else { return };
-    let Ok(guard) = m.lock() else { return };
-    let _ = guard.execute("DELETE FROM explanations WHERE recognition_id = ?", rusqlite::params![recog_id]);
-    let _ = guard.execute(
-        "INSERT INTO explanations (recognition_id, explanation_text, tags) VALUES (?1, ?2, ?3)",
-        rusqlite::params![recog_id, text, tags],
-    );
 }

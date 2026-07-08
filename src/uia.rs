@@ -73,61 +73,52 @@ fn first_meaningful_line(s: &str) -> String {
     s.lines().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("").to_string()
 }
 
-pub fn get_context_at_point(x: i32, y: i32, target: windows::Win32::Foundation::HWND) -> (String, String) {
-    let mut title = String::new();
+/// カーソル位置の要素のUIAパス(親→子順に AutomationId / Name / ControlType を連結)を取得する。
+/// 解説機能の同一コンテキスト判定キーに使う (SPEC v0.2 §2.3.1)。
+pub fn path_at_point(x: i32, y: i32) -> String {
     unsafe {
-        let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextLengthW(target);
-        if len > 0 {
-            let mut buf = vec![0u16; (len + 1) as usize];
-            windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(target, &mut buf);
-            if let Some(pos) = buf.iter().position(|&c| c == 0) {
-                title = String::from_utf16_lossy(&buf[..pos]);
+        let Ok(auto) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {
+            return String::new();
+        };
+        let Ok(el) = auto.ElementFromPoint(POINT { x, y }) else {
+            return String::new();
+        };
+        let Ok(walker) = auto.ControlViewWalker() else {
+            return String::new();
+        };
+        let mut path = Vec::new();
+        let mut cur = Some(el);
+        for _ in 0..5 {
+            let Some(e) = cur.clone() else { break };
+            let name = element_node_name(&e);
+            if !name.is_empty() {
+                path.push(name);
             }
+            cur = walker.GetParentElement(&e).ok();
         }
+        path.reverse();
+        path.join(" > ")
     }
+}
 
-    let mut uia_path = String::new();
+/// UIAパスの1ノード名: AutomationId → Name → ControlType の優先順で採用
+fn element_node_name(e: &windows::Win32::UI::Accessibility::IUIAutomationElement) -> String {
     unsafe {
-        if let Ok(auto) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) {
-            let pt = POINT { x, y };
-            if let Ok(el) = auto.ElementFromPoint(pt) {
-                let mut path = Vec::new();
-                let mut cur = Some(el);
-                if let Ok(walker) = auto.ControlViewWalker() {
-                    for _ in 0..5 {
-                        let Some(e) = cur.clone() else { break };
-                        let mut node_name = String::new();
-                        
-                        if let Ok(id) = e.CurrentAutomationId() {
-                            let id_str = id.to_string();
-                            if !id_str.is_empty() {
-                                node_name = id_str;
-                            }
-                        }
-                        if node_name.is_empty() {
-                            if let Ok(name) = e.CurrentName() {
-                                let name_str = name.to_string();
-                                if !name_str.is_empty() {
-                                    node_name = name_str;
-                                }
-                            }
-                        }
-                        if node_name.is_empty() {
-                            if let Ok(ctrl) = e.CurrentControlType() {
-                                node_name = format!("Type{}", ctrl.0);
-                            }
-                        }
-                        
-                        if !node_name.is_empty() {
-                            path.push(node_name);
-                        }
-                        cur = walker.GetParentElement(&e).ok();
-                    }
-                }
-                path.reverse();
-                uia_path = path.join(" > ");
+        if let Ok(id) = e.CurrentAutomationId() {
+            let s = id.to_string();
+            if !s.is_empty() {
+                return s;
             }
         }
+        if let Ok(name) = e.CurrentName() {
+            let s = name.to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+        match e.CurrentControlType() {
+            Ok(ctrl) => format!("Type{}", ctrl.0),
+            Err(_) => String::new(),
+        }
     }
-    (title, uia_path)
 }

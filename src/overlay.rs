@@ -57,8 +57,8 @@ pub struct OverlayContent {
     pub pinned: bool,
     pub cur_ocr: String,
     pub cur_tr: String,
-    pub ocr_enabled: [bool; 5],
-    pub tr_enabled: [bool; 5],
+    pub ocr_enabled: [bool; OCR_KEYS.len()],
+    pub tr_enabled: [bool; TR_KEYS.len()],
     pub explanation: Option<String>,
     pub explaining: bool,
     pub error_only: bool,
@@ -496,7 +496,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         content.scroll_y -= (delta as i32) / 2;
                         if content.scroll_y < 0 { content.scroll_y = 0; }
                         if content.scroll_y > max_scroll { content.scroll_y = max_scroll; }
-                        unsafe { InvalidateRect(Some(hwnd), None, true); }
+                        unsafe { let _ = InvalidateRect(Some(hwnd), None, true); }
                     }
                 });
             });

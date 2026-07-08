@@ -14,6 +14,8 @@ pub enum WorkerMsg {
     Source {
         text: String,
         method: &'static str,
+        /// 実際に使ったOCRエンジンキー (UIA経路では None)
+        engine: Option<String>,
         img: Option<Arc<Captured>>,
         pin: bool,
         anchor: (i32, i32),
@@ -61,6 +63,24 @@ fn init_com() {
     }
 }
 
+/// 翻訳対象アプリのコンテキスト (exe名 / ウィンドウタイトル / UIA要素パス; SPEC v0.2 §2.3.1)
+struct AppContext {
+    exe: Option<String>,
+    title: String,
+    uia_path: String,
+}
+
+impl AppContext {
+    fn capture(x: i32, y: i32, target: HWND) -> Self {
+        let (exe, title) = util::get_window_context(target);
+        AppContext {
+            exe,
+            title: title.unwrap_or_default(),
+            uia_path: uia::path_at_point(x, y),
+        }
+    }
+}
+
 /// 認識ログを記録し recognition_id を返す(ログOFF時は None)。
 #[allow(clippy::too_many_arguments)]
 fn log_recog(
@@ -72,14 +92,15 @@ fn log_recog(
     text: Option<&str>,
     error: Option<&str>,
     image: Option<&Captured>,
-    app_exe: Option<&str>,
-    app_title: Option<&str>,
-    uia_path: Option<&str>,
+    ctx: &AppContext,
 ) -> Option<i64> {
     if !cfg.log_enabled {
         return None;
     }
-    let id = crate::logdb::log_recognition(mode, method, engine, ms, text, error, image, cfg.debug_mode, app_exe, app_title, uia_path);
+    let id = crate::logdb::log_recognition(
+        mode, method, engine, ms, text, error, image, cfg.debug_mode,
+        ctx.exe.as_deref(), Some(&ctx.title), Some(&ctx.uia_path),
+    );
     crate::logdb::rotate(cfg.log_max_records);
     id
 }
@@ -116,8 +137,8 @@ fn log_trans_err(cfg: &Config, recog_id: Option<i64>, engine: &str, ms: u128, er
     );
 }
 
-/// Gemini統合モードの翻訳ログを記録する(OCR側で取得した生応答・トークンを使う)。
-fn log_trans_gemini(cfg: &Config, recog_id: Option<i64>, ms: u128, tr: &str, o: &ocr::OcrOutput) {
+/// LLM統合モードの翻訳ログを記録する(OCR側で取得した生応答・トークンを使う)。
+fn log_trans_llm(cfg: &Config, recog_id: Option<i64>, ms: u128, tr: &str, o: &ocr::OcrOutput) {
     if !cfg.log_enabled {
         return;
     }
@@ -176,31 +197,56 @@ fn capture_band(x: i32, y: i32, target: isize, bw: i32, bh: i32) -> Result<Band,
     Ok(Band { img: band, focus_y })
 }
 
+/// OCR結果に統合訳文が含まれていればそのまま表示し、無ければ翻訳ワーカーへ回す
+fn dispatch_translation(
+    generation: u64,
+    cfg: Config,
+    o: ocr::OcrOutput,
+    tr_engine: String,
+    main: isize,
+    recog_id: Option<i64>,
+    t0: &Instant,
+) {
+    if let Some(tr) = &o.translation {
+        // LLM統合モード: 訳文も同時取得済み
+        let tms = t0.elapsed().as_millis();
+        log_trans_llm(&cfg, recog_id, tms, tr, &o);
+        post(main, generation, WorkerMsg::Translation {
+            text: tr.clone(),
+            badge: Some("LLM統合".into()),
+            ms: tms,
+            recog_id,
+        });
+    } else {
+        translate(generation, cfg, o.text, tr_engine, main, recog_id);
+    }
+}
+
 /// ホールドモードの認識サイクル: UIA優先 → WGC帯OCR (SPEC §6.4)
 pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Config, main: isize) {
     std::thread::spawn(move || {
         let tr_engine = effective_translator(&cfg);
         init_com();
         let t0 = Instant::now();
+        let ctx = AppContext::capture(x, y, HWND(target as *mut _));
 
         // 経路A: UIA
-        let (app_title, uia_path) = uia::get_context_at_point(x, y, HWND(target as *mut _));
         if let Some(text) = uia::line_at_point(x, y) {
             let ms = t0.elapsed().as_millis();
             util::perf_log(cfg.perf_log, &format!("source UIA {ms}ms"));
-            let (app_exe, _): (Option<String>, Option<String>) = crate::util::get_window_context(HWND(target as *mut _));
-            let recog_id = log_recog(&cfg, "hold", "uia", "uia", ms, Some(&text), None, None, app_exe.as_deref(), Some(&app_title), Some(&uia_path));
+            let recog_id = log_recog(&cfg, "hold", "uia", "uia", ms, Some(&text), None, None, &ctx);
             post(main, generation, WorkerMsg::Source {
                 text: text.clone(),
                 method: "UIA",
+                engine: None,
                 img: None,
                 pin: true,
                 anchor: (x, y),
                 focus_y: None,
                 ms,
                 recog_id,
-                app_title: app_title.clone(),
-                uia_path: uia_path.clone(),
+                app_title: ctx.title,
+                uia_path: ctx.uia_path,
             });
             translate(generation, cfg, text, tr_engine, main, recog_id);
             return;
@@ -211,8 +257,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         let band = match capture_band(x, y, target, 1200, 160) {
             Ok(b) => b,
             Err(e) => {
-                let (app_exe, app_title): (Option<String>, Option<String>) = crate::util::get_window_context(HWND(target as *mut _));
-                log_recog(&cfg, "hold", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, app_exe.as_deref(), app_title.as_deref(), None);
+                log_recog(&cfg, "hold", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, &ctx);
                 post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), engine: None });
                 return;
             }
@@ -230,38 +275,25 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("source OCR({engine}) {ms}ms"));
-                let (app_exe, _): (Option<String>, Option<String>) = crate::util::get_window_context(HWND(target as *mut _));
                 let recog_id =
-                    log_recog(&cfg, "hold", "ocr", &engine, ms, Some(&o.text), None, Some(&used.img), app_exe.as_deref(), Some(&app_title), Some(&uia_path));
+                    log_recog(&cfg, "hold", "ocr", &engine, ms, Some(&o.text), None, Some(&used.img), &ctx);
                 post(main, generation, WorkerMsg::Source {
                     text: o.text.clone(),
                     method: "OCR",
+                    engine: Some(engine.clone()),
                     img: Some(Arc::new(used.img)),
                     pin: o.text.contains('\n'),
                     anchor: (x, y),
                     focus_y: Some(used.focus_y),
                     ms,
                     recog_id,
-                    app_title: app_title.clone(),
-                    uia_path: uia_path.clone(),
+                    app_title: ctx.title,
+                    uia_path: ctx.uia_path,
                 });
-                if let Some(tr) = &o.translation {
-                    // Gemini統合モード: 訳文も同時取得済み
-                    let tms = t0.elapsed().as_millis();
-                    log_trans_gemini(&cfg, recog_id, tms, tr, &o);
-                    post(main, generation, WorkerMsg::Translation {
-                        text: tr.clone(),
-                        badge: Some("Gemini統合".into()),
-                        ms: tms,
-                        recog_id,
-                    });
-                } else {
-                    translate(generation, cfg, o.text, tr_engine, main, recog_id);
-                }
+                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, &t0);
             }
             Err(e) => {
-                let (app_exe, app_title): (Option<String>, Option<String>) = crate::util::get_window_context(HWND(target as *mut _));
-                log_recog(&cfg, "hold", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, app_exe.as_deref(), app_title.as_deref(), None);
+                log_recog(&cfg, "hold", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, &ctx);
                 post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), engine: Some(engine) });
             }
         }
@@ -314,42 +346,30 @@ pub fn reocr(
                 }
             },
         };
+        let ctx = AppContext::capture(x, y, HWND(target as *mut _));
         match ocr::run(&ocr_engine, &cfg, &image, last_focus_y) {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("reocr {ocr_engine} {ms}ms"));
-                let (app_title, uia_path) = uia::get_context_at_point(x, y, HWND(target as *mut _));
-                let (app_exe, _): (Option<String>, Option<String>) = crate::util::get_window_context(HWND(target as *mut _));
                 let recog_id =
-                    log_recog(&cfg, "chip", "ocr", &ocr_engine, ms, Some(&o.text), None, Some(&image), app_exe.as_deref(), Some(&app_title), Some(&uia_path));
+                    log_recog(&cfg, "chip", "ocr", &ocr_engine, ms, Some(&o.text), None, Some(&image), &ctx);
                 post(main, generation, WorkerMsg::Source {
                     text: o.text.clone(),
                     method: "OCR",
+                    engine: Some(ocr_engine.clone()),
                     img: Some(image),
                     pin: o.text.contains('\n'),
                     anchor,
                     focus_y: last_focus_y,
                     ms,
                     recog_id,
-                    app_title,
-                    uia_path,
+                    app_title: ctx.title,
+                    uia_path: ctx.uia_path,
                 });
-                if let Some(tr) = &o.translation {
-                    let tms = t0.elapsed().as_millis();
-                    log_trans_gemini(&cfg, recog_id, tms, tr, &o);
-                    post(main, generation, WorkerMsg::Translation {
-                        text: tr.clone(),
-                        badge: Some("Gemini統合".into()),
-                        ms: tms,
-                        recog_id,
-                    });
-                } else {
-                    translate(generation, cfg, o.text, tr_engine, main, recog_id);
-                }
+                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, &t0);
             }
             Err(e) => {
-                let (app_exe, app_title): (Option<String>, Option<String>) = crate::util::get_window_context(HWND(target as *mut _));
-                log_recog(&cfg, "chip", "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e), None, app_exe.as_deref(), app_title.as_deref(), None);
+                log_recog(&cfg, "chip", "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e), None, &ctx);
                 post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: Some(ocr_engine) });
             }
         }
@@ -420,118 +440,62 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
 
         let engine = effective_ocr(&cfg);
         // focus_y = None → 全行を段落結合
+        let ctx = AppContext::capture(cx, cy, root);
         match ocr::run(&engine, &cfg, &img, None) {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("region OCR({engine}) {ms}ms"));
-                let (app_title, uia_path) = uia::get_context_at_point(cx, cy, root);
-                let (app_exe, _): (Option<String>, Option<String>) = crate::util::get_window_context(root);
                 let recog_id =
-                    log_recog(&cfg, "region", "ocr", &engine, ms, Some(&o.text), None, Some(&img), app_exe.as_deref(), Some(&app_title), Some(&uia_path));
+                    log_recog(&cfg, "region", "ocr", &engine, ms, Some(&o.text), None, Some(&img), &ctx);
                 post(main, generation, WorkerMsg::Source {
                     text: o.text.clone(),
                     method: "OCR",
+                    engine: Some(engine.clone()),
                     img: Some(Arc::new(img)),
                     pin: true,
                     anchor,
                     focus_y: None,
                     ms,
                     recog_id,
-                    app_title,
-                    uia_path,
+                    app_title: ctx.title,
+                    uia_path: ctx.uia_path,
                 });
-                if let Some(tr) = &o.translation {
-                    let tms = t0.elapsed().as_millis();
-                    log_trans_gemini(&cfg, recog_id, tms, tr, &o);
-                    post(main, generation, WorkerMsg::Translation {
-                        text: tr.clone(),
-                        badge: Some("Gemini統合".into()),
-                        ms: tms,
-                        recog_id,
-                    });
-                } else {
-                    translate(generation, cfg, o.text, tr_engine, main, recog_id);
-                }
+                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, &t0);
             }
             Err(e) => {
-                let (app_exe, app_title): (Option<String>, Option<String>) = crate::util::get_window_context(root);
-                log_recog(&cfg, "region", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, app_exe.as_deref(), app_title.as_deref(), None);
+                log_recog(&cfg, "region", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, &ctx);
                 post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: Some(engine) });
             }
         }
     });
 }
 
+/// 解説プロンプトを組み立てる (LLMプロファイル未設定時は None)
 pub fn build_explain_prompt(cfg: &Config, text: &str) -> Option<String> {
     let prof = cfg.active_profile()?;
-    let glossary_text = if cfg.glossary.is_empty() {
-        String::new()
-    } else {
-        let lines = cfg.glossary.iter().map(|e| format!("{}={}", e.source, e.target)).collect::<Vec<_>>().join("\n");
-        format!("Glossary:\n{}", lines)
-    };
-    Some(prof.explain_prompt
-        .replace("{{source_lang}}", &cfg.source_lang)
-        .replace("{{target_lang}}", &cfg.target_lang)
-        .replace("{{text}}", text)
-        .replace("{{glossary}}", &glossary_text))
+    Some(cfg.fill_prompt(&prof.explain_prompt, text))
 }
 
+/// 解説の取得 (SPEC v0.2 §2.2.2): 成功時はDBへ保存してオーバーレイへ通知する
 pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, main: isize) {
     std::thread::spawn(move || {
         init_com();
-        let Some(prof) = cfg.active_profile() else {
-            post(main, generation, WorkerMsg::Error { msg: "LLM APIプロファイルが設定されていません".into(), anchor: (0,0), engine: None });
-            return;
-        };
-        let key = prof.get_key();
-        if key.is_empty() {
-            post(main, generation, WorkerMsg::Error { msg: format!("APIキーが未設定です ({})", prof.name), anchor: (0,0), engine: None });
-            return;
-        }
-
-        let expl_text = match prof.api_type {
-            crate::config::ApiType::Gemini => {
-                let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", prof.model_name);
-                let body = serde_json::json!({
-                    "contents": [{ "parts": [{ "text": prompt }] }]
-                });
-                ureq::post(&url).header("x-goog-api-key", &key).send_json(&body).ok()
-                    .and_then(|mut r| r.body_mut().read_json::<serde_json::Value>().ok())
-                    .and_then(|v| v["candidates"][0]["content"]["parts"][0]["text"].as_str().map(|s| s.trim().to_string()))
+        let result = cfg
+            .active_profile()
+            .ok_or_else(|| "LLM APIプロファイルが設定されていません".to_string())
+            .and_then(|prof| crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt)));
+        match result {
+            Ok(res) => {
+                crate::logdb::save_explanation(recog_id, &res.text);
+                post(main, generation, WorkerMsg::Explanation { text: res.text });
             }
-            crate::config::ApiType::OpenAI => {
-                let url = if prof.api_url.is_empty() { "https://api.openai.com/v1/chat/completions" } else { &prof.api_url };
-                let body = serde_json::json!({
-                    "model": prof.model_name,
-                    "messages": [
-                        { "role": "user", "content": prompt }
-                    ]
+            Err(e) => {
+                post(main, generation, WorkerMsg::Error {
+                    msg: format!("解説の取得に失敗しました: {e}"),
+                    anchor: (0, 0),
+                    engine: None,
                 });
-                ureq::post(url).header("Authorization", format!("Bearer {}", key)).send_json(&body).ok()
-                    .and_then(|mut r| r.body_mut().read_json::<serde_json::Value>().ok())
-                    .and_then(|v| v["choices"][0]["message"]["content"].as_str().map(|s| s.trim().to_string()))
             }
-            crate::config::ApiType::Claude => {
-                let url = if prof.api_url.is_empty() { "https://api.anthropic.com/v1/messages" } else { &prof.api_url };
-                let body = serde_json::json!({
-                    "model": prof.model_name,
-                    "max_tokens": 1024,
-                    "messages": [
-                        { "role": "user", "content": prompt }
-                    ]
-                });
-                ureq::post(url).header("x-api-key", &key).header("anthropic-version", "2023-06-01").send_json(&body).ok()
-                    .and_then(|mut r| r.body_mut().read_json::<serde_json::Value>().ok())
-                    .and_then(|v| v["content"][0]["text"].as_str().map(|s| s.trim().to_string()))
-            }
-        };
-
-        if let Some(expl) = expl_text {
-            crate::logdb::save_explanation(recog_id, &expl);
-            post(main, generation, WorkerMsg::Explanation { text: expl });
-        } else {
-            post(main, generation, WorkerMsg::Error { msg: "解説の取得に失敗しました".into(), anchor: (0,0), engine: None });
         }
     });
 }

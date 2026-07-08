@@ -45,6 +45,24 @@ impl ApiProfile {
     }
 }
 
+/// プロバイダ種別ごとの既定モデル名と既定URL (設定UIの種別切替・マイグレーションで共用)
+impl ApiType {
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            ApiType::Gemini => "gemini-3.5-flash",
+            ApiType::OpenAI => "gpt-4o-mini",
+            ApiType::Claude => "claude-haiku-4-5-20251001",
+        }
+    }
+    pub fn default_url(&self) -> &'static str {
+        match self {
+            ApiType::Gemini => "",
+            ApiType::OpenAI => crate::llm_api::DEFAULT_OPENAI_URL,
+            ApiType::Claude => crate::llm_api::DEFAULT_CLAUDE_URL,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Config {
@@ -166,28 +184,29 @@ impl Config {
         };
         // マイグレーション (旧設定からプロファイルへ)
         if cfg.api_profiles.is_empty() {
-            let p1 = ApiProfile {
+            fn pick(v: &str, default: &str) -> String {
+                if v.is_empty() { default.into() } else { v.into() }
+            }
+            cfg.api_profiles.push(ApiProfile {
                 name: "Gemini Default".into(),
                 api_type: ApiType::Gemini,
-                model_name: if cfg.gemini_model.is_empty() { "gemini-3.5-flash".into() } else { cfg.gemini_model.clone() },
-                api_url: "".into(),
+                model_name: pick(&cfg.gemini_model, ApiType::Gemini.default_model()),
+                api_url: String::new(),
                 api_key_enc: cfg.gemini_key_enc.clone(),
-                ocr_prompt: if cfg.gemini_ocr_prompt.is_empty() { DEFAULT_GEMINI_OCR_PROMPT.into() } else { cfg.gemini_ocr_prompt.clone() },
-                translate_prompt: if cfg.gemini_translate_prompt.is_empty() { DEFAULT_GEMINI_TRANSLATE_PROMPT.into() } else { cfg.gemini_translate_prompt.clone() },
-                explain_prompt: if cfg.gemini_explain_prompt.is_empty() { DEFAULT_GEMINI_EXPLAIN_PROMPT.into() } else { cfg.gemini_explain_prompt.clone() },
-            };
-            let p2 = ApiProfile {
+                ocr_prompt: pick(&cfg.gemini_ocr_prompt, DEFAULT_GEMINI_OCR_PROMPT),
+                translate_prompt: pick(&cfg.gemini_translate_prompt, DEFAULT_GEMINI_TRANSLATE_PROMPT),
+                explain_prompt: pick(&cfg.gemini_explain_prompt, DEFAULT_GEMINI_EXPLAIN_PROMPT),
+            });
+            cfg.api_profiles.push(ApiProfile {
                 name: "GPT Default".into(),
                 api_type: ApiType::OpenAI,
-                model_name: if cfg.gpt_model.is_empty() { "gpt-4o-mini".into() } else { cfg.gpt_model.clone() },
-                api_url: if cfg.gpt_url.is_empty() { "https://api.openai.com/v1/chat/completions".into() } else { cfg.gpt_url.clone() },
+                model_name: pick(&cfg.gpt_model, ApiType::OpenAI.default_model()),
+                api_url: pick(&cfg.gpt_url, ApiType::OpenAI.default_url()),
                 api_key_enc: cfg.gpt_key_enc.clone(),
                 ocr_prompt: DEFAULT_GEMINI_OCR_PROMPT.into(),
                 translate_prompt: DEFAULT_GEMINI_TRANSLATE_PROMPT.into(),
                 explain_prompt: DEFAULT_GEMINI_EXPLAIN_PROMPT.into(),
-            };
-            cfg.api_profiles.push(p1);
-            cfg.api_profiles.push(p2);
+            });
             cfg.active_api_profile = "Gemini Default".into();
         }
         cfg
@@ -208,6 +227,29 @@ impl Config {
 
     pub fn active_profile(&self) -> Option<&ApiProfile> {
         self.api_profiles.iter().find(|p| p.name == self.active_api_profile)
+    }
+
+    /// 用語集をプロンプト埋め込み用テキストにする ({{glossary}} の置換値)
+    pub fn glossary_prompt(&self) -> String {
+        if self.glossary.is_empty() {
+            return String::new();
+        }
+        let lines = self
+            .glossary
+            .iter()
+            .map(|e| format!("{}={}", e.source, e.target))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("Glossary:\n{lines}")
+    }
+
+    /// プロンプトテンプレートのプレースホルダ置換
+    /// ({{source_lang}} {{target_lang}} {{text}} {{glossary}})
+    pub fn fill_prompt(&self, tmpl: &str, text: &str) -> String {
+        tmpl.replace("{{source_lang}}", &self.source_lang)
+            .replace("{{target_lang}}", &self.target_lang)
+            .replace("{{text}}", text)
+            .replace("{{glossary}}", &self.glossary_prompt())
     }
 
     /// ホールドキーの仮想キーコード

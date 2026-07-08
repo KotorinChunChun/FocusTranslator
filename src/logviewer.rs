@@ -404,6 +404,30 @@ fn combo_sel(h: HWND, id: i32) -> usize {
     }
 }
 
+/// コンボの指定indexの項目文字列を取得
+fn combo_item_text(h: HWND, id: i32, idx: usize) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{CB_GETLBTEXT, CB_GETLBTEXTLEN};
+    unsafe {
+        let cb = dlg_item(h, id);
+        let len = SendMessageW(cb, CB_GETLBTEXTLEN, Some(WPARAM(idx)), None).0;
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        SendMessageW(cb, CB_GETLBTEXT, Some(WPARAM(idx)), Some(LPARAM(buf.as_mut_ptr() as isize)));
+        String::from_utf16_lossy(&buf[..len as usize])
+    }
+}
+
+/// EDITコントロールの内容を取得 (最大1023文字)
+fn edit_text(h: HWND, id: i32) -> String {
+    unsafe {
+        let mut buf = [0u16; 1024];
+        let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(dlg_item(h, id), &mut buf);
+        String::from_utf16_lossy(&buf[..len as usize])
+    }
+}
+
 /// ウィンドウサイズに合わせて子コントロールを配置
 fn layout(h: HWND) {
     unsafe {
@@ -623,42 +647,15 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-/// DBから再読込して認識一覧を更新
+/// DBから再読込して認識一覧を更新 (検索欄・exeフィルタを適用; SPEC v0.2 §2.3.2)
 fn reload() {
     let h = hwnd();
-    let mut search_buf = [0u16; 256];
-    let query = unsafe {
-        let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(
-            dlg_item(h, IDC_SEARCH_EDIT),
-            &mut search_buf,
-        );
-        String::from_utf16_lossy(&search_buf[..len as usize])
-    };
+    let query = edit_text(h, IDC_SEARCH_EDIT);
     let exe_idx = combo_sel(h, IDC_EXE_COMBO);
-    let app_exe = if exe_idx == 0 {
-        "".to_string()
-    } else {
-        unsafe {
-            let cb = dlg_item(h, IDC_EXE_COMBO);
-            let len = windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-                cb,
-                windows::Win32::UI::WindowsAndMessaging::CB_GETLBTEXTLEN,
-                Some(WPARAM(exe_idx)),
-                None,
-            ).0 as usize;
-            let mut buf = vec![0u16; len + 1];
-            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-                cb,
-                windows::Win32::UI::WindowsAndMessaging::CB_GETLBTEXT,
-                Some(WPARAM(exe_idx)),
-                Some(LPARAM(buf.as_mut_ptr() as isize)),
-            );
-            String::from_utf16_lossy(&buf[..len])
-        }
-    };
+    // index 0 は「全アプリ」
+    let app_exe = if exe_idx == 0 { String::new() } else { combo_item_text(h, IDC_EXE_COMBO, exe_idx) };
 
     let recogs = logdb::search_recognitions(&query, &app_exe, 1000);
-    let h = hwnd();
     let recog_lv = dlg_item(h, IDC_RECOG_LV);
     lv_clear(recog_lv);
     for (i, r) in recogs.iter().enumerate() {
@@ -1483,22 +1480,15 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     refresh_detail();
                 }
                 IDC_BTN_SAVE_TAG => {
-                    let sel_idx = STATE.with(|s| s.borrow().sel_recog);
-                    if let Some(idx) = sel_idx {
-                        let recog_id = STATE.with(|s| s.borrow().recogs.get(idx).map(|r| r.id));
-                        if let Some(id) = recog_id {
-                            let mut buf = [0u16; 1024];
-                            let text = unsafe {
-                                let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(
-                                    dlg_item(h, IDC_TAG_EDIT),
-                                    &mut buf,
-                                );
-                                String::from_utf16_lossy(&buf[..len as usize])
-                            };
-                            let (exp, _) = logdb::get_explanation_and_tags(id).unwrap_or_default();
-                            logdb::save_explanation_and_tags(id, &exp, &text);
-                            unsafe { MessageBoxW(Some(h), w!("タグを保存しました。"), w!("タグ保存"), MB_OK); }
-                        }
+                    let recog_id = STATE.with(|s| {
+                        let st = s.borrow();
+                        st.sel_recog.and_then(|idx| st.recogs.get(idx).map(|r| r.id))
+                    });
+                    if let Some(id) = recog_id {
+                        let tags = edit_text(h, IDC_TAG_EDIT);
+                        let (exp, _) = logdb::get_explanation_and_tags(id).unwrap_or_default();
+                        logdb::save_explanation_and_tags(id, &exp, &tags);
+                        unsafe { MessageBoxW(Some(h), w!("タグを保存しました。"), w!("タグ保存"), MB_OK); }
                     }
                 }
                 IDC_BTN_EXPORT => {

@@ -1,6 +1,6 @@
 // 翻訳エンジン群 (SPEC §7.2)
 // - local:  ローカルONNX翻訳(既定)。モデル未導入時はエラーを返す。
-// - deepl / google / gemini: クラウドREST。失敗時は local へフォールバック。
+// - deepl / google / llm: クラウドREST。失敗時は local へフォールバック。
 // 結果はメモリ内キャッシュ (SPEC: キャッシュヒット時 100〜200ms台)。
 // ログDB用に送受信JSON・トークン・言語・実際に使ったエンジンも返す。
 use crate::config::Config;
@@ -74,7 +74,7 @@ pub fn translate(engine: &str, cfg: &Config, text: &str) -> Result<Translated, S
         }
     }
 
-    let result = translate_once(engine, cfg, text, &source, &target);
+    let result = translate_once(engine, cfg, text, &target);
     match result {
         Ok((t, detail)) => {
             let mut guard = CACHE.lock().unwrap();
@@ -95,7 +95,7 @@ pub fn translate(engine: &str, cfg: &Config, text: &str) -> Result<Translated, S
         }
         Err(e) if engine != "local" => {
             // クラウド翻訳失敗 → ローカルへフォールバックし local バッジ表示
-            match translate_once("local", cfg, text, &source, &target) {
+            match translate_once("local", cfg, text, &target) {
                 Ok((t, detail)) => Ok(Translated {
                     text: t,
                     badge: Some("local".into()),
@@ -116,14 +116,14 @@ fn translate_once(
     engine: &str,
     cfg: &Config,
     text: &str,
-    source: &str,
     target: &str,
 ) -> Result<(String, TransDetail), String> {
     match engine {
         "local" => translate_local(cfg, text, target).map(|t| (t, TransDetail::default())),
         "deepl" => translate_deepl(cfg, text, target),
         "google" => translate_google(cfg, text, target),
-        "llm" => translate_llm(cfg, text, source, target),
+        // LLMの翻訳方向はプロンプトテンプレート側で cfg から埋める
+        "llm" => translate_llm(cfg, text),
         other => Err(format!("不明な翻訳エンジン: {other}")),
     }
 }
@@ -190,123 +190,17 @@ fn translate_google(cfg: &Config, text: &str, target: &str) -> Result<(String, T
         .ok_or("Google応答に訳文がありません".into())
 }
 
-/// Geminiプロンプトのプレースホルダを置換する
-fn fill_prompt(cfg: &Config, tmpl: &str, source: &str, target: &str, text: &str) -> String {
-    let glossary_text = if cfg.glossary.is_empty() {
-        String::new()
-    } else {
-        let lines = cfg.glossary.iter().map(|e| format!("{}={}", e.source, e.target)).collect::<Vec<_>>().join("\n");
-        format!("Glossary:\n{}", lines)
-    };
-    tmpl.replace("{{source_lang}}", source)
-        .replace("{{target_lang}}", target)
-        .replace("{{text}}", text)
-        .replace("{{glossary}}", &glossary_text)
-}
-
-fn translate_llm(
-    cfg: &Config,
-    text: &str,
-    source: &str,
-    target: &str,
-) -> Result<(String, TransDetail), String> {
+/// アクティブなLLMプロファイルで翻訳 (プロバイダ差異は llm_api が吸収)
+fn translate_llm(cfg: &Config, text: &str) -> Result<(String, TransDetail), String> {
     let prof = cfg.active_profile().ok_or("LLM APIプロファイルが設定されていません")?;
-    let key = prof.get_key();
-    if key.is_empty() {
-        return Err(format!("APIキーが未設定です ({})", prof.name));
-    }
-    let prompt = fill_prompt(cfg, &prof.translate_prompt, source, target, text);
-
-    match prof.api_type {
-        crate::config::ApiType::Gemini => {
-            let body = serde_json::json!({
-                "contents": [{ "parts": [{ "text": prompt }] }]
-            });
-            let req_json = mask_keys(cfg, &body.to_string());
-            let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-                prof.model_name
-            );
-            let mut res = ureq::post(&url)
-                .header("x-goog-api-key", &key)
-                .send_json(&body)
-                .map_err(|e| format!("Gemini呼び出し失敗: {e}"))?;
-            let v: serde_json::Value =
-                res.body_mut().read_json().map_err(|e| format!("Gemini応答解析失敗: {e}"))?;
-            let detail = TransDetail {
-                request_json: Some(req_json),
-                response_json: Some(mask_keys(cfg, &v.to_string())),
-                tokens_in: v.get("usageMetadata").and_then(|u| u.get("promptTokenCount")).and_then(|t| t.as_i64()),
-                tokens_out: v.get("usageMetadata").and_then(|u| u.get("candidatesTokenCount")).and_then(|t| t.as_i64()),
-            };
-            v["candidates"][0]["content"]["parts"][0]["text"]
-                .as_str()
-                .map(|s| (s.trim().to_string(), detail))
-                .ok_or("Gemini応答に訳文がありません".into())
-        }
-        crate::config::ApiType::OpenAI => {
-            let url = if prof.api_url.is_empty() {
-                "https://api.openai.com/v1/chat/completions"
-            } else {
-                &prof.api_url
-            };
-            let body = serde_json::json!({
-                "model": prof.model_name,
-                "messages": [
-                    { "role": "user", "content": prompt }
-                ]
-            });
-            let req_json = mask_keys(cfg, &body.to_string());
-            let mut res = ureq::post(url)
-                .header("Authorization", format!("Bearer {}", key))
-                .send_json(&body)
-                .map_err(|e| format!("GPT互換API呼び出し失敗: {e}"))?;
-            let v: serde_json::Value =
-                res.body_mut().read_json().map_err(|e| format!("GPT応答解析失敗: {e}"))?;
-            let detail = TransDetail {
-                request_json: Some(req_json),
-                response_json: Some(mask_keys(cfg, &v.to_string())),
-                tokens_in: v.get("usage").and_then(|u| u.get("prompt_tokens")).and_then(|t| t.as_i64()),
-                tokens_out: v.get("usage").and_then(|u| u.get("completion_tokens")).and_then(|t| t.as_i64()),
-            };
-            v["choices"][0]["message"]["content"]
-                .as_str()
-                .map(|s| (s.trim().to_string(), detail))
-                .ok_or("GPT応答に訳文がありません".into())
-        }
-        crate::config::ApiType::Claude => {
-            let url = if prof.api_url.is_empty() {
-                "https://api.anthropic.com/v1/messages"
-            } else {
-                &prof.api_url
-            };
-            let body = serde_json::json!({
-                "model": prof.model_name,
-                "max_tokens": 1024,
-                "messages": [
-                    { "role": "user", "content": prompt }
-                ]
-            });
-            let req_json = mask_keys(cfg, &body.to_string());
-            let mut res = ureq::post(url)
-                .header("x-api-key", &key)
-                .header("anthropic-version", "2023-06-01")
-                .send_json(&body)
-                .map_err(|e| format!("Claude API呼び出し失敗: {e}"))?;
-            let v: serde_json::Value =
-                res.body_mut().read_json().map_err(|e| format!("Claude応答解析失敗: {e}"))?;
-            let detail = TransDetail {
-                request_json: Some(req_json),
-                response_json: Some(mask_keys(cfg, &v.to_string())),
-                tokens_in: v.get("usage").and_then(|u| u.get("input_tokens")).and_then(|t| t.as_i64()),
-                tokens_out: v.get("usage").and_then(|u| u.get("output_tokens")).and_then(|t| t.as_i64()),
-            };
-            v["content"][0]["text"]
-                .as_str()
-                .map(|s| (s.trim().to_string(), detail))
-                .ok_or("Claude応答に訳文がありません".into())
-        }
-    }
+    let prompt = cfg.fill_prompt(&prof.translate_prompt, text);
+    let res = crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt))?;
+    let detail = TransDetail {
+        request_json: Some(mask_keys(cfg, &res.request_json)),
+        response_json: Some(mask_keys(cfg, &res.response_json)),
+        tokens_in: res.tokens_in,
+        tokens_out: res.tokens_out,
+    };
+    Ok((res.text, detail))
 }
-
 

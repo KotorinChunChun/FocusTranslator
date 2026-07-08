@@ -82,6 +82,8 @@ pub struct App {
     failed_tr: HashSet<String>,
     recog_id: Option<i64>,
     explanation: Option<String>,
+    /// 解説をLLMへ問い合わせ中 (オーバーレイに取得中表示を出す)
+    explaining: bool,
     app_title: String,
     uia_path: String,
     pub scroll_y: i32,
@@ -134,6 +136,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             failed_tr: HashSet::new(),
             recog_id: None,
             explanation: None,
+            explaining: false,
             app_title: String::new(),
             uia_path: String::new(),
             scroll_y: 0,
@@ -300,6 +303,7 @@ fn close_overlay(app: &mut App) {
     app.last_focus_y = None;
     app.recog_id = None;
     app.explanation = None;
+    app.explaining = false;
 }
 
 /// ワーカー結果の受信 (世代番号が古いものは破棄; SPEC §6.4)
@@ -310,12 +314,14 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
             return;
         }
         match msg {
-            worker::WorkerMsg::Source { text, method, img, pin, anchor, focus_y, ms, recog_id, app_title, uia_path } => {
+            worker::WorkerMsg::Source { text, method, engine, img, pin, anchor, focus_y, ms, recog_id, app_title, uia_path } => {
                 if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
                     return;
                 }
                 app.source = text;
-                app.cur_ocr = method.to_string();
+                if let Some(e) = engine {
+                    app.cur_ocr = e; // 実際に使ったOCRエンジン (UIA経路では変更しない)
+                }
                 app.last_img = img;
                 app.last_focus_y = focus_y;
                 app.status = None;
@@ -356,6 +362,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 if let Some(e) = engine {
                     app.failed_ocr.insert(e);
                 }
+                app.explaining = false;
                 // 短時間のエラー表示 (SPEC §5.3, §11)
                 app.source.clear();
                 app.translation = None;
@@ -371,7 +378,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.mode = Mode::Pinned;
                 app.status = None;
                 app.error_only = false;
-                // explanationをapp_stateのフィールドに追加し、ここで更新してからsync_overlayする
+                app.explaining = false;
                 app.explanation = Some(text);
                 sync_overlay(app);
             }
@@ -505,6 +512,7 @@ pub fn handle_chip(id: usize) {
                             app.generation += 1;
                             app.mode = Mode::Pinned;
                             app.status = Some("解説を取得中…".into());
+                            app.explaining = true;
                             sync_overlay(app);
                             app.generation
                         }).unwrap_or(0);
@@ -691,11 +699,11 @@ pub fn reload_config(hwnd: HWND) {
 
 /// App の状態をオーバーレイへ反映
 fn sync_overlay(app: &mut App) {
-    let mut ocr_enabled = [false; 5];
+    let mut ocr_enabled = [false; overlay::OCR_KEYS.len()];
     for (i, k) in overlay::OCR_KEYS.iter().enumerate() {
         ocr_enabled[i] = app.cfg.engine_available(k) && !app.failed_ocr.contains(*k);
     }
-    let mut tr_enabled = [false; 5];
+    let mut tr_enabled = [false; overlay::TR_KEYS.len()];
     for (i, k) in overlay::TR_KEYS.iter().enumerate() {
         tr_enabled[i] = app.cfg.engine_available(k) && !app.failed_tr.contains(*k);
     }
@@ -712,7 +720,7 @@ fn sync_overlay(app: &mut App) {
         ocr_enabled,
         tr_enabled,
         explanation: app.explanation.clone(),
-        explaining: app.status.as_deref() == Some("解説を取得中…"),
+        explaining: app.explaining,
         error_only: app.error_only,
         app_title: app.app_title.clone(),
         uia_path: app.uia_path.clone(),

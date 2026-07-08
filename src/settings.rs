@@ -403,19 +403,11 @@ fn populate(h: HWND) {
     set_text(h, IDC_GOOGLE, &cfg.google_key());
 
     PROFILES.with(|p| *p.borrow_mut() = cfg.api_profiles.clone());
-    let profile_names: Vec<String> = cfg.api_profiles.iter().map(|p| p.name.clone()).collect();
-    let profile_strs: Vec<&str> = profile_names.iter().map(|s| s.as_str()).collect();
     let sel = cfg.api_profiles.iter().position(|p| p.name == cfg.active_api_profile).unwrap_or(0);
-    
-    // cb_reset_content(h, IDC_PROF_LIST); // TODO: implement if needed, combo_fill just appends
-    unsafe {
-        SendMessageW(get_dlg_item(h, IDC_PROF_LIST), windows::Win32::UI::WindowsAndMessaging::CB_RESETCONTENT, None, None);
-        SendMessageW(get_dlg_item(h, IDC_PROF_TYPE), windows::Win32::UI::WindowsAndMessaging::CB_RESETCONTENT, None, None);
-    }
-    combo_fill(h, IDC_PROF_LIST, &profile_strs, sel);
-    
-    let type_strs = ["Gemini", "OpenAI", "Claude"];
-    combo_fill(h, IDC_PROF_TYPE, &type_strs, 0);
+    refill_profile_combo(h, sel);
+
+    combo_reset(h, IDC_PROF_TYPE);
+    combo_fill(h, IDC_PROF_TYPE, &API_TYPE_DISP, 0);
 
     load_profile_to_ui(h, sel);
     set_text(h, IDC_YOMI, &cfg.yomitoku_url);
@@ -455,24 +447,50 @@ fn refresh_onnx_status(h: HWND) {
     }
 }
 
+/// APIプロファイル種別のコンボ表示順 (IDC_PROF_TYPE の選択indexと対応)
+const API_TYPE_ORDER: [crate::config::ApiType; 3] = [
+    crate::config::ApiType::Gemini,
+    crate::config::ApiType::OpenAI,
+    crate::config::ApiType::Claude,
+];
+const API_TYPE_DISP: [&str; 3] = ["Gemini", "OpenAI", "Claude"];
+
+fn api_type_index(t: &crate::config::ApiType) -> usize {
+    API_TYPE_ORDER.iter().position(|x| x == t).unwrap_or(0)
+}
+
+/// コンボの内容を全消去する
+fn combo_reset(h: HWND, id: i32) {
+    unsafe {
+        SendMessageW(get_dlg_item(h, id), windows::Win32::UI::WindowsAndMessaging::CB_RESETCONTENT, None, None);
+    }
+}
+
+fn combo_select(h: HWND, id: i32, idx: usize) {
+    unsafe {
+        SendMessageW(
+            get_dlg_item(h, id),
+            windows::Win32::UI::WindowsAndMessaging::CB_SETCURSEL,
+            Some(WPARAM(idx)),
+            Some(LPARAM(0)),
+        );
+    }
+}
+
+/// PROFILES の内容でプロファイル一覧コンボを再構築する
+fn refill_profile_combo(h: HWND, sel: usize) {
+    let names: Vec<String> = PROFILES.with(|p| p.borrow().iter().map(|x| x.name.clone()).collect());
+    let strs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    combo_reset(h, IDC_PROF_LIST);
+    combo_fill(h, IDC_PROF_LIST, &strs, sel);
+}
+
 fn load_profile_to_ui(h: HWND, idx: usize) {
     PROFILES.with(|p| {
         let profiles = p.borrow();
         if let Some(prof) = profiles.get(idx) {
             set_text(h, IDC_PROF_NAME, &prof.name);
-            let type_idx = match prof.api_type {
-                crate::config::ApiType::Gemini => 0,
-                crate::config::ApiType::OpenAI => 1,
-                crate::config::ApiType::Claude => 2,
-            };
-            unsafe {
-                windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-                    get_dlg_item(h, IDC_PROF_TYPE),
-                    windows::Win32::UI::WindowsAndMessaging::CB_SETCURSEL,
-                    Some(WPARAM(type_idx as usize)),
-                    Some(LPARAM(0)),
-                );
-            }
+            combo_select(h, IDC_PROF_TYPE, api_type_index(&prof.api_type));
             set_text(h, IDC_PROF_MODEL, &prof.model_name);
             set_text(h, IDC_PROF_URL, &prof.api_url);
             set_text(h, IDC_PROF_KEY, &prof.get_key());
@@ -758,23 +776,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE {
                         if id == IDC_PROF_LIST {
                             load_profile_to_ui(h, combo_sel(h, IDC_PROF_LIST));
-                        } else if id == IDC_PROF_TYPE {
-                            let sel = combo_sel(h, IDC_PROF_TYPE);
-                            match sel {
-                                0 => { // Gemini
-                                    set_text(h, IDC_PROF_MODEL, "gemini-1.5-flash");
-                                    set_text(h, IDC_PROF_URL, "");
-                                }
-                                1 => { // OpenAI
-                                    set_text(h, IDC_PROF_MODEL, "gpt-4o-mini");
-                                    set_text(h, IDC_PROF_URL, "https://api.openai.com/v1/chat/completions");
-                                }
-                                2 => { // Claude
-                                    set_text(h, IDC_PROF_MODEL, "claude-3-haiku-20240307");
-                                    set_text(h, IDC_PROF_URL, "https://api.anthropic.com/v1/messages");
-                                }
-                                _ => {}
-                            }
+                        } else {
+                            // 種別切替: モデル名・URLをその種別の既定値に置き換える
+                            let t = &API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)];
+                            set_text(h, IDC_PROF_MODEL, t.default_model());
+                            set_text(h, IDC_PROF_URL, t.default_url());
                         }
                     }
                 }
@@ -786,21 +792,14 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     set_text(h, IDC_PROF_PROMPT_OCR, crate::config::DEFAULT_GEMINI_OCR_PROMPT);
                     set_text(h, IDC_PROF_PROMPT_TR, crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT);
                     set_text(h, IDC_PROF_PROMPT_EXP, crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT);
-                    unsafe {
-                        SendMessageW(get_dlg_item(h, IDC_PROF_TYPE), windows::Win32::UI::WindowsAndMessaging::CB_SETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
-                    }
+                    combo_select(h, IDC_PROF_TYPE, 0);
                 }
                 IDC_PROF_SAVE | IDC_PROF_SAVEAS => {
                     let name = get_text(h, IDC_PROF_NAME).trim().to_string();
                     if name.is_empty() { return LRESULT(0); }
-                    let type_idx = combo_sel(h, IDC_PROF_TYPE);
                     let mut prof = crate::config::ApiProfile {
                         name: name.clone(),
-                        api_type: match type_idx {
-                            1 => crate::config::ApiType::OpenAI,
-                            2 => crate::config::ApiType::Claude,
-                            _ => crate::config::ApiType::Gemini,
-                        },
+                        api_type: API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)].clone(),
                         model_name: get_text(h, IDC_PROF_MODEL).trim().to_string(),
                         api_url: get_text(h, IDC_PROF_URL).trim().to_string(),
                         api_key_enc: String::new(),
@@ -810,7 +809,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     };
                     prof.set_key(get_text(h, IDC_PROF_KEY).trim());
 
-                    PROFILES.with(|p| {
+                    let saved = PROFILES.with(|p| {
                         let mut profiles = p.borrow_mut();
                         if id == IDC_PROF_SAVE {
                             if let Some(existing) = profiles.iter_mut().find(|x| x.name == name) {
@@ -819,40 +818,36 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                 profiles.push(prof.clone());
                             }
                         } else {
-                            // 別名保存
+                            // 別名保存: 名前重複は拒否
                             if profiles.iter().any(|x| x.name == name) {
                                 unsafe { MessageBoxW(Some(h), w!("その名前は既に存在します"), w!("エラー"), MB_OK); }
-                                return;
+                                return None;
                             }
                             profiles.push(prof.clone());
                         }
-                        
-                        let profile_names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
-                        let profile_strs: Vec<&str> = profile_names.iter().map(|s| s.as_str()).collect();
-                        let sel = profiles.iter().position(|p| p.name == name).unwrap_or(0);
-                        unsafe { SendMessageW(get_dlg_item(h, IDC_PROF_LIST), windows::Win32::UI::WindowsAndMessaging::CB_RESETCONTENT, None, None); }
-                        combo_fill(h, IDC_PROF_LIST, &profile_strs, sel);
+                        profiles.iter().position(|p| p.name == name)
                     });
+                    if let Some(sel) = saved {
+                        refill_profile_combo(h, sel);
+                    }
                 }
                 IDC_PROF_DEL => {
-                    let mut do_load = false;
-                    PROFILES.with(|p| {
+                    let deleted = PROFILES.with(|p| {
                         let mut profiles = p.borrow_mut();
                         if profiles.len() <= 1 {
                             unsafe { MessageBoxW(Some(h), w!("最低1つは残す必要があります"), w!("エラー"), MB_OK); }
-                            return;
+                            return false;
                         }
                         let sel = combo_sel(h, IDC_PROF_LIST);
                         if sel < profiles.len() {
                             profiles.remove(sel);
-                            let profile_names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
-                            let profile_strs: Vec<&str> = profile_names.iter().map(|s| s.as_str()).collect();
-                            unsafe { SendMessageW(get_dlg_item(h, IDC_PROF_LIST), windows::Win32::UI::WindowsAndMessaging::CB_RESETCONTENT, None, None); }
-                            combo_fill(h, IDC_PROF_LIST, &profile_strs, 0);
-                            do_load = true;
+                            true
+                        } else {
+                            false
                         }
                     });
-                    if do_load {
+                    if deleted {
+                        refill_profile_combo(h, 0);
                         load_profile_to_ui(h, 0);
                     }
                 }

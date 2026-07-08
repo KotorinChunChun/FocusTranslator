@@ -2,7 +2,7 @@
 // - win:      Windows.Media.Ocr (既定・ローカル)
 // - paddle:   PaddleOCR (モデル導入は paddle_install、ONNX Runtime推論は paddle_ocr 参照)
 // - yomitoku / ndl: 外部OCRサーバー (HTTP POST /ocr, GET /health)
-// - gemini:   OCR+翻訳統合 (画像→原文+訳文を一括取得)
+// - llm:      LLM OCR+翻訳統合 (画像→原文+訳文を一括取得。llm_api 参照)
 use crate::capture::Captured;
 use crate::config::Config;
 use base64::Engine as _;
@@ -11,14 +11,14 @@ use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
 
-/// OCR結果(gemini 統合モードは訳文も返す)
+/// OCR結果(llm 統合モードは訳文も返す)
 #[derive(Default)]
 pub struct OcrOutput {
     pub text: String,
     pub translation: Option<String>,
-    /// Gemini統合モードの生応答JSON(APIキーマスク済み。ログDB用)。他エンジンはNone。
+    /// LLM統合モードの生応答JSON(APIキーマスク済み。ログDB用)。他エンジンはNone。
     pub raw_response: Option<String>,
-    /// Gemini統合モードのトークン数(ログDB用)
+    /// LLM統合モードのトークン数(ログDB用)
     pub tokens_in: Option<i64>,
     pub tokens_out: Option<i64>,
 }
@@ -228,95 +228,22 @@ pub fn health_check(base_url: &str) -> bool {
         .is_ok()
 }
 
+/// LLM OCR+翻訳統合モード: 画像から原文と訳文を一括取得 (SPEC §8)
 pub fn llm_ocr_translate(cfg: &Config, img: &Captured, focus_y: Option<f32>) -> Result<OcrOutput, String> {
     let prof = cfg.active_profile().ok_or("LLM APIプロファイルが設定されていません")?;
-    let key = prof.get_key();
-    if key.is_empty() {
-        return Err(format!("APIキーが未設定です ({})", prof.name));
-    }
     let target_img = crop_for_focus(img, focus_y);
     let png = crate::capture::to_png(&target_img);
     let b64 = B64.encode(&png);
-    let glossary_text = if cfg.glossary.is_empty() {
-        String::new()
-    } else {
-        let lines = cfg.glossary.iter().map(|e| format!("{}={}", e.source, e.target)).collect::<Vec<_>>().join("\n");
-        format!("Glossary:\n{}", lines)
-    };
-    let prompt = prof.ocr_prompt.replace("{{source_lang}}", &cfg.source_lang)
-        .replace("{{target_lang}}", &cfg.target_lang)
-        .replace("{{glossary}}", &glossary_text);
+    let prompt = cfg.fill_prompt(&prof.ocr_prompt, "");
 
-    let (raw_response, tokens_in, tokens_out, text) = match prof.api_type {
-        crate::config::ApiType::Gemini => {
-            let body = serde_json::json!({
-                "contents": [{ "parts": [
-                    { "text": prompt },
-                    { "inlineData": { "mimeType": "image/png", "data": b64 } }
-                ]}],
-                "generationConfig": { "responseMimeType": "application/json" }
-            });
-            let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", prof.model_name);
-            let mut res = ureq::post(&url).header("x-goog-api-key", &key).send_json(&body).map_err(|e| format!("Gemini呼び出し失敗: {e}"))?;
-            let v: serde_json::Value = res.body_mut().read_json().map_err(|e| format!("Gemini応答の解析失敗: {e}"))?;
-            let raw_response = Some(crate::translate::mask_keys(cfg, &v.to_string()));
-            let tokens_in = v.get("usageMetadata").and_then(|u| u.get("promptTokenCount")).and_then(|t| t.as_i64());
-            let tokens_out = v.get("usageMetadata").and_then(|u| u.get("candidatesTokenCount")).and_then(|t| t.as_i64());
-            let t = v["candidates"][0]["content"]["parts"][0]["text"].as_str().ok_or("Gemini応答にテキストがありません")?.to_string();
-            (raw_response, tokens_in, tokens_out, t)
-        }
-        crate::config::ApiType::OpenAI => {
-            let url = if prof.api_url.is_empty() { "https://api.openai.com/v1/chat/completions" } else { &prof.api_url };
-            let body = serde_json::json!({
-                "model": prof.model_name,
-                "response_format": { "type": "json_object" },
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            { "type": "text", "text": prompt },
-                            { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{}", b64) } }
-                        ]
-                    }
-                ]
-            });
-            let mut res = ureq::post(url).header("Authorization", format!("Bearer {}", key)).send_json(&body).map_err(|e| format!("GPT互換API呼び出し失敗: {e}"))?;
-            let v: serde_json::Value = res.body_mut().read_json().map_err(|e| format!("GPT応答の解析失敗: {e}"))?;
-            let raw_response = Some(crate::translate::mask_keys(cfg, &v.to_string()));
-            let tokens_in = v.get("usage").and_then(|u| u.get("prompt_tokens")).and_then(|t| t.as_i64());
-            let tokens_out = v.get("usage").and_then(|u| u.get("completion_tokens")).and_then(|t| t.as_i64());
-            let t = v["choices"][0]["message"]["content"].as_str().ok_or("GPT応答にテキストがありません")?.to_string();
-            (raw_response, tokens_in, tokens_out, t)
-        }
-        crate::config::ApiType::Claude => {
-            let url = if prof.api_url.is_empty() { "https://api.anthropic.com/v1/messages" } else { &prof.api_url };
-            let body = serde_json::json!({
-                "model": prof.model_name,
-                "max_tokens": 1024,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            { "type": "text", "text": prompt },
-                            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": b64.clone() } }
-                        ]
-                    }
-                ]
-            });
-            let mut res = ureq::post(url)
-                .header("x-api-key", &key)
-                .header("anthropic-version", "2023-06-01")
-                .send_json(&body).map_err(|e| format!("Claude API呼び出し失敗: {e}"))?;
-            let v: serde_json::Value = res.body_mut().read_json().map_err(|e| format!("Claude応答の解析失敗: {e}"))?;
-            let raw_response = Some(crate::translate::mask_keys(cfg, &v.to_string()));
-            let tokens_in = v.get("usage").and_then(|u| u.get("input_tokens")).and_then(|t| t.as_i64());
-            let tokens_out = v.get("usage").and_then(|u| u.get("output_tokens")).and_then(|t| t.as_i64());
-            let t = v["content"][0]["text"].as_str().ok_or("Claude応答にテキストがありません")?.to_string();
-            (raw_response, tokens_in, tokens_out, t)
-        }
-    };
+    let res = crate::llm_api::call(prof, &crate::llm_api::LlmRequest {
+        prompt: &prompt,
+        image_png_b64: Some(&b64),
+        json_mode: true,
+    })?;
 
-    let inner: serde_json::Value = serde_json::from_str(text.trim()).map_err(|_| "LLM応答のJSON解析に失敗".to_string())?;
+    let inner: serde_json::Value =
+        serde_json::from_str(res.text.trim()).map_err(|_| "LLM応答のJSON解析に失敗".to_string())?;
     let source = inner.get("source").and_then(|s| s.as_str()).unwrap_or("").trim().to_string();
     let translation = inner.get("translation").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
     if source.is_empty() {
@@ -325,8 +252,8 @@ pub fn llm_ocr_translate(cfg: &Config, img: &Captured, focus_y: Option<f32>) -> 
     Ok(OcrOutput {
         text: source,
         translation: if translation.is_empty() { None } else { Some(translation) },
-        raw_response,
-        tokens_in,
-        tokens_out,
+        raw_response: Some(crate::translate::mask_keys(cfg, &res.response_json)),
+        tokens_in: res.tokens_in,
+        tokens_out: res.tokens_out,
     })
 }
