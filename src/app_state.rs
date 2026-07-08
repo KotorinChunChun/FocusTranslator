@@ -84,6 +84,8 @@ pub struct App {
     explanation: Option<String>,
     /// 解説をLLMへ問い合わせ中 (オーバーレイに取得中表示を出す)
     explaining: bool,
+    /// 時間のかかる処理(再認識・再翻訳・解説)の実行中。オーバーレイの操作をロックする。
+    busy: bool,
     app_title: String,
     uia_path: String,
     pub scroll_y: i32,
@@ -137,6 +139,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             recog_id: None,
             explanation: None,
             explaining: false,
+            busy: false,
             app_title: String::new(),
             uia_path: String::new(),
             scroll_y: 0,
@@ -304,6 +307,7 @@ fn close_overlay(app: &mut App) {
     app.recog_id = None;
     app.explanation = None;
     app.explaining = false;
+    app.busy = false;
 }
 
 /// ワーカー結果の受信 (世代番号が古いものは破棄; SPEC §6.4)
@@ -313,6 +317,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
         if generation != app.generation {
             return;
         }
+        app.busy = false; // ワーカー完了 (成否問わずロック解除)
         match msg {
             worker::WorkerMsg::Source { text, method, engine, img, pin, anchor, focus_y, ms, recog_id, app_title, uia_path } => {
                 if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
@@ -409,18 +414,12 @@ pub fn handle_chip(id: usize) {
 
     match id {
         overlay::CHIP_COPY => {
-            let (src, tr) = overlay::current_text();
-            let text = with_app(|app| {
-                if let Some(expl) = &app.explanation {
-                    return expl.clone();
-                }
-                tr.unwrap_or(src)
-            }).unwrap_or_default();
-            
+            // 解説コピー: 解説文をコピーする (ボタンは解説表示中のみ出る)
+            let text = with_app(|app| app.explanation.clone()).flatten().unwrap_or_default();
             if !text.is_empty() {
                 util::set_clipboard_text(main_hwnd(), &text);
                 with_app(|app| {
-                    app.badge = Some(if app.explanation.is_some() { "解説をコピーしました".into() } else { "コピーしました".into() });
+                    app.badge = Some("解説をコピーしました".into());
                     sync_overlay(app);
                 });
             }
@@ -496,7 +495,19 @@ pub fn handle_chip(id: usize) {
                         return;
                     }
 
-                    let initial_prompt = crate::worker::build_explain_prompt(&cfg, &text).unwrap_or_default();
+                    // アプリ名・UIAパスを前提情報としてプロンプトへ、
+                    // 編集ダイアログはオーバーレイの近くに表示する
+                    let (app_title, uia_path, dialog_pos) = with_app(|app| {
+                        let mut r = RECT::default();
+                        unsafe {
+                            let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(app.overlay, &mut r);
+                        }
+                        (app.app_title.clone(), app.uia_path.clone(), (r.left + 24, r.top + 24))
+                    })
+                    .unwrap_or_default();
+
+                    let initial_prompt =
+                        crate::worker::build_explain_prompt(&cfg, &text, &app_title, &uia_path).unwrap_or_default();
                     if initial_prompt.is_empty() {
                         with_app(|app| {
                             app.badge = Some("LLM APIが設定されていません".into());
@@ -505,20 +516,37 @@ pub fn handle_chip(id: usize) {
                         return;
                     }
 
+                    let profiles: Vec<String> = cfg.api_profiles.iter().map(|p| p.name.clone()).collect();
+                    let active_idx = cfg
+                        .api_profiles
+                        .iter()
+                        .position(|p| p.name == cfg.active_api_profile)
+                        .unwrap_or(0);
+
                     let main_hwnd_val = main;
                     let inst = with_app(|app| app.instance).unwrap_or_default();
-                    crate::prompt_edit::open(inst, main_hwnd(), &initial_prompt, move |edited_prompt| {
-                        let new_gen = with_app(|app| {
-                            app.generation += 1;
-                            app.mode = Mode::Pinned;
-                            app.status = Some("解説を取得中…".into());
-                            app.explaining = true;
-                            sync_overlay(app);
-                            app.generation
-                        }).unwrap_or(0);
-                        let cfg2 = crate::config::Config::load();
-                        crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, main_hwnd_val);
-                    });
+                    crate::prompt_edit::open(
+                        inst,
+                        main_hwnd(),
+                        Some(dialog_pos),
+                        &initial_prompt,
+                        profiles,
+                        active_idx,
+                        move |edited_prompt, profile| {
+                            let new_gen = with_app(|app| {
+                                app.generation += 1;
+                                app.mode = Mode::Pinned;
+                                app.status = Some("解説を取得中…".into());
+                                app.explaining = true;
+                                app.busy = true;
+                                sync_overlay(app);
+                                app.generation
+                            })
+                            .unwrap_or(0);
+                            let cfg2 = crate::config::Config::load();
+                            crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val);
+                        },
+                    );
                 }
             }
             return;
@@ -550,6 +578,7 @@ pub fn handle_chip(id: usize) {
             app.mode = Mode::Pinned;
             app.cur_ocr = key.clone();
             app.status = Some("再認識中…".into());
+            app.busy = true;
             sync_overlay(app);
             app.generation
         })
@@ -581,6 +610,7 @@ pub fn handle_chip(id: usize) {
             app.cur_tr = key.clone();
             app.status = Some("翻訳中…".into());
             app.translation = None;
+            app.busy = true;
             sync_overlay(app);
             app.generation
         })
@@ -725,6 +755,8 @@ fn sync_overlay(app: &mut App) {
         app_title: app.app_title.clone(),
         uia_path: app.uia_path.clone(),
         scroll_y: app.scroll_y,
+        has_image: app.last_img.is_some(),
+        busy: app.busy,
     };
     overlay::update(app.overlay, content);
 }

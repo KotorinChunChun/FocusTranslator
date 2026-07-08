@@ -65,6 +65,11 @@ pub struct OverlayContent {
     pub app_title: String,
     pub uia_path: String,
     pub scroll_y: i32,
+    /// OCR対象画像を保持しているか (「OCR対象画像」ボタンの表示条件)
+    pub has_image: bool,
+    /// 時間のかかる処理(再認識・再翻訳・解説取得)の実行中。
+    /// true の間は閉じる以外の全チップを無効化してウィンドウ全体をロックする。
+    pub busy: bool,
 }
 
 enum Item {
@@ -100,6 +105,16 @@ const PAD: i32 = 12;
 const MAXW: i32 = 620;
 const TIMER_AUTOHIDE: usize = 7;
 const TIMER_ANIMATION: usize = 8;
+
+// フォントサイズ (統一スケール)
+const FONT_INFO: i32 = 11; // 対象アプリ情報などの補助テキスト
+const FONT_CHIP: i32 = 12; // チップ(ボタン)
+const FONT_HEADING: i32 = 13; // 【…】見出し・ステータス
+const FONT_BODY: i32 = 17; // 原文・訳文・解説の本文
+
+const CHIP_H: i32 = 24;
+/// 右上の閉じるボタンの一辺
+const CLOSE_SIZE: i32 = 20;
 
 pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
     unsafe {
@@ -240,11 +255,11 @@ fn compute_layout(hwnd: HWND) -> Layout {
 
             if content.error_only {
                 let msg = content.status.clone().unwrap_or_default();
-                let (tw, th) = measure(hdc, &msg, 14, false, MAXW);
+                let (tw, th) = measure(hdc, &msg, FONT_HEADING, false, MAXW);
                 items.push(Item::Text {
                     rect: RECT { left: PAD, top: y, right: PAD + tw + 4, bottom: y + th },
                     text: msg,
-                    size: 14,
+                    size: FONT_HEADING,
                     color: COL_STATUS,
                     bold: false,
                 });
@@ -254,43 +269,53 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 return Layout { w: need_w.min(MAXW + PAD * 2), h: y, content_h: y, items };
             }
 
-            // 対象アプリ情報
-            if !content.app_title.is_empty() {
-                let mut info = format!("対象: {}", content.app_title);
-                if !content.uia_path.is_empty() {
-                    info.push_str("\r\nパス: ");
-                    info.push_str(&content.uia_path);
-                }
-                if let Some(b) = &content.badge {
-                    info.push_str(&format!("\r\n[{b}]"));
-                }
-                let (tw, th) = measure(hdc, &info, 11, false, MAXW);
+            // 見出し行を配置し、続けて見出しの右にチップを並べる。戻り値は行の高さ。
+            let heading_row = |items: &mut Vec<Item>,
+                               y: i32,
+                               text: &str,
+                               chips: &[(&str, usize, bool)],
+                               need_w: &mut i32|
+             -> i32 {
+                let (hw, hh) = measure(hdc, text, FONT_HEADING, false, MAXW);
                 items.push(Item::Text {
-                    rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
-                    text: info,
-                    size: 11,
+                    rect: RECT { left: PAD, top: y, right: PAD + hw + 4, bottom: y + hh },
+                    text: text.to_string(),
+                    size: FONT_HEADING,
                     color: COL_LABEL,
                     bold: false,
                 });
-                y += th + 6;
-                need_w = need_w.max(tw + PAD * 2 + 4);
-            }
+                let mut x = PAD + hw + 10;
+                let row_h = hh.max(CLOSE_SIZE);
+                for (lab, id, enabled) in chips {
+                    let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
+                    let w = cw + 16;
+                    items.push(Item::Chip {
+                        rect: RECT { left: x, top: y - 1, right: x + w, bottom: y - 1 + CLOSE_SIZE },
+                        label: lab.to_string(),
+                        id: *id,
+                        active: false,
+                        enabled: *enabled,
+                    });
+                    x += w + 6;
+                }
+                *need_w = (*need_w).max(x + PAD - 6);
+                row_h
+            };
 
-            let chip_h = 24;
-            let row = |items: &mut Vec<Item>,
-                           y: &mut i32,
-                           keys: &[&str],
-                           labels: &[&str],
-                           cur: &str,
-                           enabled: &[bool],
-                           base: usize,
-                           need_w: &mut i32| {
+            let chip_row = |items: &mut Vec<Item>,
+                            y: &mut i32,
+                            keys: &[&str],
+                            labels: &[&str],
+                            cur: &str,
+                            enabled: &[bool],
+                            base: usize,
+                            need_w: &mut i32| {
                 let mut x = PAD;
                 for (i, lab) in labels.iter().enumerate() {
-                    let (cw, _) = measure(hdc, lab, 12, false, 200);
+                    let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                     let w = cw + 18;
                     items.push(Item::Chip {
-                        rect: RECT { left: x, top: *y, right: x + w, bottom: *y + chip_h },
+                        rect: RECT { left: x, top: *y, right: x + w, bottom: *y + CHIP_H },
                         label: lab.to_string(),
                         id: base + i,
                         active: keys[i] == cur,
@@ -299,44 +324,68 @@ fn compute_layout(hwnd: HWND) -> Layout {
                     x += w + 6;
                 }
                 *need_w = (*need_w).max(x + PAD - 6);
-                *y += chip_h + 6;
+                *y += CHIP_H + 6;
             };
 
-            let copy_w = 28;
-
-            // OCR結果ブロック
-            if !content.source.is_empty() {
-                let heading = format!("【OCR結果 ({})】", ocr_label(&content.cur_ocr));
-                let (hw, hh) = measure(hdc, &heading, 13, false, MAXW);
-                items.push(Item::Text {
-                    rect: RECT { left: PAD, top: y, right: PAD + hw + 4, bottom: y + hh },
-                    text: heading,
-                    size: 13,
-                    color: COL_LABEL,
-                    bold: false,
-                });
+            // 【入力内容】: 対象アプリ情報 + OCR対象画像ボタン
+            if !content.app_title.is_empty() || content.has_image {
+                let hh = heading_row(&mut items, y, "【入力内容】", &[], &mut need_w);
                 y += hh + 4;
 
-                let (sw, sh) = measure(hdc, &content.source, 17, false, MAXW - copy_w - 6);
+                if !content.app_title.is_empty() {
+                    let mut info = format!("対象: {}", content.app_title);
+                    if !content.uia_path.is_empty() {
+                        info.push_str("\r\nパス: ");
+                        info.push_str(&content.uia_path);
+                    }
+                    // 右上の閉じるボタンと重ならないよう幅を控える
+                    let info_w = MAXW - CLOSE_SIZE - 10;
+                    let (tw, th) = measure(hdc, &info, FONT_INFO, false, info_w);
+                    items.push(Item::Text {
+                        rect: RECT { left: PAD, top: y, right: PAD + info_w, bottom: y + th },
+                        text: info,
+                        size: FONT_INFO,
+                        color: COL_LABEL,
+                        bold: false,
+                    });
+                    y += th + 4;
+                    need_w = need_w.max(tw + PAD * 2 + 4);
+                }
+
+                if content.has_image {
+                    let lab = "OCR対象画像";
+                    let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
+                    items.push(Item::Chip {
+                        rect: RECT { left: PAD, top: y, right: PAD + cw + 20, bottom: y + CHIP_H },
+                        label: lab.to_string(),
+                        id: CHIP_IMAGE,
+                        active: false,
+                        enabled: true,
+                    });
+                    y += CHIP_H + 4;
+                }
+                y += 4;
+            }
+
+            // 【OCR結果】: 見出し右に📋コピー
+            if !content.source.is_empty() {
+                let heading = format!("【OCR結果 ({})】", ocr_label(&content.cur_ocr));
+                let hh = heading_row(&mut items, y, &heading, &[("📋", CHIP_COPY_SRC, true)], &mut need_w);
+                y += hh + 4;
+
+                let (sw, sh) = measure(hdc, &content.source, FONT_BODY, false, MAXW);
                 let text_h = sh.max(24);
                 items.push(Item::Text {
-                    rect: RECT { left: PAD, top: y, right: PAD + MAXW - copy_w - 6, bottom: y + text_h },
+                    rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h },
                     text: content.source.clone(),
-                    size: 17,
+                    size: FONT_BODY,
                     color: COL_SRC,
                     bold: false,
                 });
-                items.push(Item::Chip {
-                    rect: RECT { left: PAD + MAXW - copy_w, top: y, right: PAD + MAXW, bottom: y + 24 },
-                    label: "📋".to_string(),
-                    id: CHIP_COPY_SRC,
-                    active: false,
-                    enabled: true,
-                });
                 y += text_h + 6;
-                need_w = need_w.max(sw + copy_w + 6 + PAD * 2 + 4);
+                need_w = need_w.max(sw + PAD * 2 + 4);
 
-                row(
+                chip_row(
                     &mut items,
                     &mut y,
                     &OCR_KEYS,
@@ -348,39 +397,25 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 );
             }
 
-            // 翻訳結果またはステータスブロック
+            // 【翻訳結果】またはステータス
             if let Some(t) = &content.translation {
                 let heading = format!("【翻訳結果 ({})】", tr_label(&content.cur_tr));
-                let (hw, hh) = measure(hdc, &heading, 13, false, MAXW);
-                items.push(Item::Text {
-                    rect: RECT { left: PAD, top: y, right: PAD + hw + 4, bottom: y + hh },
-                    text: heading,
-                    size: 13,
-                    color: COL_LABEL,
-                    bold: false,
-                });
+                let hh = heading_row(&mut items, y, &heading, &[("📋", CHIP_COPY_TR, true)], &mut need_w);
                 y += hh + 4;
 
-                let (tw, th) = measure(hdc, t, 17, true, MAXW - copy_w - 6);
+                let (tw, th) = measure(hdc, t, FONT_BODY, true, MAXW);
                 let text_h = th.max(24);
                 items.push(Item::Text {
-                    rect: RECT { left: PAD, top: y, right: PAD + MAXW - copy_w - 6, bottom: y + text_h },
+                    rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h },
                     text: t.clone(),
-                    size: 17,
+                    size: FONT_BODY,
                     color: COL_TEXT,
                     bold: true,
                 });
-                items.push(Item::Chip {
-                    rect: RECT { left: PAD + MAXW - copy_w, top: y, right: PAD + MAXW, bottom: y + 24 },
-                    label: "📋".to_string(),
-                    id: CHIP_COPY_TR,
-                    active: false,
-                    enabled: true,
-                });
                 y += text_h + 8;
-                need_w = need_w.max(tw + copy_w + 6 + PAD * 2 + 4);
+                need_w = need_w.max(tw + PAD * 2 + 4);
 
-                row(
+                chip_row(
                     &mut items,
                     &mut y,
                     &TR_KEYS,
@@ -401,11 +436,11 @@ fn compute_layout(hwnd: HWND) -> Layout {
                     disp = disp.replace("…", "");
                     disp.push_str(&".".repeat(count as usize));
                 }
-                let (tw, th) = measure(hdc, &disp, 13, false, MAXW);
+                let (tw, th) = measure(hdc, &disp, FONT_HEADING, false, MAXW);
                 items.push(Item::Text {
                     rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
                     text: disp,
-                    size: 13,
+                    size: FONT_HEADING,
                     color: COL_STATUS,
                     bold: false,
                 });
@@ -413,19 +448,32 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 need_w = need_w.max(tw + PAD * 2 + 4);
             }
 
-            // 操作行: ピン留め / 画像 / コピー / 解説 / 設定 / 閉じる
+            // バッジ (「コピーしました」等の一時通知)
+            if let Some(b) = &content.badge {
+                let text = format!("[{b}]");
+                let (tw, th) = measure(hdc, &text, FONT_INFO, false, MAXW);
+                items.push(Item::Text {
+                    rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
+                    text,
+                    size: FONT_INFO,
+                    color: COL_STATUS,
+                    bold: false,
+                });
+                y += th + 4;
+                need_w = need_w.max(tw + PAD * 2 + 4);
+            }
+
+            // 操作行: ピン留め / 解説 / 設定 (閉じるは右上角、画像は入力内容、コピーは各見出し右)
             y += 2;
             let mut x = PAD;
-            let ops: &[(&str, usize)] = if content.pinned {
-                &[("ピン解除", CHIP_PIN), ("画像", CHIP_IMAGE), ("コピー", CHIP_COPY), ("解説", CHIP_EXPLAIN), ("設定", CHIP_SETTINGS), ("閉じる", CHIP_CLOSE)]
-            } else {
-                &[("ピン留め", CHIP_PIN), ("画像", CHIP_IMAGE), ("コピー", CHIP_COPY), ("解説", CHIP_EXPLAIN), ("設定", CHIP_SETTINGS)]
-            };
+            let pin_label = if content.pinned { "ピン解除" } else { "ピン留め" };
+            let ops: &[(&str, usize)] =
+                &[(pin_label, CHIP_PIN), ("解説", CHIP_EXPLAIN), ("設定", CHIP_SETTINGS)];
             for (lab, id) in ops {
-                let (cw, _) = measure(hdc, lab, 12, false, 200);
+                let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                 let w = cw + 20;
                 items.push(Item::Chip {
-                    rect: RECT { left: x, top: y, right: x + w, bottom: y + chip_h },
+                    rect: RECT { left: x, top: y, right: x + w, bottom: y + CHIP_H },
                     label: lab.to_string(),
                     id: *id,
                     active: false,
@@ -434,37 +482,30 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 x += w + 6;
             }
             need_w = need_w.max(x + PAD - 6);
-            y += chip_h + PAD;
+            y += CHIP_H + PAD;
 
-            // 解説領域
+            // 【解説】領域
             if content.explaining {
-                let (tw, th) = measure(hdc, "解説を取得中...", 13, false, MAXW);
+                let (tw, th) = measure(hdc, "解説を取得中...", FONT_HEADING, false, MAXW);
                 items.push(Item::Text {
                     rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
                     text: "解説を取得中...".to_string(),
-                    size: 13,
+                    size: FONT_HEADING,
                     color: COL_STATUS,
                     bold: false,
                 });
                 y += th + 8;
                 need_w = need_w.max(tw + PAD * 2 + 4);
             } else if let Some(expl) = &content.explanation {
-                y += 4;
-                items.push(Item::Text {
-                    rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + 2 },
-                    text: "---".to_string(),
-                    size: 10,
-                    color: COL_BORDER,
-                    bold: false,
-                });
-                y += 8;
+                let hh = heading_row(&mut items, y, "【解説】", &[("解説コピー", CHIP_COPY, true)], &mut need_w);
+                y += hh + 4;
 
-                let (tw, th) = measure(hdc, expl, 13, false, MAXW);
+                let (tw, th) = measure(hdc, expl, FONT_BODY, false, MAXW);
                 let text_h = th.max(20);
                 items.push(Item::Text {
                     rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h },
                     text: expl.clone(),
-                    size: 13,
+                    size: FONT_BODY,
                     color: COL_TEXT,
                     bold: false,
                 });
@@ -473,8 +514,32 @@ fn compute_layout(hwnd: HWND) -> Layout {
             }
 
             let _ = ReleaseDC(Some(hwnd), hdc);
+            let w = need_w.min(MAXW + PAD * 2);
+
+            // 処理中は閉じる以外の全チップを無効化 (ウィンドウ全体のロック)
+            if content.busy {
+                for item in &mut items {
+                    if let Item::Chip { id, enabled, .. } = item
+                        && *id != CHIP_CLOSE
+                    {
+                        *enabled = false;
+                    }
+                }
+            }
+
+            // 閉じるボタン: オーバーレイの右上角 (ピン留め時のみ。スクロールに追従せず固定)
+            if content.pinned {
+                items.push(Item::Chip {
+                    rect: RECT { left: w - CLOSE_SIZE - 6, top: 6, right: w - 6, bottom: 6 + CLOSE_SIZE },
+                    label: "✕".to_string(),
+                    id: CHIP_CLOSE,
+                    active: false,
+                    enabled: true,
+                });
+            }
+
             let display_h = y.min(800); // 画面に収まるように最大高さを制限
-            Layout { w: need_w.min(MAXW + PAD * 2), h: display_h, content_h: y, items }
+            Layout { w, h: display_h, content_h: y, items }
         }
     })
 }
@@ -526,8 +591,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 l.borrow().items.iter().find_map(|it| match it {
                     Item::Chip { rect, id, enabled, .. } => {
                         let mut r = *rect;
-                        r.top -= sy;
-                        r.bottom -= sy;
+                        // 右上の閉じるボタンはスクロールに追従しない
+                        let off = if *id == CHIP_CLOSE { 0 } else { sy };
+                        r.top -= off;
+                        r.bottom -= off;
                         if *enabled && x >= r.left && x < r.right && y >= r.top && y < r.bottom {
                             Some(*id)
                         } else {
@@ -618,15 +685,17 @@ fn paint(hwnd: HWND) {
                         SelectObject(mem, old);
                         let _ = DeleteObject(HGDIOBJ(font.0));
                     }
-                    Item::Chip { rect, label, active, enabled, .. } => {
+                    Item::Chip { rect, label, active, enabled, id } => {
                         let mut r = *rect;
-                        r.top -= sy;
-                        r.bottom -= sy;
+                        // 右上の閉じるボタンはスクロールに追従しない
+                        let off = if *id == CHIP_CLOSE { 0 } else { sy };
+                        r.top -= off;
+                        r.bottom -= off;
                         let bgc = if *active { COL_CHIP_ACTIVE } else { COL_CHIP };
                         let brush = CreateSolidBrush(COLORREF(bgc));
                         FillRect(mem, &r, brush);
                         let _ = DeleteObject(HGDIOBJ(brush.0));
-                        let font = make_font(12, *active);
+                        let font = make_font(FONT_CHIP, *active);
                         let old = SelectObject(mem, HGDIOBJ(font.0));
                         SetTextColor(
                             mem,

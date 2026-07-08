@@ -470,18 +470,33 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
     });
 }
 
-/// 解説プロンプトを組み立てる (LLMプロファイル未設定時は None)
-pub fn build_explain_prompt(cfg: &Config, text: &str) -> Option<String> {
+/// 解説プロンプトを組み立てる (LLMプロファイル未設定時は None)。
+/// アプリ名・UIAパスがあれば前提情報としてコンテキストブロックを付与する。
+pub fn build_explain_prompt(cfg: &Config, text: &str, app_title: &str, uia_path: &str) -> Option<String> {
     let prof = cfg.active_profile()?;
-    Some(cfg.fill_prompt(&prof.explain_prompt, text))
+    let mut prompt = cfg.fill_prompt(&prof.explain_prompt, text);
+    if !app_title.is_empty() || !uia_path.is_empty() {
+        prompt.push_str("\n\n[Context]");
+        if !app_title.is_empty() {
+            prompt.push_str(&format!("\nApplication: {app_title}"));
+        }
+        if !uia_path.is_empty() {
+            prompt.push_str(&format!("\nUI Path: {uia_path}"));
+        }
+    }
+    Some(prompt)
 }
 
-/// 解説の取得 (SPEC v0.2 §2.2.2): 成功時はDBへ保存してオーバーレイへ通知する
-pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, main: isize) {
+/// 解説の取得 (SPEC v0.2 §2.2.2): 成功時はDBへ保存してオーバーレイへ通知する。
+/// profile はダイアログで選択されたAPIプロファイル名 (見つからなければアクティブを使用)。
+pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, profile: String, main: isize) {
     std::thread::spawn(move || {
         init_com();
         let result = cfg
-            .active_profile()
+            .api_profiles
+            .iter()
+            .find(|p| p.name == profile)
+            .or_else(|| cfg.active_profile())
             .ok_or_else(|| "LLM APIプロファイルが設定されていません".to_string())
             .and_then(|prof| crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt)));
         match result {
