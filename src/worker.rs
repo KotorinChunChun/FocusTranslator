@@ -275,8 +275,10 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("source OCR({engine}) {ms}ms"));
+                // ログにはOCR対象の注目帯 (64px) だけを保存する (帯全体は保持画像=再OCR用)
+                let log_img = ocr::crop_for_focus(&used.img, Some(used.focus_y));
                 let recog_id =
-                    log_recog(&cfg, "hold", "ocr", &engine, ms, Some(&o.text), None, Some(&used.img), &ctx);
+                    log_recog(&cfg, "hold", "ocr", &engine, ms, Some(&o.text), None, Some(&log_img), &ctx);
                 post(main, generation, WorkerMsg::Source {
                     text: o.text.clone(),
                     method: "OCR",
@@ -351,8 +353,10 @@ pub fn reocr(
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("reocr {ocr_engine} {ms}ms"));
+                // ログにはOCR対象の注目帯 (64px) だけを保存する
+                let log_img = ocr::crop_for_focus(&image, last_focus_y);
                 let recog_id =
-                    log_recog(&cfg, "chip", "ocr", &ocr_engine, ms, Some(&o.text), None, Some(&image), &ctx);
+                    log_recog(&cfg, "chip", "ocr", &ocr_engine, ms, Some(&o.text), None, Some(&log_img), &ctx);
                 post(main, generation, WorkerMsg::Source {
                     text: o.text.clone(),
                     method: "OCR",

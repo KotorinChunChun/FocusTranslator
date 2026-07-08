@@ -169,7 +169,9 @@ pub fn join_paragraph(lines: &[String]) -> String {
     out
 }
 
-fn crop_for_focus(img: &Captured, focus_y: Option<f32>) -> std::borrow::Cow<'_, Captured> {
+/// カーソル注目行を中心に高さ64pxの帯へ切り抜く (focus_y が None なら元画像のまま)。
+/// 外部OCR/LLMへの送信画像と、ログ保存画像の切り出しで共用する。
+pub fn crop_for_focus(img: &Captured, focus_y: Option<f32>) -> std::borrow::Cow<'_, Captured> {
     if let Some(fy) = focus_y {
         let h = 64; // 高さ64pxの帯に切り抜く(複数行を拾うのを防ぐ)
         let top = (fy - h as f32 / 2.0).round() as i32;
