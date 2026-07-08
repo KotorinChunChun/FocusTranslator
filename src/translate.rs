@@ -38,7 +38,13 @@ pub struct Translated {
 /// request/response JSON に含まれうる設定済みAPIキーを伏字化する (SPEC §2.4)
 pub(crate) fn mask_keys(cfg: &Config, s: &str) -> String {
     let mut out = s.to_string();
-    for k in [cfg.deepl_key(), cfg.google_key(), cfg.gemini_key()] {
+    for k in [cfg.deepl_key(), cfg.google_key()] {
+        if k.len() >= 8 {
+            out = out.replace(&k, "***MASKED***");
+        }
+    }
+    for p in &cfg.api_profiles {
+        let k = p.get_key();
         if k.len() >= 8 {
             out = out.replace(&k, "***MASKED***");
         }
@@ -117,7 +123,7 @@ fn translate_once(
         "local" => translate_local(cfg, text, target).map(|t| (t, TransDetail::default())),
         "deepl" => translate_deepl(cfg, text, target),
         "google" => translate_google(cfg, text, target),
-        "gemini" => translate_gemini(cfg, text, source, target),
+        "llm" => translate_llm(cfg, text, source, target),
         other => Err(format!("不明な翻訳エンジン: {other}")),
     }
 }
@@ -185,45 +191,122 @@ fn translate_google(cfg: &Config, text: &str, target: &str) -> Result<(String, T
 }
 
 /// Geminiプロンプトのプレースホルダを置換する
-fn fill_prompt(tmpl: &str, source: &str, target: &str, text: &str) -> String {
+fn fill_prompt(cfg: &Config, tmpl: &str, source: &str, target: &str, text: &str) -> String {
+    let glossary_text = if cfg.glossary.is_empty() {
+        String::new()
+    } else {
+        let lines = cfg.glossary.iter().map(|e| format!("{}={}", e.source, e.target)).collect::<Vec<_>>().join("\n");
+        format!("Glossary:\n{}", lines)
+    };
     tmpl.replace("{{source_lang}}", source)
         .replace("{{target_lang}}", target)
         .replace("{{text}}", text)
+        .replace("{{glossary}}", &glossary_text)
 }
 
-fn translate_gemini(
+fn translate_llm(
     cfg: &Config,
     text: &str,
     source: &str,
     target: &str,
 ) -> Result<(String, TransDetail), String> {
-    let key = cfg.gemini_key();
+    let prof = cfg.active_profile().ok_or("LLM APIプロファイルが設定されていません")?;
+    let key = prof.get_key();
     if key.is_empty() {
-        return Err("Gemini APIキーが未設定です".into());
+        return Err(format!("APIキーが未設定です ({})", prof.name));
     }
-    let prompt = fill_prompt(&cfg.gemini_translate_prompt, source, target, text);
-    let body = serde_json::json!({
-        "contents": [{ "parts": [{ "text": prompt }] }]
-    });
-    let req_json = mask_keys(cfg, &body.to_string());
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-        cfg.gemini_model
-    );
-    let mut res = ureq::post(&url)
-        .header("x-goog-api-key", &key)
-        .send_json(&body)
-        .map_err(|e| format!("Gemini呼び出し失敗: {e}"))?;
-    let v: serde_json::Value =
-        res.body_mut().read_json().map_err(|e| format!("Gemini応答解析失敗: {e}"))?;
-    let detail = TransDetail {
-        request_json: Some(req_json),
-        response_json: Some(mask_keys(cfg, &v.to_string())),
-        tokens_in: v["usageMetadata"]["promptTokenCount"].as_i64(),
-        tokens_out: v["usageMetadata"]["candidatesTokenCount"].as_i64(),
-    };
-    v["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .map(|s| (s.trim().to_string(), detail))
-        .ok_or("Gemini応答に訳文がありません".into())
+    let prompt = fill_prompt(cfg, &prof.translate_prompt, source, target, text);
+
+    match prof.api_type {
+        crate::config::ApiType::Gemini => {
+            let body = serde_json::json!({
+                "contents": [{ "parts": [{ "text": prompt }] }]
+            });
+            let req_json = mask_keys(cfg, &body.to_string());
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                prof.model_name
+            );
+            let mut res = ureq::post(&url)
+                .header("x-goog-api-key", &key)
+                .send_json(&body)
+                .map_err(|e| format!("Gemini呼び出し失敗: {e}"))?;
+            let v: serde_json::Value =
+                res.body_mut().read_json().map_err(|e| format!("Gemini応答解析失敗: {e}"))?;
+            let detail = TransDetail {
+                request_json: Some(req_json),
+                response_json: Some(mask_keys(cfg, &v.to_string())),
+                tokens_in: v.get("usageMetadata").and_then(|u| u.get("promptTokenCount")).and_then(|t| t.as_i64()),
+                tokens_out: v.get("usageMetadata").and_then(|u| u.get("candidatesTokenCount")).and_then(|t| t.as_i64()),
+            };
+            v["candidates"][0]["content"]["parts"][0]["text"]
+                .as_str()
+                .map(|s| (s.trim().to_string(), detail))
+                .ok_or("Gemini応答に訳文がありません".into())
+        }
+        crate::config::ApiType::OpenAI => {
+            let url = if prof.api_url.is_empty() {
+                "https://api.openai.com/v1/chat/completions"
+            } else {
+                &prof.api_url
+            };
+            let body = serde_json::json!({
+                "model": prof.model_name,
+                "messages": [
+                    { "role": "user", "content": prompt }
+                ]
+            });
+            let req_json = mask_keys(cfg, &body.to_string());
+            let mut res = ureq::post(url)
+                .header("Authorization", format!("Bearer {}", key))
+                .send_json(&body)
+                .map_err(|e| format!("GPT互換API呼び出し失敗: {e}"))?;
+            let v: serde_json::Value =
+                res.body_mut().read_json().map_err(|e| format!("GPT応答解析失敗: {e}"))?;
+            let detail = TransDetail {
+                request_json: Some(req_json),
+                response_json: Some(mask_keys(cfg, &v.to_string())),
+                tokens_in: v.get("usage").and_then(|u| u.get("prompt_tokens")).and_then(|t| t.as_i64()),
+                tokens_out: v.get("usage").and_then(|u| u.get("completion_tokens")).and_then(|t| t.as_i64()),
+            };
+            v["choices"][0]["message"]["content"]
+                .as_str()
+                .map(|s| (s.trim().to_string(), detail))
+                .ok_or("GPT応答に訳文がありません".into())
+        }
+        crate::config::ApiType::Claude => {
+            let url = if prof.api_url.is_empty() {
+                "https://api.anthropic.com/v1/messages"
+            } else {
+                &prof.api_url
+            };
+            let body = serde_json::json!({
+                "model": prof.model_name,
+                "max_tokens": 1024,
+                "messages": [
+                    { "role": "user", "content": prompt }
+                ]
+            });
+            let req_json = mask_keys(cfg, &body.to_string());
+            let mut res = ureq::post(url)
+                .header("x-api-key", &key)
+                .header("anthropic-version", "2023-06-01")
+                .send_json(&body)
+                .map_err(|e| format!("Claude API呼び出し失敗: {e}"))?;
+            let v: serde_json::Value =
+                res.body_mut().read_json().map_err(|e| format!("Claude応答解析失敗: {e}"))?;
+            let detail = TransDetail {
+                request_json: Some(req_json),
+                response_json: Some(mask_keys(cfg, &v.to_string())),
+                tokens_in: v.get("usage").and_then(|u| u.get("input_tokens")).and_then(|t| t.as_i64()),
+                tokens_out: v.get("usage").and_then(|u| u.get("output_tokens")).and_then(|t| t.as_i64()),
+            };
+            v["content"][0]["text"]
+                .as_str()
+                .map(|s| (s.trim().to_string(), detail))
+                .ok_or("Claude応答に訳文がありません".into())
+        }
+    }
 }
+
+

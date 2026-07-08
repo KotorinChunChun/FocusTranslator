@@ -16,11 +16,11 @@ use windows::Win32::UI::Controls::{
     INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
     LVIF_STATE, LVIF_TEXT, LVITEMW, LIST_VIEW_ITEM_STATE_FLAGS, LVM_DELETEALLITEMS, LVM_GETNEXTITEM,
     LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW,
-    LVM_SETITEMW, LVM_ENSUREVISIBLE, LVN_ITEMCHANGED, LVS_EX_FULLROWSELECT, LVS_REPORT,
+    LVM_SETITEMW, LVM_ENSUREVISIBLE, LVN_ITEMCHANGED, LVN_KEYDOWN, NMLVKEYDOWN, LVS_EX_FULLROWSELECT, LVS_REPORT,
     LVS_SHOWSELALWAYS, LVS_SINGLESEL, NMHDR,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL,
+    EnableWindow, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_DELETE,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -51,6 +51,13 @@ const IDC_BTN_RETRANS: i32 = 223;
 const IDC_BTN_DEL_RECOG: i32 = 224;
 const IDC_BTN_DEL_TRANS: i32 = 225;
 
+const IDC_SEARCH_EDIT: i32 = 230;
+const IDC_EXE_COMBO: i32 = 231;
+const IDC_BTN_EXPORT: i32 = 232;
+const IDC_BTN_EXP: i32 = 233;
+const IDC_TAG_EDIT: i32 = 234;
+const IDC_BTN_SAVE_TAG: i32 = 235;
+
 /// 再OCR/再翻訳のワーカースレッド完了通知(ビューア限定メッセージ)
 const WM_APP_RELOAD: u32 = WM_APP + 30;
 
@@ -60,14 +67,14 @@ const OCR_ENGINES: [(&str, &str); 5] = [
     ("paddle", "PaddleOCR"),
     ("yomitoku", "YomiToku"),
     ("ndl", "NDL-OCR"),
-    ("gemini", "Gemini"),
+    ("llm", "LLM(統合)"),
 ];
 /// 再翻訳エンジン(内部キー / 表示名)
 const TR_ENGINES: [(&str, &str); 4] = [
     ("local", "ローカルONNX"),
     ("deepl", "DeepL"),
     ("google", "Google"),
-    ("gemini", "Gemini"),
+    ("llm", "LLM"),
 ];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -75,6 +82,7 @@ enum DetailView {
     Text,
     Request,
     Response,
+    Explanation,
 }
 
 struct State {
@@ -218,11 +226,12 @@ fn add_col(lvh: HWND, idx: i32, text: &str, width: i32) {
 fn build(h: HWND, inst: HINSTANCE) {
     let recog = lv(h, inst, IDC_RECOG_LV);
     add_col(recog, 0, "時刻", 140);
-    add_col(recog, 1, "モード", 60);
-    add_col(recog, 2, "エンジン", 80);
-    add_col(recog, 3, "ms", 50);
-    add_col(recog, 4, "画像", 40);
-    add_col(recog, 5, "認識テキスト", 460);
+    add_col(recog, 1, "アプリ", 100);
+    add_col(recog, 2, "モード", 50);
+    add_col(recog, 3, "エンジン", 70);
+    add_col(recog, 4, "ms", 40);
+    add_col(recog, 5, "画像", 40);
+    add_col(recog, 6, "認識テキスト", 380);
 
     let trans = lv(h, inst, IDC_TRANS_LV);
     add_col(trans, 0, "時刻", 140);
@@ -263,9 +272,22 @@ fn build(h: HWND, inst: HINSTANCE) {
     btn(h, inst, "原文/訳文", IDC_BTN_SRC);
     btn(h, inst, "送信JSON", IDC_BTN_REQ);
     btn(h, inst, "受信JSON", IDC_BTN_RES);
+    btn(h, inst, "解説(Exp)", IDC_BTN_EXP);
     btn(h, inst, "画像を開く", IDC_BTN_IMG);
     btn(h, inst, "最新に更新", IDC_BTN_REFRESH);
     btn(h, inst, "ログを全削除", IDC_BTN_CLEAR);
+
+    ctl(h, inst, w!("EDIT"), "", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP, 0, 0, 0, 0, IDC_SEARCH_EDIT);
+    let exe_combo = combo(h, inst, IDC_EXE_COMBO);
+    combo_add(exe_combo, "全アプリ");
+    for exe in logdb::get_unique_app_exes() {
+        combo_add(exe_combo, &exe);
+    }
+    combo_set(exe_combo, 0);
+    btn(h, inst, "CSV出力", IDC_BTN_EXPORT);
+
+    ctl(h, inst, w!("EDIT"), "", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP, 0, 0, 0, 0, IDC_TAG_EDIT);
+    btn(h, inst, "タグ保存", IDC_BTN_SAVE_TAG);
 
     // 下段: 再OCR/再翻訳エンジンのコンボと実行ボタン、選択削除
     let ocr_combo = combo(h, inst, IDC_OCR_COMBO);
@@ -401,20 +423,30 @@ fn layout(h: HWND) {
                 windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
             );
         };
+        let gap = 6;
+
+        // 検索行
+        mv(IDC_SEARCH_EDIT, PAD, g.search.top, 200, BTN_H);
+        mv(IDC_EXE_COMBO, PAD + 200 + gap, g.search.top, 150, 200);
+        mv(IDC_BTN_EXPORT, PAD + 200 + gap + 150 + gap, g.search.top, 100, BTN_H);
+
         let rh = |r: &RECT| r.bottom - r.top;
         mv(IDC_RECOG_LV, g.recog.left, g.recog.top, w - PAD * 2, rh(&g.recog));
         mv(IDC_TRANS_LV, g.trans.left, g.trans.top, w - PAD * 2, rh(&g.trans));
         mv(IDC_DETAIL, g.detail_text.left, g.detail_text.top, g.detail_text.right - g.detail_text.left, rh(&g.detail_text).max(20));
-        // 画像領域は WM_PAINT で描く(座標は geometry の img を参照)
+
+        // タグ行
+        mv(IDC_TAG_EDIT, PAD, g.tag_y, g.detail_text.right - PAD - gap - 80, BTN_H);
+        mv(IDC_BTN_SAVE_TAG, g.detail_text.right - 80, g.tag_y, 80, BTN_H);
 
         // 上段ボタン行(表示切替・画像)
-        let bw = 96;
-        let gap = 6;
+        let bw = 80;
         let y1 = g.row1_y;
         mv(IDC_BTN_SRC, PAD, y1, bw, BTN_H);
         mv(IDC_BTN_REQ, PAD + (bw + gap), y1, bw, BTN_H);
         mv(IDC_BTN_RES, PAD + (bw + gap) * 2, y1, bw, BTN_H);
-        mv(IDC_BTN_IMG, PAD + (bw + gap) * 3, y1, bw, BTN_H);
+        mv(IDC_BTN_EXP, PAD + (bw + gap) * 3, y1, bw, BTN_H);
+        mv(IDC_BTN_IMG, PAD + (bw + gap) * 4, y1, bw, BTN_H);
         mv(IDC_BTN_REFRESH, w - (bw + gap) * 2 - PAD, y1, bw, BTN_H);
         mv(IDC_BTN_CLEAR, w - (bw + gap) - PAD, y1, bw + 8, BTN_H);
 
@@ -445,12 +477,14 @@ const SPLITTER: i32 = 6;
 
 /// 各領域の矩形(レイアウト・描画・ヒットテストで共有)
 struct Geo {
+    search: RECT,
     recog: RECT,
     sp1: RECT,
     trans: RECT,
     sp2: RECT,
     detail_text: RECT,
     img: RECT,
+    tag_y: i32,
     row1_y: i32,
     ocr_btn_y: i32,
     trans_btn_y: i32,
@@ -467,11 +501,16 @@ fn geometry(h: HWND) -> Geo {
         let st = s.borrow();
         (st.split_a, st.split_b)
     });
+    
     let row2_y = ht - BTN_H - PAD;
     let row1_y = row2_y - BTN_H - 4;
-    let area_top = PAD;
-    let area_bottom = row1_y - PAD;
+    let tag_y = row1_y - BTN_H - 4;
+    
+    let area_top = PAD + BTN_H + PAD;
+    let area_bottom = tag_y - PAD;
     let area_h = (area_bottom - area_top).max(60);
+
+    let search = RECT { left: PAD, top: PAD, right: w - PAD, bottom: PAD + BTN_H };
 
     // OCR結果リストの底 + ボタンエリア
     let recog_bottom = area_top + (area_h as f32 * split_a) as i32;
@@ -494,7 +533,7 @@ fn geometry(h: HWND) -> Geo {
     let detail_text = RECT { left: PAD, top: detail_top, right: PAD + text_w, bottom: area_bottom };
     let img_left = PAD + text_w + PAD;
     let img = RECT { left: img_left, top: detail_top, right: w - PAD, bottom: area_bottom };
-    Geo { recog, sp1, trans, sp2, detail_text, img, row1_y, ocr_btn_y, trans_btn_y }
+    Geo { search, recog, sp1, trans, sp2, detail_text, img, tag_y, row1_y, ocr_btn_y, trans_btn_y }
 }
 
 fn in_rect(r: &RECT, x: i32, y: i32) -> bool {
@@ -586,7 +625,39 @@ fn truncate(s: &str, n: usize) -> String {
 
 /// DBから再読込して認識一覧を更新
 fn reload() {
-    let recogs = logdb::recent_recognitions(1000);
+    let h = hwnd();
+    let mut search_buf = [0u16; 256];
+    let query = unsafe {
+        let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(
+            dlg_item(h, IDC_SEARCH_EDIT),
+            &mut search_buf,
+        );
+        String::from_utf16_lossy(&search_buf[..len as usize])
+    };
+    let exe_idx = combo_sel(h, IDC_EXE_COMBO);
+    let app_exe = if exe_idx == 0 {
+        "".to_string()
+    } else {
+        unsafe {
+            let cb = dlg_item(h, IDC_EXE_COMBO);
+            let len = windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                cb,
+                windows::Win32::UI::WindowsAndMessaging::CB_GETLBTEXTLEN,
+                Some(WPARAM(exe_idx)),
+                None,
+            ).0 as usize;
+            let mut buf = vec![0u16; len + 1];
+            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                cb,
+                windows::Win32::UI::WindowsAndMessaging::CB_GETLBTEXT,
+                Some(WPARAM(exe_idx)),
+                Some(LPARAM(buf.as_mut_ptr() as isize)),
+            );
+            String::from_utf16_lossy(&buf[..len])
+        }
+    };
+
+    let recogs = logdb::search_recognitions(&query, &app_exe, 1000);
     let h = hwnd();
     let recog_lv = dlg_item(h, IDC_RECOG_LV);
     lv_clear(recog_lv);
@@ -595,6 +666,7 @@ fn reload() {
         let text = if r.success { r.source_text.clone() } else { format!("[エラー] {}", r.error) };
         lv_add_row(recog_lv, i as i32, &[
             fmt_ts(r.ts_ms),
+            truncate(r.app_title.as_deref().unwrap_or(""), 20),
             r.mode.clone(),
             r.engine.clone(),
             r.duration_ms.to_string(),
@@ -648,14 +720,30 @@ fn on_recog_selected(idx: usize) {
         s.borrow().recogs.get(idx).and_then(|r| r.image_path.clone())
     }).and_then(|rel| decode_png(&logdb::logs_dir().join(rel)));
 
+    // タグセット
+    let tags = logdb::get_explanation_and_tags(recog_id).map(|(_, t)| t).unwrap_or_default();
+    unsafe {
+        let wide = to_wide(&tags);
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+            dlg_item(h, IDC_TAG_EDIT),
+            PCWSTR(wide.as_ptr()),
+        );
+    }
+
+    let has_trans = !trans.is_empty();
     STATE.with(|s| {
         let mut st = s.borrow_mut();
         st.trans = trans;
         st.sel_recog = Some(idx);
-        st.sel_trans = None;
+        st.sel_trans = if has_trans { Some(0) } else { None };
         st.image = image;
     });
-    set_detail("");
+    if has_trans {
+        lv_select(trans_lv, 0);
+        refresh_detail();
+    } else {
+        set_detail("");
+    }
     update_image_button();
     unsafe {
         let _ = InvalidateRect(Some(hwnd()), None, true);
@@ -676,8 +764,22 @@ fn refresh_detail() {
         match st.detail_view {
             DetailView::Text => {
                 let src = st.sel_recog.and_then(|ri| st.recogs.get(ri)).map(|r| r.source_text.clone()).unwrap_or_default();
+                let app = st.sel_recog.and_then(|ri| st.recogs.get(ri)).and_then(|r| r.app_title.clone()).unwrap_or_default();
+                let uia = st.sel_recog.and_then(|ri| st.recogs.get(ri)).and_then(|r| r.uia_path.clone()).unwrap_or_default();
                 let body = if t.success { t.translated_text.clone() } else { format!("[エラー] {}", t.error) };
-                format!("【原文】\r\n{src}\r\n\r\n【訳文】\r\n{body}")
+                
+                let mut info = String::new();
+                if !app.is_empty() {
+                    info.push_str(&format!("【対象アプリ】\r\n{}\r\n", app));
+                }
+                if !uia.is_empty() {
+                    info.push_str(&format!("【UIAパス】\r\n{}\r\n", uia));
+                }
+                if !info.is_empty() {
+                    info.push_str("\r\n");
+                }
+                
+                format!("{}【原文】\r\n{}\r\n\r\n【訳文】\r\n{}", info, src, body)
             }
             DetailView::Request => {
                 if t.request_json.is_empty() { "(送信JSONなし: ローカル翻訳またはキャッシュ)".into() }
@@ -686,6 +788,14 @@ fn refresh_detail() {
             DetailView::Response => {
                 if t.response_json.is_empty() { "(受信JSONなし)".into() }
                 else { pretty_json(&t.response_json) }
+            }
+            DetailView::Explanation => {
+                if let Some(ri) = st.sel_recog {
+                    if let Some(r) = st.recogs.get(ri) {
+                        let (text, _tags) = logdb::get_explanation_and_tags(r.id).unwrap_or_default();
+                        if text.is_empty() { "(解説なし)".into() } else { text }
+                    } else { String::new() }
+                } else { String::new() }
             }
         }
     });
@@ -896,7 +1006,7 @@ fn start_reocr(h: HWND) {
             // 再OCR結果を新規認識ログとして追記(デバッグ時は画像も再保存)
             logdb::log_recognition(
                 "review", "ocr", &engine, ms, text.as_deref(), err.as_deref(),
-                Some(&cap), cfg.debug_mode,
+                Some(&cap), cfg.debug_mode, None, None, None
             );
         }
         unsafe {
@@ -1261,11 +1371,30 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     && let Some(sel) = lv_selected(dlg_item(h, IDC_TRANS_LV)) {
                         on_trans_selected(sel);
                     }
+            } else if nmhdr.code == LVN_KEYDOWN {
+                let key_nm = unsafe { &*(lparam.0 as *const NMLVKEYDOWN) };
+                if key_nm.wVKey == VK_DELETE.0 {
+                    let id = nmhdr.idFrom as i32;
+                    if id == IDC_RECOG_LV {
+                        unsafe { let _ = SendMessageW(h, WM_COMMAND, Some(WPARAM(IDC_BTN_DEL_RECOG as usize)), None); }
+                    } else if id == IDC_TRANS_LV {
+                        unsafe { let _ = SendMessageW(h, WM_COMMAND, Some(WPARAM(IDC_BTN_DEL_TRANS as usize)), None); }
+                    }
+                }
             }
             LRESULT(0)
         }
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
+            let code = (wparam.0 >> 16) & 0xFFFF;
+            if id == IDC_SEARCH_EDIT && code == 0x0300 /* EN_CHANGE */ {
+                reload();
+                return LRESULT(0);
+            }
+            if id == IDC_EXE_COMBO && code == 1 /* CBN_SELCHANGE */ {
+                reload();
+                return LRESULT(0);
+            }
             match id {
                 IDC_BTN_SRC => {
                     STATE.with(|s| s.borrow_mut().detail_view = DetailView::Text);
@@ -1346,6 +1475,49 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                     on_trans_selected(new_idx);
                                 }
                             }
+                        }
+                    }
+                }
+                IDC_BTN_EXP => {
+                    STATE.with(|s| s.borrow_mut().detail_view = DetailView::Explanation);
+                    refresh_detail();
+                }
+                IDC_BTN_SAVE_TAG => {
+                    let sel_idx = STATE.with(|s| s.borrow().sel_recog);
+                    if let Some(idx) = sel_idx {
+                        let recog_id = STATE.with(|s| s.borrow().recogs.get(idx).map(|r| r.id));
+                        if let Some(id) = recog_id {
+                            let mut buf = [0u16; 1024];
+                            let text = unsafe {
+                                let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(
+                                    dlg_item(h, IDC_TAG_EDIT),
+                                    &mut buf,
+                                );
+                                String::from_utf16_lossy(&buf[..len as usize])
+                            };
+                            let (exp, _) = logdb::get_explanation_and_tags(id).unwrap_or_default();
+                            logdb::save_explanation_and_tags(id, &exp, &text);
+                            unsafe { MessageBoxW(Some(h), w!("タグを保存しました。"), w!("タグ保存"), MB_OK); }
+                        }
+                    }
+                }
+                IDC_BTN_EXPORT => {
+                    let path = logdb::logs_dir().join("export.csv");
+                    if let Ok(mut f) = std::fs::File::create(&path) {
+                        use std::io::Write;
+                        let _ = writeln!(f, "\u{FEFF}ID,日時,エンジン,原文,訳文,タグ,解説");
+                        let recogs = STATE.with(|s| s.borrow().recogs.clone());
+                        for r in recogs {
+                            let trans = logdb::translations_for(r.id);
+                            let (exp, tags) = logdb::get_explanation_and_tags(r.id).unwrap_or_default();
+                            let tr_text = trans.first().map(|t| t.translated_text.clone()).unwrap_or_default();
+                            let tr_eng = trans.first().map(|t| t.engine.clone()).unwrap_or_default();
+                            let escape = |s: &str| format!("\"{}\"", s.replace("\"", "\"\""));
+                            let _ = writeln!(f, "{},{},{},{},{},{},{}", r.id, fmt_ts(r.ts_ms), tr_eng, escape(&r.source_text), escape(&tr_text), escape(&tags), escape(&exp));
+                        }
+                        unsafe {
+                            let wide = to_wide(&path.to_string_lossy());
+                            let _ = ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
                         }
                     }
                 }

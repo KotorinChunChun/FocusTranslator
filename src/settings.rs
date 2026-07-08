@@ -32,8 +32,8 @@ const IDC_TR: i32 = 105;
 const IDC_LANG: i32 = 106;
 const IDC_DEEPL: i32 = 107;
 const IDC_GOOGLE: i32 = 108;
-const IDC_GEMINI: i32 = 109;
-const IDC_GMODEL: i32 = 110;
+const IDC_PROF_LIST: i32 = 109;
+const IDC_PROF_NEW: i32 = 110;
 const IDC_YOMI: i32 = 111;
 const IDC_NDL: i32 = 112;
 const IDC_AUTOSTART: i32 = 113;
@@ -50,16 +50,24 @@ const IDC_ONNX_STATUS: i32 = 123;
 const IDC_ONNX_INSTALL: i32 = 124;
 const IDC_DEEPL_URL: i32 = 125;
 const IDC_GOOGLE_URL: i32 = 126;
-const IDC_GEMINI_URL: i32 = 127;
+const IDC_PROF_SAVE: i32 = 127;
 const IDC_SRCLANG: i32 = 128;
 const IDC_LOG_ENABLED: i32 = 129;
 const IDC_DEBUG_MODE: i32 = 130;
 const IDC_LOG_MAX: i32 = 131;
-const IDC_GPROMPT_TR: i32 = 132;
-const IDC_GPROMPT_OCR: i32 = 133;
-const IDC_GPROMPT_RESET: i32 = 134;
+const IDC_PROF_SAVEAS: i32 = 132;
+const IDC_PROF_DEL: i32 = 133;
+const IDC_PROF_NAME: i32 = 134;
 const IDC_OPEN_LOG: i32 = 135;
 const IDC_ONNX_VARIANT: i32 = 136;
+const IDC_PROF_MODEL: i32 = 137;
+const IDC_PROF_URL: i32 = 138;
+const IDC_PROF_KEY: i32 = 139;
+const IDC_PROF_TYPE: i32 = 140;
+const IDC_GLOSSARY: i32 = 141;
+const IDC_PROF_PROMPT_OCR: i32 = 142;
+const IDC_PROF_PROMPT_TR: i32 = 143;
+const IDC_PROF_PROMPT_EXP: i32 = 144;
 
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
@@ -67,19 +75,19 @@ const WM_ONNX_DONE: u32 = WM_APP + 11;
 /// 各APIキーの発行ページ(実際に確認済みの現行URL)
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
-const GEMINI_KEY_URL: &str = "https://aistudio.google.com/api-keys";
 
 const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
-const OCR_KEYS: [&str; 5] = ["win", "paddle", "yomitoku", "ndl", "gemini"];
-const OCR_DISP: [&str; 5] = ["Windows OCR", "PaddleOCR", "YomiToku", "NDL-OCR", "Gemini"];
-const TR_KEYS: [&str; 4] = ["local", "deepl", "google", "gemini"];
-const TR_DISP: [&str; 4] = ["ローカルONNX", "DeepL", "Google", "Gemini"];
+const OCR_KEYS: [&str; 5] = ["win", "paddle", "yomitoku", "ndl", "llm"];
+const OCR_DISP: [&str; 5] = ["Windows OCR", "PaddleOCR", "YomiToku", "NDL-OCR", "LLM(プロファイル)"];
+const TR_KEYS: [&str; 4] = ["local", "deepl", "google", "llm"];
+const TR_DISP: [&str; 4] = ["ローカルONNX", "DeepL", "Google", "LLM(プロファイル)"];
 const LANGS: [&str; 2] = ["ja", "en"];
 
 thread_local! {
     static WND: RefCell<isize> = const { RefCell::new(0) };
     static REGISTERED: RefCell<bool> = const { RefCell::new(false) };
     static FONT: RefCell<isize> = const { RefCell::new(0) };
+    static PROFILES: RefCell<Vec<crate::config::ApiProfile>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn hwnd() -> HWND {
@@ -125,7 +133,7 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             640,
-            890,
+            1150,
             None,
             None,
             Some(instance),
@@ -164,6 +172,14 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 140, 20, IDC_PADDLE_STATUS);
     button(h, inst, "インストール", cx + 146, y - 2, 104, IDC_PADDLE_INSTALL);
     y += step;
+    label(h, inst, "YomiToku サーバーURL", lx, y + 2, 160);
+    edit(h, inst, cx, y, 190, IDC_YOMI);
+    button(h, inst, "テスト", cx + 196, y - 2, 54, IDC_TEST_YOMI);
+    y += step;
+    label(h, inst, "NDL-OCR サーバーURL", lx, y + 2, 160);
+    edit(h, inst, cx, y, 190, IDC_NDL);
+    button(h, inst, "テスト", cx + 196, y - 2, 54, IDC_TEST_NDL);
+    y += step;
     label(h, inst, "既定翻訳エンジン", lx, y + 2, 150);
     combo(h, inst, cx, y, 150, IDC_TR);
     y += step;
@@ -189,29 +205,43 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     password_edit(h, inst, cx, y, key_w, IDC_GOOGLE);
     button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 108, IDC_GOOGLE_URL);
     y += step;
-    label(h, inst, "Gemini APIキー", lx, y + 2, 150);
-    password_edit(h, inst, cx, y, key_w, IDC_GEMINI);
-    button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 108, IDC_GEMINI_URL);
+    // LLM APIプロファイル設定領域
     y += step;
-    label(h, inst, "Geminiモデル", lx, y + 2, 150);
-    edit(h, inst, cx, y, cw, IDC_GMODEL);
+    label(h, inst, "【LLM APIプロファイル】", lx, y, 180);
+    combo(h, inst, cx, y, 140, IDC_PROF_LIST);
+    button(h, inst, "新規", cx + 150, y, 50, IDC_PROF_NEW);
+    button(h, inst, "保存", cx + 205, y, 50, IDC_PROF_SAVE);
+    button(h, inst, "別名保存", cx + 260, y, 60, IDC_PROF_SAVEAS);
+    button(h, inst, "削除", cx + 325, y, 50, IDC_PROF_DEL);
     y += step;
-    // Geminiプロンプト(翻訳/OCR統合)。{{source_lang}} {{target_lang}} {{text}} を置換
-    label(h, inst, "Gemini翻訳プロンプト", lx, y + 2, 160);
-    multiline(h, inst, cx, y, cw, 44, IDC_GPROMPT_TR);
+
+    label(h, inst, "API登録名", lx, y + 2, 150);
+    edit(h, inst, cx, y, 150, IDC_PROF_NAME);
+    label(h, inst, "種別", cx + 160, y + 2, 40);
+    combo(h, inst, cx + 200, y, 100, IDC_PROF_TYPE);
+    y += step;
+    
+    label(h, inst, "API URL", lx, y + 2, 150);
+    edit(h, inst, cx, y, cw + 50, IDC_PROF_URL);
+    y += step;
+
+    label(h, inst, "APIキー", lx, y + 2, 150);
+    password_edit(h, inst, cx, y, key_w, IDC_PROF_KEY);
+    y += step;
+
+    label(h, inst, "モデル名", lx, y + 2, 150);
+    edit(h, inst, cx, y, 150, IDC_PROF_MODEL);
+    y += step;
+
+    label(h, inst, "翻訳プロンプト", lx, y + 2, 160);
+    multiline(h, inst, cx, y, cw + 50, 44, IDC_PROF_PROMPT_TR);
     y += 50;
-    label(h, inst, "Gemini OCRプロンプト", lx, y + 2, 160);
-    multiline(h, inst, cx, y, cw, 44, IDC_GPROMPT_OCR);
-    button(h, inst, "既定に戻す", lx, y + 48, 110, IDC_GPROMPT_RESET);
-    y += 76;
-    label(h, inst, "YomiToku サーバーURL", lx, y + 2, 160);
-    edit(h, inst, cx, y, 190, IDC_YOMI);
-    button(h, inst, "テスト", cx + 196, y - 2, 54, IDC_TEST_YOMI);
-    y += step;
-    label(h, inst, "NDL-OCR サーバーURL", lx, y + 2, 160);
-    edit(h, inst, cx, y, 190, IDC_NDL);
-    button(h, inst, "テスト", cx + 196, y - 2, 54, IDC_TEST_NDL);
-    y += step;
+    label(h, inst, "OCRプロンプト", lx, y + 2, 160);
+    multiline(h, inst, cx, y, cw + 50, 44, IDC_PROF_PROMPT_OCR);
+    y += 50;
+    label(h, inst, "解説プロンプト", lx, y + 2, 160);
+    multiline(h, inst, cx, y, cw + 50, 44, IDC_PROF_PROMPT_EXP);
+    y += 50;
     checkbox(h, inst, "起動時に常駐する", lx, y, 200, IDC_AUTOSTART);
     checkbox(h, inst, "計測ログを有効化", cx + 40, y, 200, IDC_PERFLOG);
     y += step;
@@ -224,7 +254,10 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     button(h, inst, "ログビューアを開く", cx + 256, y - 2, 110, IDC_OPEN_LOG);
     y += step;
     button(h, inst, "外部送信の同意状態をリセット", lx, y, 220, IDC_CONSENT_RESET);
-    y += step + 10;
+    y += step;
+    label(h, inst, "用語集 (1行に 原文=訳文)", lx, y + 2, 180);
+    multiline(h, inst, cx, y, cw, 60, IDC_GLOSSARY);
+    y += 66;
     button(h, inst, "適用", cx + 60, y, 80, IDC_APPLY);
     button(h, inst, "保存", cx + 146, y, 80, IDC_SAVE);
     button(h, inst, "閉じる", cx + 232, y, 80, IDC_CLOSE);
@@ -368,10 +401,23 @@ fn populate(h: HWND) {
     );
     set_text(h, IDC_DEEPL, &cfg.deepl_key());
     set_text(h, IDC_GOOGLE, &cfg.google_key());
-    set_text(h, IDC_GEMINI, &cfg.gemini_key());
-    set_text(h, IDC_GMODEL, &cfg.gemini_model);
-    set_text(h, IDC_GPROMPT_TR, &cfg.gemini_translate_prompt);
-    set_text(h, IDC_GPROMPT_OCR, &cfg.gemini_ocr_prompt);
+
+    PROFILES.with(|p| *p.borrow_mut() = cfg.api_profiles.clone());
+    let profile_names: Vec<String> = cfg.api_profiles.iter().map(|p| p.name.clone()).collect();
+    let profile_strs: Vec<&str> = profile_names.iter().map(|s| s.as_str()).collect();
+    let sel = cfg.api_profiles.iter().position(|p| p.name == cfg.active_api_profile).unwrap_or(0);
+    
+    // cb_reset_content(h, IDC_PROF_LIST); // TODO: implement if needed, combo_fill just appends
+    unsafe {
+        SendMessageW(get_dlg_item(h, IDC_PROF_LIST), windows::Win32::UI::WindowsAndMessaging::CB_RESETCONTENT, None, None);
+        SendMessageW(get_dlg_item(h, IDC_PROF_TYPE), windows::Win32::UI::WindowsAndMessaging::CB_RESETCONTENT, None, None);
+    }
+    combo_fill(h, IDC_PROF_LIST, &profile_strs, sel);
+    
+    let type_strs = ["Gemini", "OpenAI", "Claude"];
+    combo_fill(h, IDC_PROF_TYPE, &type_strs, 0);
+
+    load_profile_to_ui(h, sel);
     set_text(h, IDC_YOMI, &cfg.yomitoku_url);
     set_text(h, IDC_NDL, &cfg.ndl_url);
     check_set(h, IDC_AUTOSTART, cfg.autostart);
@@ -379,6 +425,8 @@ fn populate(h: HWND) {
     check_set(h, IDC_LOG_ENABLED, cfg.log_enabled);
     check_set(h, IDC_DEBUG_MODE, cfg.debug_mode);
     set_text(h, IDC_LOG_MAX, &cfg.log_max_records.to_string());
+    let glossary_text = cfg.glossary.iter().map(|e| format!("{}={}", e.source, e.target)).collect::<Vec<_>>().join("\r\n");
+    set_text(h, IDC_GLOSSARY, &glossary_text);
     refresh_paddle_status(h);
     refresh_onnx_status(h);
 }
@@ -405,6 +453,34 @@ fn refresh_onnx_status(h: HWND) {
     unsafe {
         let _ = EnableWindow(get_dlg_item(h, IDC_ONNX_INSTALL), !installed);
     }
+}
+
+fn load_profile_to_ui(h: HWND, idx: usize) {
+    PROFILES.with(|p| {
+        let profiles = p.borrow();
+        if let Some(prof) = profiles.get(idx) {
+            set_text(h, IDC_PROF_NAME, &prof.name);
+            let type_idx = match prof.api_type {
+                crate::config::ApiType::Gemini => 0,
+                crate::config::ApiType::OpenAI => 1,
+                crate::config::ApiType::Claude => 2,
+            };
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                    get_dlg_item(h, IDC_PROF_TYPE),
+                    windows::Win32::UI::WindowsAndMessaging::CB_SETCURSEL,
+                    Some(WPARAM(type_idx as usize)),
+                    Some(LPARAM(0)),
+                );
+            }
+            set_text(h, IDC_PROF_MODEL, &prof.model_name);
+            set_text(h, IDC_PROF_URL, &prof.api_url);
+            set_text(h, IDC_PROF_KEY, &prof.get_key());
+            set_text(h, IDC_PROF_PROMPT_OCR, &prof.ocr_prompt);
+            set_text(h, IDC_PROF_PROMPT_TR, &prof.translate_prompt);
+            set_text(h, IDC_PROF_PROMPT_EXP, &prof.explain_prompt);
+        }
+    });
 }
 
 /// インストールボタン押下時の共通処理: ボタン無効化→バックグラウンドDL→完了時に done_msg を通知
@@ -486,19 +562,15 @@ fn save(h: HWND) {
     cfg.local_model_variant = selected_onnx_variant(h).key().to_string();
     cfg.deepl_key_enc = util::dpapi_encrypt(get_text(h, IDC_DEEPL).trim());
     cfg.google_key_enc = util::dpapi_encrypt(get_text(h, IDC_GOOGLE).trim());
-    cfg.gemini_key_enc = util::dpapi_encrypt(get_text(h, IDC_GEMINI).trim());
-    let gm = get_text(h, IDC_GMODEL).trim().to_string();
-    if !gm.is_empty() {
-        cfg.gemini_model = gm;
+    
+    PROFILES.with(|p| {
+        cfg.api_profiles = p.borrow().clone();
+    });
+    let sel = combo_sel(h, IDC_PROF_LIST);
+    if let Some(prof) = cfg.api_profiles.get(sel) {
+        cfg.active_api_profile = prof.name.clone();
     }
-    let gpt = get_text(h, IDC_GPROMPT_TR);
-    if !gpt.trim().is_empty() {
-        cfg.gemini_translate_prompt = gpt;
-    }
-    let gpo = get_text(h, IDC_GPROMPT_OCR);
-    if !gpo.trim().is_empty() {
-        cfg.gemini_ocr_prompt = gpo;
-    }
+    
     cfg.yomitoku_url = get_text(h, IDC_YOMI).trim().to_string();
     cfg.ndl_url = get_text(h, IDC_NDL).trim().to_string();
     cfg.autostart = check_get(h, IDC_AUTOSTART);
@@ -506,6 +578,19 @@ fn save(h: HWND) {
     cfg.log_enabled = check_get(h, IDC_LOG_ENABLED);
     cfg.debug_mode = check_get(h, IDC_DEBUG_MODE);
     cfg.log_max_records = get_text(h, IDC_LOG_MAX).trim().parse().unwrap_or(5000).clamp(100, 100000);
+    
+    let glos_text = get_text(h, IDC_GLOSSARY);
+    cfg.glossary = glos_text.lines().filter_map(|line| {
+        let parts: Vec<&str> = line.splitn(2, '=').collect();
+        if parts.len() == 2 {
+            let s = parts[0].trim();
+            let t = parts[1].trim();
+            if !s.is_empty() && !t.is_empty() {
+                return Some(crate::config::GlossaryEntry { source: s.to_string(), target: t.to_string() });
+            }
+        }
+        None
+    }).collect();
 
     // 既定エンジンがクラウド/外部送信を伴う場合はここで同意を確認 (SPEC §9)
     confirm_default_consents(h, &mut cfg);
@@ -516,7 +601,7 @@ fn save(h: HWND) {
 
 fn confirm_default_consents(h: HWND, cfg: &mut Config) {
     unsafe {
-        if matches!(cfg.default_translator.as_str(), "deepl" | "google" | "gemini")
+        if matches!(cfg.default_translator.as_str(), "deepl" | "google" | "llm")
             && !cfg.consent_text
         {
             let r = MessageBoxW(
@@ -527,7 +612,7 @@ fn confirm_default_consents(h: HWND, cfg: &mut Config) {
             );
             cfg.consent_text = r.0 == 6; // IDYES
         }
-        if cfg.default_ocr == "gemini" && !cfg.consent_image {
+        if cfg.default_ocr == "llm" && !cfg.consent_image {
             let r = MessageBoxW(
                 Some(h),
                 w!("既定のOCRエンジンはキャプチャ画像を外部サービスへ送信します。許可しますか?"),
@@ -668,10 +753,108 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 }
                 IDC_DEEPL_URL => open_url(h, DEEPL_KEY_URL),
                 IDC_GOOGLE_URL => open_url(h, GOOGLE_KEY_URL),
-                IDC_GEMINI_URL => open_url(h, GEMINI_KEY_URL),
-                IDC_GPROMPT_RESET => {
-                    set_text(h, IDC_GPROMPT_TR, crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT);
-                    set_text(h, IDC_GPROMPT_OCR, crate::config::DEFAULT_GEMINI_OCR_PROMPT);
+                IDC_PROF_LIST | IDC_PROF_TYPE => {
+                    let notif = ((wparam.0 >> 16) & 0xFFFF) as u32;
+                    if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE {
+                        if id == IDC_PROF_LIST {
+                            load_profile_to_ui(h, combo_sel(h, IDC_PROF_LIST));
+                        } else if id == IDC_PROF_TYPE {
+                            let sel = combo_sel(h, IDC_PROF_TYPE);
+                            match sel {
+                                0 => { // Gemini
+                                    set_text(h, IDC_PROF_MODEL, "gemini-1.5-flash");
+                                    set_text(h, IDC_PROF_URL, "");
+                                }
+                                1 => { // OpenAI
+                                    set_text(h, IDC_PROF_MODEL, "gpt-4o-mini");
+                                    set_text(h, IDC_PROF_URL, "https://api.openai.com/v1/chat/completions");
+                                }
+                                2 => { // Claude
+                                    set_text(h, IDC_PROF_MODEL, "claude-3-haiku-20240307");
+                                    set_text(h, IDC_PROF_URL, "https://api.anthropic.com/v1/messages");
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                IDC_PROF_NEW => {
+                    set_text(h, IDC_PROF_NAME, "");
+                    set_text(h, IDC_PROF_URL, "");
+                    set_text(h, IDC_PROF_KEY, "");
+                    set_text(h, IDC_PROF_MODEL, "");
+                    set_text(h, IDC_PROF_PROMPT_OCR, crate::config::DEFAULT_GEMINI_OCR_PROMPT);
+                    set_text(h, IDC_PROF_PROMPT_TR, crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT);
+                    set_text(h, IDC_PROF_PROMPT_EXP, crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT);
+                    unsafe {
+                        SendMessageW(get_dlg_item(h, IDC_PROF_TYPE), windows::Win32::UI::WindowsAndMessaging::CB_SETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
+                    }
+                }
+                IDC_PROF_SAVE | IDC_PROF_SAVEAS => {
+                    let name = get_text(h, IDC_PROF_NAME).trim().to_string();
+                    if name.is_empty() { return LRESULT(0); }
+                    let type_idx = combo_sel(h, IDC_PROF_TYPE);
+                    let mut prof = crate::config::ApiProfile {
+                        name: name.clone(),
+                        api_type: match type_idx {
+                            1 => crate::config::ApiType::OpenAI,
+                            2 => crate::config::ApiType::Claude,
+                            _ => crate::config::ApiType::Gemini,
+                        },
+                        model_name: get_text(h, IDC_PROF_MODEL).trim().to_string(),
+                        api_url: get_text(h, IDC_PROF_URL).trim().to_string(),
+                        api_key_enc: String::new(),
+                        ocr_prompt: get_text(h, IDC_PROF_PROMPT_OCR),
+                        translate_prompt: get_text(h, IDC_PROF_PROMPT_TR),
+                        explain_prompt: get_text(h, IDC_PROF_PROMPT_EXP),
+                    };
+                    prof.set_key(get_text(h, IDC_PROF_KEY).trim());
+
+                    PROFILES.with(|p| {
+                        let mut profiles = p.borrow_mut();
+                        if id == IDC_PROF_SAVE {
+                            if let Some(existing) = profiles.iter_mut().find(|x| x.name == name) {
+                                *existing = prof.clone();
+                            } else {
+                                profiles.push(prof.clone());
+                            }
+                        } else {
+                            // 別名保存
+                            if profiles.iter().any(|x| x.name == name) {
+                                unsafe { MessageBoxW(Some(h), w!("その名前は既に存在します"), w!("エラー"), MB_OK); }
+                                return;
+                            }
+                            profiles.push(prof.clone());
+                        }
+                        
+                        let profile_names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
+                        let profile_strs: Vec<&str> = profile_names.iter().map(|s| s.as_str()).collect();
+                        let sel = profiles.iter().position(|p| p.name == name).unwrap_or(0);
+                        unsafe { SendMessageW(get_dlg_item(h, IDC_PROF_LIST), windows::Win32::UI::WindowsAndMessaging::CB_RESETCONTENT, None, None); }
+                        combo_fill(h, IDC_PROF_LIST, &profile_strs, sel);
+                    });
+                }
+                IDC_PROF_DEL => {
+                    let mut do_load = false;
+                    PROFILES.with(|p| {
+                        let mut profiles = p.borrow_mut();
+                        if profiles.len() <= 1 {
+                            unsafe { MessageBoxW(Some(h), w!("最低1つは残す必要があります"), w!("エラー"), MB_OK); }
+                            return;
+                        }
+                        let sel = combo_sel(h, IDC_PROF_LIST);
+                        if sel < profiles.len() {
+                            profiles.remove(sel);
+                            let profile_names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
+                            let profile_strs: Vec<&str> = profile_names.iter().map(|s| s.as_str()).collect();
+                            unsafe { SendMessageW(get_dlg_item(h, IDC_PROF_LIST), windows::Win32::UI::WindowsAndMessaging::CB_RESETCONTENT, None, None); }
+                            combo_fill(h, IDC_PROF_LIST, &profile_strs, 0);
+                            do_load = true;
+                        }
+                    });
+                    if do_load {
+                        load_profile_to_ui(h, 0);
+                    }
                 }
                 IDC_OPEN_LOG => {
                     let inst = unsafe {

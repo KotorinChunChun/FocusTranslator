@@ -10,6 +10,9 @@ use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId};
+use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
 
 pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -136,5 +139,42 @@ pub fn app_log(line: &str) {
             .map(|d| d.as_millis())
             .unwrap_or(0);
         let _ = writeln!(f, "{ts} {line}");
+    }
+}
+
+/// 指定した HWND から実行ファイル名とウィンドウタイトルを取得する
+pub fn get_window_context(hwnd: HWND) -> (Option<String>, Option<String>) {
+    unsafe {
+        // App title
+        let mut title = None;
+        let len = GetWindowTextLengthW(hwnd);
+        if len > 0 {
+            let mut buf = vec![0u16; (len + 1) as usize];
+            if GetWindowTextW(hwnd, &mut buf) > 0 {
+                if let Some(pos) = buf.iter().position(|&c| c == 0) {
+                    title = String::from_utf16(&buf[..pos]).ok();
+                }
+            }
+        }
+
+        // App exe
+        let mut exe = None;
+        let mut pid = 0;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid > 0 {
+            if let Ok(hprocess) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                let mut path = vec![0u16; MAX_PATH as usize];
+                let mut size = MAX_PATH;
+                if QueryFullProcessImageNameW(hprocess, windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0), windows::core::PWSTR(path.as_mut_ptr()), &mut size).is_ok() {
+                    let full_path = String::from_utf16_lossy(&path[..size as usize]);
+                    if let Some(file_name) = std::path::Path::new(&full_path).file_name().and_then(|n| n.to_str()) {
+                        exe = Some(file_name.to_string());
+                    }
+                }
+                let _ = CloseHandle(hprocess);
+            }
+        }
+
+        (exe, title)
     }
 }

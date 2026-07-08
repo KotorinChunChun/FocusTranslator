@@ -14,6 +14,7 @@ use crate::worker;
 
 use overlay::OverlayContent;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::sync::Arc;
 use windows::Win32::Foundation::{
     HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -74,8 +75,16 @@ pub struct App {
     cur_ocr: String,
     cur_tr: String,
     last_img: Option<Arc<capture::Captured>>,
+    last_focus_y: Option<f32>,
     anchor: (i32, i32),
     pub error_only: bool,
+    failed_ocr: HashSet<String>,
+    failed_tr: HashSet<String>,
+    recog_id: Option<i64>,
+    explanation: Option<String>,
+    app_title: String,
+    uia_path: String,
+    pub scroll_y: i32,
 }
 
 thread_local! {
@@ -118,8 +127,16 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             cur_ocr,
             cur_tr,
             last_img: None,
+            last_focus_y: None,
             anchor: (0, 0),
             error_only: false,
+            failed_ocr: HashSet::new(),
+            failed_tr: HashSet::new(),
+            recog_id: None,
+            explanation: None,
+            app_title: String::new(),
+            uia_path: String::new(),
+            scroll_y: 0,
         });
     });
 }
@@ -280,6 +297,9 @@ fn close_overlay(app: &mut App) {
     app.badge = None;
     app.error_only = false;
     app.last_img = None; // OCR画像はサイクル終了後に破棄 (SPEC §9.3)
+    app.last_focus_y = None;
+    app.recog_id = None;
+    app.explanation = None;
 }
 
 /// ワーカー結果の受信 (世代番号が古いものは破棄; SPEC §6.4)
@@ -290,18 +310,25 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
             return;
         }
         match msg {
-            worker::WorkerMsg::Source { text, method, img, pin, anchor, ms } => {
+            worker::WorkerMsg::Source { text, method, img, pin, anchor, focus_y, ms, recog_id, app_title, uia_path } => {
+                if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
+                    return;
+                }
                 app.source = text;
-                app.translation = None;
-                app.status = Some("翻訳中…".into());
+                app.cur_ocr = method.to_string();
+                app.last_img = img;
+                app.last_focus_y = focus_y;
+                app.status = None;
                 app.badge = None;
                 app.error_only = false;
-                if img.is_some() {
-                    app.last_img = img;
-                } else if method == "UIA" {
-                    app.last_img = None;
-                }
                 app.anchor = anchor;
+                app.failed_ocr.clear();
+                app.failed_tr.clear();
+                app.recog_id = recog_id;
+                app.app_title = app_title;
+                app.uia_path = uia_path;
+                app.scroll_y = 0; // 新しいテキストの時はスクロールをリセット
+
                 if pin {
                     app.mode = Mode::Pinned;
                 } else if app.mode == Mode::Recognizing {
@@ -310,18 +337,25 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 util::perf_log(app.cfg.perf_log, &format!("show-source {method} total={ms}ms"));
                 sync_overlay(app);
             }
-            worker::WorkerMsg::Translation { text, badge, ms } => {
+            worker::WorkerMsg::Translation { text, badge, ms, recog_id } => {
+                app.failed_tr.remove(&app.cur_tr);
                 app.translation = Some(text);
                 app.status = None;
+                app.error_only = false;
                 app.badge = badge;
+                app.recog_id = recog_id;
                 util::perf_log(app.cfg.perf_log, &format!("show-translation total={ms}ms"));
                 sync_overlay(app);
             }
-            worker::WorkerMsg::TranslationFailed { msg } => {
+            worker::WorkerMsg::TranslationFailed { msg, engine } => {
                 app.status = Some(msg);
+                app.failed_tr.insert(engine);
                 sync_overlay(app);
             }
-            worker::WorkerMsg::Error { msg, anchor } => {
+            worker::WorkerMsg::Error { msg, anchor, engine } => {
+                if let Some(e) = engine {
+                    app.failed_ocr.insert(e);
+                }
                 // 短時間のエラー表示 (SPEC §5.3, §11)
                 app.source.clear();
                 app.translation = None;
@@ -331,6 +365,14 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 if app.mode == Mode::Recognizing {
                     app.mode = Mode::ShowingHold;
                 }
+                sync_overlay(app);
+            }
+            worker::WorkerMsg::Explanation { text } => {
+                app.mode = Mode::Pinned;
+                app.status = None;
+                app.error_only = false;
+                // explanationをapp_stateのフィールドに追加し、ここで更新してからsync_overlayする
+                app.explanation = Some(text);
                 sync_overlay(app);
             }
         }
@@ -345,32 +387,137 @@ pub fn handle_chip(id: usize) {
             app.cfg.clone(),
             app.source.clone(),
             app.last_img.clone(),
+            app.last_focus_y,
             app.origin,
             app.target,
             app.main.0 as isize,
             app.anchor,
             app.cur_tr.clone(),
+            app.recog_id,
         )
     }) else {
         return;
     };
-    let (cfg, source, last_img, origin, target, main, anchor, cur_tr) = info;
+    let (cfg, source, last_img, last_focus_y, origin, target, main, anchor, cur_tr, recog_id) = info;
 
     match id {
         overlay::CHIP_COPY => {
             let (src, tr) = overlay::current_text();
-            let text = tr.unwrap_or(src);
+            let text = with_app(|app| {
+                if let Some(expl) = &app.explanation {
+                    return expl.clone();
+                }
+                tr.unwrap_or(src)
+            }).unwrap_or_default();
+            
             if !text.is_empty() {
                 util::set_clipboard_text(main_hwnd(), &text);
                 with_app(|app| {
-                    app.badge = Some("コピーしました".into());
+                    app.badge = Some(if app.explanation.is_some() { "解説をコピーしました".into() } else { "コピーしました".into() });
                     sync_overlay(app);
                 });
             }
-            return;
+        }
+        overlay::CHIP_COPY_SRC => {
+            let (src, _) = overlay::current_text();
+            if !src.is_empty() {
+                util::set_clipboard_text(main_hwnd(), &src);
+                with_app(|app| {
+                    app.badge = Some("原文をコピーしました".into());
+                    sync_overlay(app);
+                });
+            }
+        }
+        overlay::CHIP_COPY_TR => {
+            let (_, tr) = overlay::current_text();
+            if let Some(t) = tr {
+                util::set_clipboard_text(main_hwnd(), &t);
+                with_app(|app| {
+                    app.badge = Some("訳文をコピーしました".into());
+                    sync_overlay(app);
+                });
+            }
         }
         overlay::CHIP_CLOSE => {
             with_app(close_overlay);
+            return;
+        }
+        overlay::CHIP_PIN => {
+            with_app(|app| {
+                if app.mode != Mode::Pinned {
+                    app.mode = Mode::Pinned;
+                } else {
+                    app.mode = Mode::ShowingHold;
+                }
+                sync_overlay(app);
+            });
+            return;
+        }
+        overlay::CHIP_IMAGE => {
+            let img = with_app(|app| app.last_img.clone()).flatten();
+            if let Some(i) = img {
+                let png = crate::capture::to_png(&i);
+                let path = crate::logdb::logs_dir().join("preview.png");
+                if std::fs::write(&path, &png).is_ok() {
+                    unsafe {
+                        let wide = crate::util::to_wide(&path.to_string_lossy());
+                        let _ = windows::Win32::UI::Shell::ShellExecuteW(
+                            None,
+                            windows::core::w!("open"),
+                            windows::core::PCWSTR(wide.as_ptr()),
+                            windows::core::PCWSTR::null(),
+                            windows::core::PCWSTR::null(),
+                            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+                        );
+                    }
+                }
+            }
+            return;
+        }
+        overlay::CHIP_EXPLAIN => {
+            if let Some(r_id) = recog_id {
+                let text = overlay::current_text().1.unwrap_or(source.clone());
+                if !text.is_empty() {
+                    if let Some(expl) = crate::logdb::get_explanation(r_id) {
+                        with_app(|app| {
+                            app.mode = Mode::Pinned;
+                            app.status = None;
+                            app.error_only = false;
+                            app.explanation = Some(expl);
+                            sync_overlay(app);
+                        });
+                        return;
+                    }
+
+                    let initial_prompt = crate::worker::build_explain_prompt(&cfg, &text).unwrap_or_default();
+                    if initial_prompt.is_empty() {
+                        with_app(|app| {
+                            app.badge = Some("LLM APIが設定されていません".into());
+                            sync_overlay(app);
+                        });
+                        return;
+                    }
+
+                    let main_hwnd_val = main;
+                    let inst = with_app(|app| app.instance).unwrap_or_default();
+                    crate::prompt_edit::open(inst, main_hwnd(), &initial_prompt, move |edited_prompt| {
+                        let new_gen = with_app(|app| {
+                            app.generation += 1;
+                            app.mode = Mode::Pinned;
+                            app.status = Some("解説を取得中…".into());
+                            sync_overlay(app);
+                            app.generation
+                        }).unwrap_or(0);
+                        let cfg2 = crate::config::Config::load();
+                        crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, main_hwnd_val);
+                    });
+                }
+            }
+            return;
+        }
+        overlay::CHIP_SETTINGS => {
+            let inst = with_app(|app| app.instance).unwrap_or_default();
+            crate::settings::open(inst, main_hwnd());
             return;
         }
         _ => {}
@@ -379,6 +526,7 @@ pub fn handle_chip(id: usize) {
     if id < overlay::CHIP_OCR_BASE + overlay::OCR_KEYS.len() {
         // OCRエンジン切替: 保持画像で再認識→現行エンジンで再翻訳 (SPEC §8)
         let key = overlay::OCR_KEYS[id - overlay::CHIP_OCR_BASE].to_string();
+        with_app(|app| { app.failed_ocr.remove(&key); });
         if !cfg.engine_available(&key) {
             with_app(|app| {
                 app.status = Some(engine_unavailable_msg(&key));
@@ -400,11 +548,12 @@ pub fn handle_chip(id: usize) {
         .unwrap_or(0);
         let cfg2 = Config::load();
         worker::reocr(
-            new_gen, last_img, origin.x, origin.y, target, key, cur_tr, cfg2, main, anchor,
+            new_gen, last_img, last_focus_y, origin.x, origin.y, target, key, cur_tr, cfg2, main, anchor,
         );
     } else if id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_TR_BASE + overlay::TR_KEYS.len() {
         // 翻訳エンジン切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)
         let key = overlay::TR_KEYS[id - overlay::CHIP_TR_BASE].to_string();
+        with_app(|app| { app.failed_tr.remove(&key); });
         if source.is_empty() {
             return;
         }
@@ -429,7 +578,7 @@ pub fn handle_chip(id: usize) {
         })
         .unwrap_or(0);
         let cfg2 = Config::load();
-        worker::retranslate(new_gen, key, cfg2, source, main);
+        worker::retranslate(new_gen, key, cfg2, source, main, recog_id);
     }
 }
 
@@ -450,7 +599,7 @@ fn ensure_consent(engine: &str, cfg: &Config) -> bool {
     let (need, kind): (bool, &str) = match engine {
         "deepl" | "google" => (!cfg.consent_text, "text"),
         // Gemini はOCR統合(画像送信)としても翻訳(テキスト送信)としても使う
-        "gemini" => (!cfg.consent_image || !cfg.consent_text, "image"),
+        "llm" => (!cfg.consent_image || !cfg.consent_text, "image"),
         "yomitoku" => {
             if settings::is_localhost(&cfg.yomitoku_url) {
                 (false, "ext") // 127.0.0.1 はローカル送信 (SPEC §9.2)
@@ -516,6 +665,8 @@ pub fn handle_region(rect: RECT) {
 
 pub fn reload_config(hwnd: HWND) {
     with_app(|app| {
+        app.failed_ocr.clear();
+        app.failed_tr.clear();
         app.cfg = Config::load();
         app.cur_ocr = app.cfg.default_ocr.clone();
         app.cur_tr = app.cfg.default_translator.clone();
@@ -534,6 +685,7 @@ pub fn reload_config(hwnd: HWND) {
                 );
             }
         }
+        sync_overlay(app);
     });
 }
 
@@ -541,11 +693,11 @@ pub fn reload_config(hwnd: HWND) {
 fn sync_overlay(app: &mut App) {
     let mut ocr_enabled = [false; 5];
     for (i, k) in overlay::OCR_KEYS.iter().enumerate() {
-        ocr_enabled[i] = app.cfg.engine_available(k);
+        ocr_enabled[i] = app.cfg.engine_available(k) && !app.failed_ocr.contains(*k);
     }
-    let mut tr_enabled = [false; 4];
+    let mut tr_enabled = [false; 5];
     for (i, k) in overlay::TR_KEYS.iter().enumerate() {
-        tr_enabled[i] = app.cfg.engine_available(k);
+        tr_enabled[i] = app.cfg.engine_available(k) && !app.failed_tr.contains(*k);
     }
     let content = OverlayContent {
         main_hwnd: app.main.0 as isize,
@@ -559,7 +711,12 @@ fn sync_overlay(app: &mut App) {
         cur_tr: app.cur_tr.clone(),
         ocr_enabled,
         tr_enabled,
+        explanation: app.explanation.clone(),
+        explaining: app.status.as_deref() == Some("解説を取得中…"),
         error_only: app.error_only,
+        app_title: app.app_title.clone(),
+        uia_path: app.uia_path.clone(),
+        scroll_y: app.scroll_y,
     };
     overlay::update(app.overlay, content);
 }

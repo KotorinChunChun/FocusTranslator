@@ -14,6 +14,7 @@ mod onnx_translate_install;
 mod overlay;
 mod paddle_install;
 mod paddle_ocr;
+mod prompt_edit;
 mod region;
 mod settings;
 mod translate;

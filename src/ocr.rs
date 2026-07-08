@@ -41,9 +41,9 @@ pub fn run(engine: &str, cfg: &Config, img: &Captured, focus_y: Option<f32>) -> 
                 Err("PaddleOCRのモデルが未導入です。設定画面からインストールしてください".into())
             }
         }
-        "yomitoku" => ocr_http(&cfg.yomitoku_url, img).map(OcrOutput::text_only),
-        "ndl" => ocr_http(&cfg.ndl_url, img).map(OcrOutput::text_only),
-        "gemini" => gemini_ocr_translate(cfg, img),
+        "yomitoku" => ocr_http(&cfg.yomitoku_url, img, focus_y).map(OcrOutput::text_only),
+        "ndl" => ocr_http(&cfg.ndl_url, img, focus_y).map(OcrOutput::text_only),
+        "llm" => llm_ocr_translate(cfg, img, focus_y),
         other => Err(format!("不明なOCRエンジン: {other}")),
     }
 }
@@ -169,13 +169,25 @@ pub fn join_paragraph(lines: &[String]) -> String {
     out
 }
 
+fn crop_for_focus(img: &Captured, focus_y: Option<f32>) -> std::borrow::Cow<'_, Captured> {
+    if let Some(fy) = focus_y {
+        let h = 64; // 高さ64pxの帯に切り抜く(複数行を拾うのを防ぐ)
+        let top = (fy - h as f32 / 2.0).round() as i32;
+        if let Some(cropped) = crate::capture::crop(img, 0, top, img.width as i32, h) {
+            return std::borrow::Cow::Owned(cropped);
+        }
+    }
+    std::borrow::Cow::Borrowed(img)
+}
+
 /// 外部OCRサーバー (YomiToku / NDL-OCR): POST {url}/ocr に PNG を送る
-pub fn ocr_http(base_url: &str, img: &Captured) -> Result<String, String> {
+pub fn ocr_http(base_url: &str, img: &Captured, focus_y: Option<f32>) -> Result<String, String> {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         return Err("サーバーURLが未設定です".into());
     }
-    let png = crate::capture::to_png(img);
+    let target_img = crop_for_focus(img, focus_y);
+    let png = crate::capture::to_png(&target_img);
     let url = format!("{base}/ocr");
     let mut res = ureq::post(&url)
         .header("Content-Type", "image/png")
@@ -216,48 +228,97 @@ pub fn health_check(base_url: &str) -> bool {
         .is_ok()
 }
 
-/// Gemini OCR+翻訳統合モード: 画像から原文と訳文を一括取得 (SPEC §8)
-pub fn gemini_ocr_translate(cfg: &Config, img: &Captured) -> Result<OcrOutput, String> {
-    let key = cfg.gemini_key();
+pub fn llm_ocr_translate(cfg: &Config, img: &Captured, focus_y: Option<f32>) -> Result<OcrOutput, String> {
+    let prof = cfg.active_profile().ok_or("LLM APIプロファイルが設定されていません")?;
+    let key = prof.get_key();
     if key.is_empty() {
-        return Err("Gemini APIキーが未設定です".into());
+        return Err(format!("APIキーが未設定です ({})", prof.name));
     }
-    let png = crate::capture::to_png(img);
+    let target_img = crop_for_focus(img, focus_y);
+    let png = crate::capture::to_png(&target_img);
     let b64 = B64.encode(&png);
-    // Gemini統合プロンプトは設定値のテンプレートを使う ({{source_lang}}/{{target_lang}} を置換)
-    let prompt = cfg
-        .gemini_ocr_prompt
-        .replace("{{source_lang}}", &cfg.source_lang)
-        .replace("{{target_lang}}", &cfg.target_lang);
-    let body = serde_json::json!({
-        "contents": [{ "parts": [
-            { "text": prompt },
-            { "inlineData": { "mimeType": "image/png", "data": b64 } }
-        ]}],
-        "generationConfig": { "responseMimeType": "application/json" }
-    });
-    let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-        cfg.gemini_model
-    );
-    let mut res = ureq::post(&url)
-        .header("x-goog-api-key", &key)
-        .send_json(&body)
-        .map_err(|e| format!("Gemini呼び出し失敗: {e}"))?;
-    let v: serde_json::Value = res
-        .body_mut()
-        .read_json()
-        .map_err(|e| format!("Gemini応答の解析失敗: {e}"))?;
-    let raw_response = Some(crate::translate::mask_keys(cfg, &v.to_string()));
-    let tokens_in = v["usageMetadata"]["promptTokenCount"].as_i64();
-    let tokens_out = v["usageMetadata"]["candidatesTokenCount"].as_i64();
-    let text = v["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .ok_or("Gemini応答にテキストがありません")?;
-    let inner: serde_json::Value =
-        serde_json::from_str(text.trim()).map_err(|_| "Gemini応答のJSON解析に失敗".to_string())?;
-    let source = inner["source"].as_str().unwrap_or("").trim().to_string();
-    let translation = inner["translation"].as_str().unwrap_or("").trim().to_string();
+    let glossary_text = if cfg.glossary.is_empty() {
+        String::new()
+    } else {
+        let lines = cfg.glossary.iter().map(|e| format!("{}={}", e.source, e.target)).collect::<Vec<_>>().join("\n");
+        format!("Glossary:\n{}", lines)
+    };
+    let prompt = prof.ocr_prompt.replace("{{source_lang}}", &cfg.source_lang)
+        .replace("{{target_lang}}", &cfg.target_lang)
+        .replace("{{glossary}}", &glossary_text);
+
+    let (raw_response, tokens_in, tokens_out, text) = match prof.api_type {
+        crate::config::ApiType::Gemini => {
+            let body = serde_json::json!({
+                "contents": [{ "parts": [
+                    { "text": prompt },
+                    { "inlineData": { "mimeType": "image/png", "data": b64 } }
+                ]}],
+                "generationConfig": { "responseMimeType": "application/json" }
+            });
+            let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", prof.model_name);
+            let mut res = ureq::post(&url).header("x-goog-api-key", &key).send_json(&body).map_err(|e| format!("Gemini呼び出し失敗: {e}"))?;
+            let v: serde_json::Value = res.body_mut().read_json().map_err(|e| format!("Gemini応答の解析失敗: {e}"))?;
+            let raw_response = Some(crate::translate::mask_keys(cfg, &v.to_string()));
+            let tokens_in = v.get("usageMetadata").and_then(|u| u.get("promptTokenCount")).and_then(|t| t.as_i64());
+            let tokens_out = v.get("usageMetadata").and_then(|u| u.get("candidatesTokenCount")).and_then(|t| t.as_i64());
+            let t = v["candidates"][0]["content"]["parts"][0]["text"].as_str().ok_or("Gemini応答にテキストがありません")?.to_string();
+            (raw_response, tokens_in, tokens_out, t)
+        }
+        crate::config::ApiType::OpenAI => {
+            let url = if prof.api_url.is_empty() { "https://api.openai.com/v1/chat/completions" } else { &prof.api_url };
+            let body = serde_json::json!({
+                "model": prof.model_name,
+                "response_format": { "type": "json_object" },
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": prompt },
+                            { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{}", b64) } }
+                        ]
+                    }
+                ]
+            });
+            let mut res = ureq::post(url).header("Authorization", format!("Bearer {}", key)).send_json(&body).map_err(|e| format!("GPT互換API呼び出し失敗: {e}"))?;
+            let v: serde_json::Value = res.body_mut().read_json().map_err(|e| format!("GPT応答の解析失敗: {e}"))?;
+            let raw_response = Some(crate::translate::mask_keys(cfg, &v.to_string()));
+            let tokens_in = v.get("usage").and_then(|u| u.get("prompt_tokens")).and_then(|t| t.as_i64());
+            let tokens_out = v.get("usage").and_then(|u| u.get("completion_tokens")).and_then(|t| t.as_i64());
+            let t = v["choices"][0]["message"]["content"].as_str().ok_or("GPT応答にテキストがありません")?.to_string();
+            (raw_response, tokens_in, tokens_out, t)
+        }
+        crate::config::ApiType::Claude => {
+            let url = if prof.api_url.is_empty() { "https://api.anthropic.com/v1/messages" } else { &prof.api_url };
+            let body = serde_json::json!({
+                "model": prof.model_name,
+                "max_tokens": 1024,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": prompt },
+                            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": b64.clone() } }
+                        ]
+                    }
+                ]
+            });
+            let mut res = ureq::post(url)
+                .header("x-api-key", &key)
+                .header("anthropic-version", "2023-06-01")
+                .send_json(&body).map_err(|e| format!("Claude API呼び出し失敗: {e}"))?;
+            let v: serde_json::Value = res.body_mut().read_json().map_err(|e| format!("Claude応答の解析失敗: {e}"))?;
+            let raw_response = Some(crate::translate::mask_keys(cfg, &v.to_string()));
+            let tokens_in = v.get("usage").and_then(|u| u.get("input_tokens")).and_then(|t| t.as_i64());
+            let tokens_out = v.get("usage").and_then(|u| u.get("output_tokens")).and_then(|t| t.as_i64());
+            let t = v["content"][0]["text"].as_str().ok_or("Claude応答にテキストがありません")?.to_string();
+            (raw_response, tokens_in, tokens_out, t)
+        }
+    };
+
+    let inner: serde_json::Value = serde_json::from_str(text.trim()).map_err(|_| "LLM応答のJSON解析に失敗".to_string())?;
+    let source = inner.get("source").and_then(|s| s.as_str()).unwrap_or("").trim().to_string();
+    let translation = inner.get("translation").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
     if source.is_empty() {
         return Err("テキストを検出できませんでした".into());
     }

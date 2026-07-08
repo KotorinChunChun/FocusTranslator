@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
@@ -44,6 +44,9 @@ fn conn() -> Option<&'static Mutex<Connection>> {
 
 fn init_db() -> Result<Connection, String> {
     let conn = Connection::open(db_path()).map_err(|e| e.to_string())?;
+    
+    let current_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
@@ -59,7 +62,10 @@ fn init_db() -> Result<Connection, String> {
             error TEXT,
             image_path TEXT,
             image_w INTEGER,
-            image_h INTEGER
+            image_h INTEGER,
+            app_exe TEXT,
+            app_title TEXT,
+            uia_path TEXT
          );
          CREATE TABLE IF NOT EXISTS translation_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,9 +84,27 @@ fn init_db() -> Result<Connection, String> {
             tokens_in INTEGER,
             tokens_out INTEGER
          );
-         CREATE INDEX IF NOT EXISTS idx_tr_recog ON translation_logs(recognition_id);",
+         CREATE TABLE IF NOT EXISTS explanations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recognition_id INTEGER NOT NULL,
+            explanation_text TEXT NOT NULL,
+            tags TEXT,
+            FOREIGN KEY (recognition_id) REFERENCES recognition_logs(id) ON DELETE CASCADE
+         );
+         CREATE INDEX IF NOT EXISTS idx_tr_recog ON translation_logs(recognition_id);
+         CREATE INDEX IF NOT EXISTS idx_ex_recog ON explanations(recognition_id);",
     )
     .map_err(|e| e.to_string())?;
+
+    if current_version == 1 {
+        // v1 から v2 へのマイグレーション
+        let _ = conn.execute_batch(
+            "ALTER TABLE recognition_logs ADD COLUMN app_exe TEXT;
+             ALTER TABLE recognition_logs ADD COLUMN app_title TEXT;
+             ALTER TABLE recognition_logs ADD COLUMN uia_path TEXT;"
+        );
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|e| e.to_string())?;
     Ok(conn)
@@ -104,17 +128,20 @@ pub fn log_recognition(
     error: Option<&str>,
     image: Option<&crate::capture::Captured>,
     debug: bool,
+    app_exe: Option<&str>,
+    app_title: Option<&str>,
+    uia_path: Option<&str>,
 ) -> Option<i64> {
     let m = conn()?;
     let guard = m.lock().ok()?;
     let success = error.is_none();
     if let Err(e) = guard.execute(
         "INSERT INTO recognition_logs
-            (ts_ms, mode, method, engine, duration_ms, source_text, success, error, image_path, image_w, image_h)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL)",
+            (ts_ms, mode, method, engine, duration_ms, source_text, success, error, image_path, image_w, image_h, app_exe, app_title, uia_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL, ?9, ?10, ?11)",
         rusqlite::params![
             now_ms(), mode, method, engine, duration_ms as i64,
-            source_text, success as i64, error
+            source_text, success as i64, error, app_exe, app_title, uia_path
         ],
     ) {
         util::app_log(&format!("log_recognition failed: {e}"));
@@ -219,6 +246,9 @@ pub struct RecogRow {
     pub success: bool,
     pub error: String,
     pub image_path: Option<String>,
+    pub app_exe: Option<String>,
+    pub app_title: Option<String>,
+    pub uia_path: Option<String>,
 }
 
 #[derive(Clone)]
@@ -245,7 +275,7 @@ pub fn recent_recognitions(limit: usize) -> Vec<RecogRow> {
     let Some(m) = conn() else { return Vec::new() };
     let Ok(guard) = m.lock() else { return Vec::new() };
     let mut stmt = match guard.prepare(
-        "SELECT id, ts_ms, mode, method, engine, duration_ms, source_text, success, error, image_path
+        "SELECT id, ts_ms, mode, method, engine, duration_ms, source_text, success, error, image_path, app_exe, app_title, uia_path
          FROM recognition_logs ORDER BY id DESC LIMIT ?1",
     ) {
         Ok(s) => s,
@@ -263,9 +293,85 @@ pub fn recent_recognitions(limit: usize) -> Vec<RecogRow> {
             success: r.get::<_, i64>(7)? != 0,
             error: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
             image_path: r.get(9)?,
+            app_exe: r.get(10)?,
+            app_title: r.get(11)?,
+            uia_path: r.get(12)?,
         })
     });
-    rows.map(|r| r.flatten().collect()).unwrap_or_default()
+    if let Ok(iter) = rows {
+        iter.flatten().collect()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn search_recognitions(query: &str, app_exe: &str, limit: usize) -> Vec<RecogRow> {
+    let Some(m) = conn() else { return Vec::new() };
+    let Ok(guard) = m.lock() else { return Vec::new() };
+    let mut sql = "SELECT id, ts_ms, mode, method, engine, duration_ms, source_text, success, error, image_path, app_exe, app_title, uia_path
+                   FROM recognition_logs WHERE 1=1".to_string();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut p_idx = 1;
+
+    let q_val: String;
+    if !query.is_empty() {
+        sql.push_str(&format!(" AND (source_text LIKE ?{p_idx} OR id IN (SELECT recognition_id FROM translation_logs WHERE translated_text LIKE ?{p_idx}))"));
+        q_val = format!("%{}%", query);
+        params.push(Box::new(q_val));
+        p_idx += 1;
+    }
+    let app_val: String;
+    if !app_exe.is_empty() {
+        sql.push_str(&format!(" AND app_exe = ?{p_idx}"));
+        app_val = app_exe.to_string();
+        params.push(Box::new(app_val));
+        p_idx += 1;
+    }
+    sql.push_str(&format!(" ORDER BY id DESC LIMIT ?{p_idx}"));
+    params.push(Box::new(limit as i64));
+
+    let p_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| &**b).collect();
+    let mut stmt = match guard.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map(p_refs.as_slice(), |r| {
+        Ok(RecogRow {
+            id: r.get(0)?,
+            ts_ms: r.get(1)?,
+            mode: r.get(2)?,
+            method: r.get(3)?,
+            engine: r.get(4)?,
+            duration_ms: r.get(5)?,
+            source_text: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+            success: r.get::<_, i64>(7)? != 0,
+            error: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            image_path: r.get(9)?,
+            app_exe: r.get(10)?,
+            app_title: r.get(11)?,
+            uia_path: r.get(12)?,
+        })
+    });
+    if let Ok(iter) = rows {
+        iter.flatten().collect()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn get_unique_app_exes() -> Vec<String> {
+    let Some(m) = conn() else { return Vec::new() };
+    let Ok(guard) = m.lock() else { return Vec::new() };
+    let mut stmt = match guard.prepare("SELECT DISTINCT app_exe FROM recognition_logs WHERE app_exe IS NOT NULL AND app_exe != '' ORDER BY app_exe") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map([], |r| r.get(0));
+    if let Ok(iter) = rows {
+        iter.flatten().collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// 指定認識に紐づく翻訳ログを時系列(古い順)取得
@@ -360,10 +466,10 @@ mod tests {
         }
 
         // 認識ログ + 翻訳ログ
-        let rid = log_recognition("hold", "ocr", "win", 200, Some("hello"), None, None, false)
+        let rid = log_recognition("hold", "ocr", "win", 200, Some("hello"), None, None, false, None, None, None)
             .expect("recognition id");
         log_translation(
-            Some(rid), "gemini", "en", "ja", 300, false, Some("こんにちは"), None,
+            Some(rid), "llm", "en", "ja", 300, false, Some("こんにちは"), None,
             Some("{\"req\":1}"), Some("{\"res\":2}"), Some(10), Some(5),
         );
 
@@ -377,7 +483,7 @@ mod tests {
 
         // ローテーション: さらに数件足して上限2に絞る
         for i in 0..3 {
-            log_recognition("hold", "ocr", "win", 100, Some(&format!("line{i}")), None, None, false);
+            log_recognition("hold", "ocr", "win", 100, Some(&format!("line{i}")), None, None, false, None, None, None);
         }
         rotate(2);
         assert!(recent_recognitions(100).len() <= 2, "rotate should cap records");
@@ -388,4 +494,36 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+}
+
+pub fn get_explanation(recog_id: i64) -> Option<String> {
+    get_explanation_and_tags(recog_id).map(|(e, _)| e)
+}
+
+pub fn get_explanation_and_tags(recog_id: i64) -> Option<(String, String)> {
+    let m = conn()?;
+    let guard = m.lock().ok()?;
+    let mut stmt = guard.prepare("SELECT explanation_text, tags FROM explanations WHERE recognition_id = ?").ok()?;
+    let mut rows = stmt.query(rusqlite::params![recog_id]).ok()?;
+    if let Some(row) = rows.next().ok().flatten() {
+        let text: String = row.get(0).unwrap_or_default();
+        let tags: String = row.get::<_, Option<String>>(1).unwrap_or_default().unwrap_or_default();
+        return Some((text, tags));
+    }
+    None
+}
+
+pub fn save_explanation(recog_id: i64, text: &str) {
+    let tags = get_explanation_and_tags(recog_id).map(|(_, t)| t).unwrap_or_default();
+    save_explanation_and_tags(recog_id, text, &tags);
+}
+
+pub fn save_explanation_and_tags(recog_id: i64, text: &str, tags: &str) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    let _ = guard.execute("DELETE FROM explanations WHERE recognition_id = ?", rusqlite::params![recog_id]);
+    let _ = guard.execute(
+        "INSERT INTO explanations (recognition_id, explanation_text, tags) VALUES (?1, ?2, ?3)",
+        rusqlite::params![recog_id, text, tags],
+    );
 }
