@@ -13,12 +13,14 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromPoint, PAINTSTRUCT, PS_SOLID, ReleaseDC, RoundRect, SelectObject, SetBkMode,
     SetTextColor, TRANSPARENT,
 };
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;
+use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetClientRect, HTCLIENT,
     HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, KillTimer, LoadCursorW, MA_NOACTIVATE, PostMessageW,
     RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowPos,
-    ShowWindow, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WM_TIMER, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    ShowWindow, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_TIMER,
+    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     SendMessageW, WM_NCLBUTTONDOWN, HTCAPTION,
 };
 use windows::core::w;
@@ -34,6 +36,7 @@ pub const CHIP_EXPLAIN: usize = 104;
 pub const CHIP_SETTINGS: usize = 105;
 pub const CHIP_PIN: usize = 106;
 pub const CHIP_IMAGE: usize = 107;
+pub const CHIP_COPY_INFO: usize = 108;
 
 pub const OCR_KEYS: [&str; 5] = ["win", "paddle", "yomitoku", "ndl", "llm"];
 pub const OCR_LABELS: [&str; 5] = ["Win", "Paddle", "YomiToku", "NDL", "LLM(統合)"];
@@ -97,6 +100,8 @@ struct Layout {
 thread_local! {
     static CONTENT: RefCell<OverlayContent> = RefCell::new(OverlayContent::default());
     static LAYOUT: RefCell<Layout> = const { RefCell::new(Layout { w: 0, h: 0, content_h: 0, items: Vec::new(), panels: Vec::new() }) };
+    /// マウスカーソルが乗っているチップID (✕ボタンのホバー強調に使用)
+    static HOVER_ID: RefCell<Option<usize>> = const { RefCell::new(None) };
 }
 
 // 配色 (COLORREF は 0x00BBGGRR)
@@ -119,6 +124,8 @@ const COL_ACCENT_TR: u32 = 0x00D28C3C;
 const COL_ACCENT_EXPLAIN: u32 = 0x0050C8FF;
 /// UIA経路で取得した(OCR不要な)結果であることを示す見出しの色
 const COL_UIA_BADGE: u32 = 0x0080D0A0;
+/// 閉じる(✕)ボタンにマウスが乗っているときの背景色
+const COL_CLOSE_HOVER: u32 = 0x003C3CD6;
 
 const PAD: i32 = 12;
 /// ブロック(カード)左右の余白。テキストは PAD、カード枠は少し外側に広げる。
@@ -394,18 +401,28 @@ fn compute_layout(hwnd: HWND) -> Layout {
                         info.push_str("\r\nパス: ");
                         info.push_str(&content.uia_path);
                     }
-                    // 右上の閉じるボタンと重ならないよう幅を控える
-                    let info_w = MAXW - CLOSE_SIZE - 10;
+                    // 左に📋コピーボタン。右上のピン/閉じるボタンと重ならないよう幅を控える
+                    let (copy_w, _) = measure(hdc, "📋", FONT_CHIP, false, 200);
+                    let copy_w = copy_w + 16;
+                    let text_x = PAD + copy_w + 6;
+                    let info_w = MAXW - text_x - (CLOSE_SIZE * 2 + 14);
                     let (tw, th) = measure(hdc, &info, FONT_INFO, false, info_w);
+                    items.push(Item::Chip {
+                        rect: RECT { left: PAD, top: y, right: PAD + copy_w, bottom: y + CLOSE_SIZE },
+                        label: "📋".to_string(),
+                        id: CHIP_COPY_INFO,
+                        active: false,
+                        enabled: true,
+                    });
                     items.push(Item::Text {
-                        rect: RECT { left: PAD, top: y, right: PAD + info_w, bottom: y + th },
+                        rect: RECT { left: text_x, top: y, right: text_x + info_w, bottom: y + th.max(CLOSE_SIZE) },
                         text: info,
                         size: FONT_INFO,
                         color: COL_LABEL,
                         bold: false,
                     });
-                    y += th + 4;
-                    need_w = need_w.max(tw + PAD * 2 + 4);
+                    y += th.max(CLOSE_SIZE) + 4;
+                    need_w = need_w.max(text_x + tw + PAD + 4);
                 }
 
                 if content.has_image {
@@ -549,12 +566,10 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 need_w = need_w.max(tw + PAD * 2 + 4);
             }
 
-            // 操作行: ピン留め / 解説 / 設定 (閉じるは右上角、画像は入力内容、コピーは各見出し右)
+            // 操作行: 解説 / 設定 (ピン留めは右上角、閉じるは右上角、画像は入力内容、コピーは各見出し左)
             y += 2;
             let mut x = PAD;
-            let pin_label = if content.pinned { "ピン解除" } else { "ピン留め" };
-            let ops: &[(&str, usize)] =
-                &[(pin_label, CHIP_PIN), ("解説", CHIP_EXPLAIN), ("設定", CHIP_SETTINGS)];
+            let ops: &[(&str, usize)] = &[("解説", CHIP_EXPLAIN), ("設定", CHIP_SETTINGS)];
             for (lab, id) in ops {
                 let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                 let w = cw + 20;
@@ -623,10 +638,22 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 }
             }
 
-            // 閉じるボタン: オーバーレイの右上角 (ピン留め時のみ。スクロールに追従せず固定)
+            // 右上角: ピン留めボタン(📌、常時表示・トグル状態を背景色で表示)。
+            // ピン留め時のみ、その右隣に閉じる(✕)ボタンを追加する。いずれもスクロールに追従せず固定。
+            let close_right = w - 6;
+            let close_left = close_right - CLOSE_SIZE;
+            let pin_right = if content.pinned { close_left - 4 } else { close_right };
+            let pin_left = pin_right - CLOSE_SIZE;
+            items.push(Item::Chip {
+                rect: RECT { left: pin_left, top: 6, right: pin_right, bottom: 6 + CLOSE_SIZE },
+                label: "📌".to_string(),
+                id: CHIP_PIN,
+                active: content.pinned,
+                enabled: !content.busy,
+            });
             if content.pinned {
                 items.push(Item::Chip {
-                    rect: RECT { left: w - CLOSE_SIZE - 6, top: 6, right: w - 6, bottom: 6 + CLOSE_SIZE },
+                    rect: RECT { left: close_left, top: 6, right: close_right, bottom: 6 + CLOSE_SIZE },
                     label: "✕".to_string(),
                     id: CHIP_CLOSE,
                     active: false,
@@ -673,6 +700,69 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_MOUSEMOVE => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let hit = LAYOUT.with(|l| {
+                let sy = CONTENT.with(|c| c.borrow().scroll_y);
+                l.borrow().items.iter().find_map(|it| match it {
+                    Item::Chip { rect, id, enabled, .. } => {
+                        let mut r = *rect;
+                        let off = if *id == CHIP_CLOSE || *id == CHIP_PIN { 0 } else { sy };
+                        r.top -= off;
+                        r.bottom -= off;
+                        if *enabled && x >= r.left && x < r.right && y >= r.top && y < r.bottom {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                })
+            });
+            let changed = HOVER_ID.with(|h| {
+                let mut h = h.borrow_mut();
+                if *h != hit {
+                    *h = hit;
+                    true
+                } else {
+                    false
+                }
+            });
+            if changed {
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, true);
+                }
+            }
+            // ウィンドウ外に出たら WM_MOUSELEAVE を受け取れるよう登録する (✕ホバー解除用)
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            unsafe {
+                let _ = TrackMouseEvent(&mut tme);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            let changed = HOVER_ID.with(|h| {
+                let mut h = h.borrow_mut();
+                if h.is_some() {
+                    *h = None;
+                    true
+                } else {
+                    false
+                }
+            });
+            if changed {
+                unsafe {
+                    let _ = InvalidateRect(Some(hwnd), None, true);
+                }
+            }
+            LRESULT(0)
+        }
         WM_NCHITTEST => {
             // 外周4pxは背面へクリック透過 (SPEC §10 部分ヒットテスト)
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
@@ -696,8 +786,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 l.borrow().items.iter().find_map(|it| match it {
                     Item::Chip { rect, id, enabled, .. } => {
                         let mut r = *rect;
-                        // 右上の閉じるボタンはスクロールに追従しない
-                        let off = if *id == CHIP_CLOSE { 0 } else { sy };
+                        // 右上のピン留め・閉じるボタンはスクロールに追従しない
+                        let off = if *id == CHIP_CLOSE || *id == CHIP_PIN { 0 } else { sy };
                         r.top -= off;
                         r.bottom -= off;
                         if *enabled && x >= r.left && x < r.right && y >= r.top && y < r.bottom {
@@ -822,11 +912,18 @@ fn paint(hwnd: HWND) {
                     }
                     Item::Chip { rect, label, active, enabled, id } => {
                         let mut r = *rect;
-                        // 右上の閉じるボタンはスクロールに追従しない
-                        let off = if *id == CHIP_CLOSE { 0 } else { sy };
+                        // 右上のピン留め・閉じるボタンはスクロールに追従しない
+                        let off = if *id == CHIP_CLOSE || *id == CHIP_PIN { 0 } else { sy };
                         r.top -= off;
                         r.bottom -= off;
-                        let bgc = if *active { COL_CHIP_ACTIVE } else { COL_CHIP };
+                        let hovered = HOVER_ID.with(|h| *h.borrow() == Some(*id));
+                        let bgc = if *id == CHIP_CLOSE && hovered {
+                            COL_CLOSE_HOVER
+                        } else if *active {
+                            COL_CHIP_ACTIVE
+                        } else {
+                            COL_CHIP
+                        };
                         let brush = CreateSolidBrush(COLORREF(bgc));
                         FillRect(mem, &r, brush);
                         let _ = DeleteObject(HGDIOBJ(brush.0));

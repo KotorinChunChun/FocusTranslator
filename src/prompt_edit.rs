@@ -10,11 +10,12 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetDlgItem, GetWindowLongPtrW,
-    GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, LoadCursorW, RegisterClassW, SW_SHOW,
-    SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
+    GetWindowTextLengthW, GetWindowTextW, HMENU, HWND_TOPMOST, IDC_ARROW, LoadCursorW,
+    RegisterClassW, SW_SHOW, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
     WINDOW_STYLE, WM_COMMAND, WM_DESTROY, WM_SETFONT, WM_SETTEXT, WM_SIZE, WNDCLASSW, WS_BORDER,
-    WS_CHILD, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
-    WS_VSCROLL,
+    WS_CHILD, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::w;
 
@@ -69,8 +70,9 @@ pub fn open(
         let _ = RegisterClassW(&wc); // 2回目以降の登録失敗は無視
 
         let (x, y) = pos.unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
+        // オーバーレイ(WS_EX_TOPMOST)の背後に隠れないよう、このダイアログもTOPMOSTにする
         let Ok(hwnd) = CreateWindowExW(
-            WS_EX_APPWINDOW,
+            WS_EX_APPWINDOW | WS_EX_TOPMOST,
             class_name,
             w!("解説プロンプトの編集"),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
@@ -148,6 +150,8 @@ pub fn open(
         let _ = SendMessageW(edit, WM_SETTEXT, Some(WPARAM(0)), Some(LPARAM(wide.as_ptr() as isize)));
 
         let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+        let _ = SetForegroundWindow(hwnd);
     }
 }
 

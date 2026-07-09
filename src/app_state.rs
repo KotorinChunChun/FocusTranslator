@@ -449,6 +449,24 @@ pub fn handle_chip(id: usize) {
                 });
             }
         }
+        overlay::CHIP_COPY_INFO => {
+            let (title, path) =
+                with_app(|app| (app.app_title.clone(), app.uia_path.clone())).unwrap_or_default();
+            let mut text = title;
+            if !path.is_empty() {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&path);
+            }
+            if !text.is_empty() {
+                util::set_clipboard_text(main_hwnd(), &text);
+                with_app(|app| {
+                    app.badge = Some("対象情報をコピーしました".into());
+                    sync_overlay(app);
+                });
+            }
+        }
         overlay::CHIP_CLOSE => {
             with_app(close_overlay);
             return;
