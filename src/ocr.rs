@@ -29,27 +29,48 @@ impl OcrOutput {
     }
 }
 
+/// OCRの行選択モード
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Focus {
+    /// 指定Y座標(画像内)に最も近い1行を採用
+    Line(f32),
+    /// 指定Y座標を含む段落を採用 (行間ギャップで段落境界を推定し、折返し行を結合)
+    Paragraph(f32),
+    /// 全行を段落結合 (範囲指定モード)
+    All,
+}
+
+impl Focus {
+    /// 単一行選択のY座標 (Line のときのみ)
+    fn line_y(&self) -> Option<f32> {
+        match self {
+            Focus::Line(fy) => Some(*fy),
+            _ => None,
+        }
+    }
+}
+
 /// 指定エンジンでOCRを実行する。
-/// focus_y: 帯内の注目Y座標(単一行選択用)。None なら全行を段落結合。
-pub fn run(engine: &str, cfg: &Config, img: &Captured, focus_y: Option<f32>) -> Result<OcrOutput, String> {
+pub fn run(engine: &str, cfg: &Config, img: &Captured, focus: Focus) -> Result<OcrOutput, String> {
     match engine {
-        "win" => ocr_windows(img, focus_y).map(OcrOutput::text_only),
+        "win" => ocr_windows(img, focus).map(OcrOutput::text_only),
         "paddle" => {
             if crate::paddle_install::installed() {
-                crate::paddle_ocr::ocr_paddle(img, focus_y).map(OcrOutput::text_only)
+                // PaddleOCR は段落境界推定が未対応のため、Paragraph は帯内全行の結合で近似する
+                crate::paddle_ocr::ocr_paddle(img, focus.line_y()).map(OcrOutput::text_only)
             } else {
                 Err("PaddleOCRのモデルが未導入です。設定画面からインストールしてください".into())
             }
         }
-        "yomitoku" => ocr_http(&cfg.yomitoku_url, img, focus_y).map(OcrOutput::text_only),
-        "ndl" => ocr_http(&cfg.ndl_url, img, focus_y).map(OcrOutput::text_only),
-        "llm" => llm_ocr_translate(cfg, img, focus_y),
+        "yomitoku" => ocr_http(&cfg.yomitoku_url, img, focus).map(OcrOutput::text_only),
+        "ndl" => ocr_http(&cfg.ndl_url, img, focus).map(OcrOutput::text_only),
+        "llm" => llm_ocr_translate(cfg, img, focus),
         other => Err(format!("不明なOCRエンジン: {other}")),
     }
 }
 
 /// Windows.Media.Ocr によるローカルOCR
-pub fn ocr_windows(img: &Captured, focus_y: Option<f32>) -> Result<String, String> {
+pub fn ocr_windows(img: &Captured, focus: Focus) -> Result<String, String> {
     let engine = OcrEngine::TryCreateFromUserProfileLanguages()
         .map_err(|_| "OCRエンジンを初期化できません(言語パック未導入の可能性)".to_string())?;
     let ibuf = CryptographicBuffer::CreateFromByteArray(&img.bgra)
@@ -68,7 +89,8 @@ pub fn ocr_windows(img: &Captured, focus_y: Option<f32>) -> Result<String, Strin
         .map_err(|e| format!("OCR実行失敗: {e}"))?;
 
     let lines = result.Lines().map_err(|e| format!("行取得失敗: {e}"))?;
-    let mut items: Vec<(f32, String)> = Vec::new(); // (行の中心Y, テキスト)
+    // (行の上端Y, 下端Y, テキスト)
+    let mut items: Vec<(f32, f32, String)> = Vec::new();
     let count = lines.Size().unwrap_or(0);
     for i in 0..count {
         let Ok(line) = lines.GetAt(i) else { continue };
@@ -88,31 +110,71 @@ pub fn ocr_windows(img: &Captured, focus_y: Option<f32>) -> Result<String, Strin
                 }
             }
         }
-        let cy = if top <= bottom { (top + bottom) / 2.0 } else { img.height as f32 / 2.0 };
-        items.push((cy, text));
+        if top > bottom {
+            let c = img.height as f32 / 2.0;
+            top = c;
+            bottom = c;
+        }
+        items.push((top, bottom, text));
     }
     if items.is_empty() {
         return Err("テキストを検出できませんでした".into());
     }
+    items.sort_by(|a, b| line_cy(a).partial_cmp(&line_cy(b)).unwrap_or(std::cmp::Ordering::Equal));
 
-    match focus_y {
-        Some(fy) => {
+    match focus {
+        Focus::Line(fy) => {
             // カーソルに最も近い1行を採用
             let mut best = &items[0];
             for it in &items {
-                if (it.0 - fy).abs() < (best.0 - fy).abs() {
+                if (line_cy(it) - fy).abs() < (line_cy(best) - fy).abs() {
                     best = it;
                 }
             }
-            Ok(normalize_line(&best.1))
+            Ok(normalize_line(&best.2))
         }
-        None => {
+        Focus::Paragraph(fy) => {
+            // カーソル行から行間ギャップの小さい隣接行へ広げ、段落として結合する
+            let texts: Vec<String> =
+                paragraph_at(&items, fy).iter().map(|i| normalize_line(&i.2)).collect();
+            Ok(join_paragraph(&texts))
+        }
+        Focus::All => {
             // 複数行を段落として結合(範囲指定モード)
-            items.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            let texts: Vec<String> = items.iter().map(|i| normalize_line(&i.1)).collect();
+            let texts: Vec<String> = items.iter().map(|i| normalize_line(&i.2)).collect();
             Ok(join_paragraph(&texts))
         }
     }
+}
+
+fn line_cy(item: &(f32, f32, String)) -> f32 {
+    (item.0 + item.1) / 2.0
+}
+
+/// fy を含む(最も近い)行を起点に、行間ギャップが小さい隣接行へ上下に広げて段落を切り出す。
+/// 折返しの行間は行高より十分小さく、段落間の空きは行高程度以上あることを利用する。
+fn paragraph_at(items: &[(f32, f32, String)], fy: f32) -> &[(f32, f32, String)] {
+    let mut focus = 0;
+    for (i, it) in items.iter().enumerate() {
+        if (line_cy(it) - fy).abs() < (line_cy(&items[focus]) - fy).abs() {
+            focus = i;
+        }
+    }
+    // 行高の中央値から段落境界とみなすギャップ閾値を決める
+    let mut heights: Vec<f32> = items.iter().map(|i| i.1 - i.0).collect();
+    heights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_h = heights[heights.len() / 2].max(8.0);
+    let gap_limit = median_h * 0.8;
+
+    let mut start = focus;
+    while start > 0 && items[start].0 - items[start - 1].1 <= gap_limit {
+        start -= 1;
+    }
+    let mut end = focus;
+    while end + 1 < items.len() && items[end + 1].0 - items[end].1 <= gap_limit {
+        end += 1;
+    }
+    &items[start..=end]
 }
 
 /// Windows OCR は CJK でも単語間に空白を入れることがあるため整形する
@@ -169,10 +231,11 @@ pub fn join_paragraph(lines: &[String]) -> String {
     out
 }
 
-/// カーソル注目行を中心に高さ64pxの帯へ切り抜く (focus_y が None なら元画像のまま)。
+/// 単一行選択(Line)のときのみ、注目行を中心に高さ64pxの帯へ切り抜く。
+/// Paragraph / All は画像全体を対象とする(段落・全行を拾うため)。
 /// 外部OCR/LLMへの送信画像と、ログ保存画像の切り出しで共用する。
-pub fn crop_for_focus(img: &Captured, focus_y: Option<f32>) -> std::borrow::Cow<'_, Captured> {
-    if let Some(fy) = focus_y {
+pub fn crop_for_focus(img: &Captured, focus: Focus) -> std::borrow::Cow<'_, Captured> {
+    if let Focus::Line(fy) = focus {
         let h = 64; // 高さ64pxの帯に切り抜く(複数行を拾うのを防ぐ)
         let top = (fy - h as f32 / 2.0).round() as i32;
         if let Some(cropped) = crate::capture::crop(img, 0, top, img.width as i32, h) {
@@ -183,12 +246,12 @@ pub fn crop_for_focus(img: &Captured, focus_y: Option<f32>) -> std::borrow::Cow<
 }
 
 /// 外部OCRサーバー (YomiToku / NDL-OCR): POST {url}/ocr に PNG を送る
-pub fn ocr_http(base_url: &str, img: &Captured, focus_y: Option<f32>) -> Result<String, String> {
+pub fn ocr_http(base_url: &str, img: &Captured, focus: Focus) -> Result<String, String> {
     let base = base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         return Err("サーバーURLが未設定です".into());
     }
-    let target_img = crop_for_focus(img, focus_y);
+    let target_img = crop_for_focus(img, focus);
     let png = crate::capture::to_png(&target_img);
     let url = format!("{base}/ocr");
     let mut res = ureq::post(&url)
@@ -231,9 +294,9 @@ pub fn health_check(base_url: &str) -> bool {
 }
 
 /// LLM OCR+翻訳統合モード: 画像から原文と訳文を一括取得 (SPEC §8)
-pub fn llm_ocr_translate(cfg: &Config, img: &Captured, focus_y: Option<f32>) -> Result<OcrOutput, String> {
+pub fn llm_ocr_translate(cfg: &Config, img: &Captured, focus: Focus) -> Result<OcrOutput, String> {
     let prof = cfg.active_profile().ok_or("LLM APIプロファイルが設定されていません")?;
-    let target_img = crop_for_focus(img, focus_y);
+    let target_img = crop_for_focus(img, focus);
     let png = crate::capture::to_png(&target_img);
     let b64 = B64.encode(&png);
     let prompt = cfg.fill_prompt(&prof.ocr_prompt, "");

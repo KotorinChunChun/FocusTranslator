@@ -77,7 +77,8 @@ pub struct App {
     cur_ocr: String,
     cur_tr: String,
     last_img: Option<Arc<capture::Captured>>,
-    last_focus_y: Option<f32>,
+    /// 保持画像の行選択モード (再OCR時に同じモードで認識する)
+    last_focus: crate::ocr::Focus,
     anchor: (i32, i32),
     pub error_only: bool,
     failed_ocr: HashSet<String>,
@@ -139,7 +140,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             cur_ocr,
             cur_tr,
             last_img: None,
-            last_focus_y: None,
+            last_focus: crate::ocr::Focus::All,
             anchor: (0, 0),
             error_only: false,
             failed_ocr: HashSet::new(),
@@ -376,7 +377,7 @@ fn close_overlay(app: &mut App) {
     app.badge = None;
     app.error_only = false;
     app.last_img = None; // OCR画像はサイクル終了後に破棄 (SPEC §9.3)
-    app.last_focus_y = None;
+    app.last_focus = crate::ocr::Focus::All;
     app.recog_id = None;
     app.explanation = None;
     app.explaining = false;
@@ -393,7 +394,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
         }
         app.busy = false; // ワーカー完了 (成否問わずロック解除)
         match msg {
-            worker::WorkerMsg::Source { text, method, engine, img, pin, anchor, focus_y, ms, recog_id, app_title, uia_path } => {
+            worker::WorkerMsg::Source { text, method, engine, img, pin, anchor, focus, ms, recog_id, app_title, uia_path } => {
                 if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
                     return;
                 }
@@ -403,7 +404,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                     app.cur_ocr = e; // 実際に使ったOCRエンジン (UIA経路では変更しない)
                 }
                 app.last_img = img;
-                app.last_focus_y = focus_y;
+                app.last_focus = focus;
                 app.status = None;
                 app.badge = None;
                 app.error_only = false;
@@ -474,7 +475,7 @@ pub fn handle_chip(id: usize) {
             app.cfg.clone(),
             app.source.clone(),
             app.last_img.clone(),
-            app.last_focus_y,
+            app.last_focus,
             app.origin,
             app.target,
             app.main.0 as isize,
@@ -485,7 +486,7 @@ pub fn handle_chip(id: usize) {
     }) else {
         return;
     };
-    let (cfg, source, last_img, last_focus_y, origin, target, main, anchor, cur_tr, recog_id) = info;
+    let (cfg, source, last_img, last_focus, origin, target, main, anchor, cur_tr, recog_id) = info;
 
     match id {
         overlay::CHIP_COPY => {
@@ -683,7 +684,7 @@ pub fn handle_chip(id: usize) {
         .unwrap_or(0);
         let cfg2 = Config::load();
         worker::reocr(
-            new_gen, last_img, last_focus_y, origin.x, origin.y, target, key, cur_tr, cfg2, main, anchor,
+            new_gen, last_img, last_focus, origin.x, origin.y, target, key, cur_tr, cfg2, main, anchor,
         );
     } else if id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_TR_BASE + overlay::TR_KEYS.len() {
         // 翻訳エンジン切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)

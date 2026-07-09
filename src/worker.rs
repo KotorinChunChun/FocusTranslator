@@ -19,7 +19,8 @@ pub enum WorkerMsg {
         img: Option<Arc<Captured>>,
         pin: bool,
         anchor: (i32, i32),
-        focus_y: Option<f32>,
+        /// 保持画像の行選択モード (再OCR時に同じモードで認識する)
+        focus: ocr::Focus,
         ms: u128,
         recog_id: Option<i64>,
         app_title: String,
@@ -171,14 +172,125 @@ fn effective_translator(cfg: &Config) -> String {
 /// ホールド認識で切り出すカーソル周辺帯のサイズ (px)。領域検出モードの枠表示と共用。
 pub const BAND_W: i32 = 1200;
 pub const BAND_H: i32 = 160;
+/// UIA矩形とカーソルY座標の許容距離 (px)。これ以上離れた矩形は採用しない。
+const NEAR_Y_PX: i32 = 10;
+/// 直下要素(TextPatternなし)をそのままキャプチャする高さの上限 (px)。
+/// これより高い要素は段落帯 (要素幅 × カーソル中心 BAND_H) に切り替える。
+const HOVER_MAX_H: i32 = 320;
+/// 採用した矩形に付ける余白 (px)。文字の欠けを防ぐ。
+const CAP_PAD: i32 = 6;
+
+/// キャプチャ矩形の由来 (plan_capture_rect の決定結果)
+#[derive(Clone, Copy, PartialEq)]
+pub enum CapKind {
+    /// UIA行矩形(黄)の統合
+    Line,
+    /// TextPattern要素(緑)
+    Element,
+    /// 直下要素(紫)
+    Hover,
+    /// 背の高い直下要素内の段落帯 (OCRは段落モード)
+    HoverBand,
+    /// 既定のカーソル中心帯(橙)
+    Band,
+}
+
+impl CapKind {
+    /// 領域検出モードのラベル表示用
+    pub fn label(&self) -> &'static str {
+        match self {
+            CapKind::Line => "UIA行",
+            CapKind::Element => "UIA要素",
+            CapKind::Hover => "直下要素",
+            CapKind::HoverBand => "段落帯",
+            CapKind::Band => "既定帯",
+        }
+    }
+}
+
+/// 矩形とY座標の垂直距離 (内側なら0)
+fn v_dist(r: &RECT, y: i32) -> i32 {
+    (r.top - y).max(y - r.bottom).max(0)
+}
+
+/// 幅・高さが最低限あるか
+fn rect_valid(r: &RECT) -> bool {
+    r.right - r.left >= 8 && r.bottom - r.top >= 4
+}
+
+/// 複数矩形を1つの外接矩形へ統合
+fn merge_rects(rects: &[RECT]) -> RECT {
+    let mut m = rects[0];
+    for r in &rects[1..] {
+        m.left = m.left.min(r.left);
+        m.top = m.top.min(r.top);
+        m.right = m.right.max(r.right);
+        m.bottom = m.bottom.max(r.bottom);
+    }
+    m
+}
+
+/// 余白を付けてウィンドウ矩形へクランプ
+fn pad_clamp(r: &RECT, win: &RECT) -> RECT {
+    RECT {
+        left: (r.left - CAP_PAD).max(win.left),
+        top: (r.top - CAP_PAD).max(win.top),
+        right: (r.right + CAP_PAD).min(win.right),
+        bottom: (r.bottom + CAP_PAD).min(win.bottom),
+    }
+}
+
+/// UIA検出結果からキャプチャすべきスクリーン矩形を決める。
+/// 優先: UIA行矩形(統合) → TextPattern要素 → 直下要素(高すぎる場合は段落帯) → 既定帯。
+/// カーソルYから NEAR_Y_PX 以上離れた矩形は誤検出とみなして採用しない。
+/// 領域検出モード(detect)の枠表示と実際のキャプチャで共用する。
+pub fn plan_capture_rect(p: &crate::uia::UiaProbe, win: &RECT, x: i32, y: i32) -> (RECT, CapKind) {
+    // 黄: 行矩形群を1つの長方形に統合
+    if !p.line_rects.is_empty() {
+        let merged = merge_rects(&p.line_rects);
+        if rect_valid(&merged) && v_dist(&merged, y) < NEAR_Y_PX {
+            return (pad_clamp(&merged, win), CapKind::Line);
+        }
+    }
+    // 緑: TextPattern が見つかった要素
+    if let Some(r) = &p.element_rect
+        && rect_valid(r) && v_dist(r, y) < NEAR_Y_PX {
+            return (pad_clamp(r, win), CapKind::Element);
+        }
+    // 紫: 直下要素。高すぎる場合はカーソル位置の段落を狙った帯へ切り替える
+    if let Some(r) = &p.hover_rect
+        && rect_valid(r) && v_dist(r, y) < NEAR_Y_PX {
+            if r.bottom - r.top > HOVER_MAX_H {
+                let band = RECT {
+                    left: r.left,
+                    top: (y - BAND_H / 2).max(r.top),
+                    right: r.right,
+                    bottom: (y + BAND_H / 2).min(r.bottom),
+                };
+                return (pad_clamp(&band, win), CapKind::HoverBand);
+            }
+            return (pad_clamp(r, win), CapKind::Hover);
+        }
+    // 橙: 既定のカーソル中心帯
+    (capture::band_screen_rect(win, x, y, BAND_W, BAND_H), CapKind::Band)
+}
+
+/// キャプチャ由来に応じたOCRの行選択モード
+fn focus_for(kind: CapKind, fy: f32) -> ocr::Focus {
+    match kind {
+        CapKind::HoverBand => ocr::Focus::Paragraph(fy),
+        _ => ocr::Focus::Line(fy),
+    }
+}
 
 struct Band {
     img: Captured,
     focus_y: f32,
 }
 
-/// ポインタ直下ウィンドウをキャプチャし、カーソル周辺の帯を切り出す (SPEC §6.3)
-fn capture_band(x: i32, y: i32, target: isize, bw: i32, bh: i32) -> Result<Band, String> {
+/// 対象ウィンドウをキャプチャし、スクリーン座標の矩形 sr を切り出す。
+/// focus_y は切り出し後画像内でのカーソルYを返す。
+fn capture_screen_rect(target: isize, sr: &RECT, y: i32) -> Result<Band, String> {
     let hwnd = HWND(target as *mut _);
     unsafe {
         if !IsWindow(Some(hwnd)).as_bool() || IsIconic(hwnd).as_bool() {
@@ -191,14 +303,27 @@ fn capture_band(x: i32, y: i32, target: isize, bw: i32, bh: i32) -> Result<Band,
     let rh = (r.bottom - r.top).max(1);
     let scale_x = full.width as f32 / rw as f32;
     let scale_y = full.height as f32 / rh as f32;
-    let rel_x = ((x - r.left) as f32 * scale_x) as i32;
-    let rel_y = ((y - r.top) as f32 * scale_y) as i32;
-    let left = rel_x - bw / 2;
-    let top = rel_y - bh / 2;
-    let band =
-        capture::crop(&full, left, top, bw, bh).ok_or("このウィンドウは取得できません")?;
-    let focus_y = (rel_y - top.max(0)) as f32;
+    let left = ((sr.left - r.left) as f32 * scale_x) as i32;
+    let top = ((sr.top - r.top) as f32 * scale_y) as i32;
+    let w = ((sr.right - sr.left) as f32 * scale_x) as i32;
+    let h = ((sr.bottom - sr.top) as f32 * scale_y) as i32;
+    let band = capture::crop(&full, left, top, w, h).ok_or("このウィンドウは取得できません")?;
+    let focus_y = ((y - sr.top.max(r.top)) as f32 * scale_y).max(0.0);
     Ok(Band { img: band, focus_y })
+}
+
+/// ポインタ直下ウィンドウをキャプチャし、カーソル周辺の帯を切り出す (SPEC §6.3)
+fn capture_band(x: i32, y: i32, target: isize, bw: i32, bh: i32) -> Result<Band, String> {
+    let win = capture::window_frame_rect(HWND(target as *mut _));
+    let sr = capture::band_screen_rect(&win, x, y, bw, bh);
+    capture_screen_rect(target, &sr, y)
+}
+
+/// UIA検出結果に基づいてキャプチャ領域を決めて切り出す (黄/緑/紫 → 既定帯の順)
+fn capture_probe(x: i32, y: i32, target: isize, probe: &crate::uia::UiaProbe) -> Result<(Band, CapKind), String> {
+    let win = capture::window_frame_rect(HWND(target as *mut _));
+    let (rect, kind) = plan_capture_rect(probe, &win, x, y);
+    capture_screen_rect(target, &rect, y).map(|b| (b, kind))
 }
 
 /// OCR結果に統合訳文が含まれていればそのまま表示し、無ければ翻訳ワーカーへ回す
@@ -226,26 +351,31 @@ fn dispatch_translation(
     }
 }
 
-/// ホールドモードの認識サイクル: UIA優先 → WGC帯OCR (SPEC §6.4)
+/// ホールドモードの認識サイクル: UIA優先 → WGCキャプチャOCR (SPEC §6.4)
+/// キャプチャ領域は UIA検出結果 (行矩形/要素/直下要素) を優先し、無ければ既定帯。
 pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Config, main: isize) {
     std::thread::spawn(move || {
         let tr_engine = effective_translator(&cfg);
         init_com();
         let t0 = Instant::now();
         let ctx = AppContext::capture(x, y, HWND(target as *mut _));
+        let probe = uia::probe_at_point(x, y);
 
         // 経路A: UIA
-        if let Some(text) = uia::line_at_point(x, y) {
+        if let Some(text) = probe.text.clone() {
             let ms = t0.elapsed().as_millis();
             util::perf_log(cfg.perf_log, &format!("source UIA {ms}ms"));
 
             // OCRは行っていないが、後でOCRエンジンへ切り替えた際に再キャプチャ不要で使えるよう、
-            // また認識ログにも紐づけられるよう、この時点で注目行周辺の帯画像を撮影しておく。
-            let band = capture_band(x, y, target, BAND_W, BAND_H).ok();
+            // また認識ログにも紐づけられるよう、この時点で検出領域の画像を撮影しておく。
+            let cap = capture_probe(x, y, target, &probe).ok();
+            let focus = cap
+                .as_ref()
+                .map(|(b, kind)| focus_for(*kind, b.focus_y))
+                .unwrap_or(ocr::Focus::All);
             let log_img: Option<Captured> =
-                band.as_ref().map(|b| ocr::crop_for_focus(&b.img, Some(b.focus_y)).into_owned());
-            let focus_y = band.as_ref().map(|b| b.focus_y);
-            let img = band.map(|b| Arc::new(b.img));
+                cap.as_ref().map(|(b, _)| ocr::crop_for_focus(&b.img, focus).into_owned());
+            let img = cap.map(|(b, _)| Arc::new(b.img));
 
             let recog_id = log_recog(
                 &cfg, "hold", "uia", "uia", ms, Some(&text), None,
@@ -258,7 +388,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 img,
                 pin: true,
                 anchor: (x, y),
-                focus_y,
+                focus,
                 ms,
                 recog_id,
                 app_title: ctx.title,
@@ -268,22 +398,25 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
             return;
         }
 
-        // 経路B: WGC + 帯OCR
+        // 経路B: WGC + キャプチャOCR (直下要素 → 段落帯 → 既定帯)
         let engine = effective_ocr(&cfg);
-        let band = match capture_band(x, y, target, BAND_W, BAND_H) {
-            Ok(b) => b,
+        let cap = match capture_probe(x, y, target, &probe) {
+            Ok(c) => c,
             Err(e) => {
                 log_recog(&cfg, "hold", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, &ctx);
                 post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), engine: None });
                 return;
             }
         };
+        let (band, kind) = cap;
         let mut used = band;
-        let mut out = ocr::run(&engine, &cfg, &used.img, Some(used.focus_y));
+        let mut focus = focus_for(kind, used.focus_y);
+        let mut out = ocr::run(&engine, &cfg, &used.img, focus);
         if out.is_err() {
-            // 帯を拡大して再試行 (SPEC §6.3)
+            // 既定の帯を拡大して再試行 (SPEC §6.3)
             if let Ok(wide) = capture_band(x, y, target, 1800, 340) {
-                out = ocr::run(&engine, &cfg, &wide.img, Some(wide.focus_y));
+                focus = ocr::Focus::Line(wide.focus_y);
+                out = ocr::run(&engine, &cfg, &wide.img, focus);
                 used = wide;
             }
         }
@@ -291,8 +424,8 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("source OCR({engine}) {ms}ms"));
-                // ログにはOCR対象の注目帯 (64px) だけを保存する (帯全体は保持画像=再OCR用)
-                let log_img = ocr::crop_for_focus(&used.img, Some(used.focus_y));
+                // ログにはOCR対象領域だけを保存する (全体は保持画像=再OCR用)
+                let log_img = ocr::crop_for_focus(&used.img, focus);
                 let recog_id =
                     log_recog(&cfg, "hold", "ocr", &engine, ms, Some(&o.text), None, Some(&log_img), &ctx);
                 post(main, generation, WorkerMsg::Source {
@@ -302,7 +435,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                     img: Some(Arc::new(used.img)),
                     pin: o.text.contains('\n'),
                     anchor: (x, y),
-                    focus_y: Some(used.focus_y),
+                    focus,
                     ms,
                     recog_id,
                     app_title: ctx.title,
@@ -341,7 +474,7 @@ fn translate(generation: u64, cfg: Config, text: String, engine: String, main: i
 pub fn reocr(
     generation: u64,
     img: Option<Arc<Captured>>,
-    focus_y: Option<f32>,
+    focus: ocr::Focus,
     x: i32,
     y: i32,
     target: isize,
@@ -354,23 +487,30 @@ pub fn reocr(
     std::thread::spawn(move || {
         init_com();
         let t0 = Instant::now();
-        let (image, last_focus_y) = match img {
-            Some(i) => (i, focus_y),
-            None => match capture_band(x, y, target, BAND_W, BAND_H) {
-                Ok(b) => (Arc::new(b.img), Some(b.focus_y)),
-                Err(e) => {
-                    post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: None });
-                    return;
+        let (image, focus) = match img {
+            Some(i) => (i, focus),
+            None => {
+                // 保持画像なし: 初回と同じ基準 (UIA検出領域優先) で再キャプチャする
+                let probe = uia::probe_at_point(x, y);
+                match capture_probe(x, y, target, &probe) {
+                    Ok((b, kind)) => {
+                        let f = focus_for(kind, b.focus_y);
+                        (Arc::new(b.img), f)
+                    }
+                    Err(e) => {
+                        post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: None });
+                        return;
+                    }
                 }
-            },
+            }
         };
         let ctx = AppContext::capture(x, y, HWND(target as *mut _));
-        match ocr::run(&ocr_engine, &cfg, &image, last_focus_y) {
+        match ocr::run(&ocr_engine, &cfg, &image, focus) {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("reocr {ocr_engine} {ms}ms"));
-                // ログにはOCR対象の注目帯 (64px) だけを保存する
-                let log_img = ocr::crop_for_focus(&image, last_focus_y);
+                // ログにはOCR対象領域だけを保存する
+                let log_img = ocr::crop_for_focus(&image, focus);
                 let recog_id =
                     log_recog(&cfg, "chip", "ocr", &ocr_engine, ms, Some(&o.text), None, Some(&log_img), &ctx);
                 post(main, generation, WorkerMsg::Source {
@@ -380,7 +520,7 @@ pub fn reocr(
                     img: Some(image),
                     pin: o.text.contains('\n'),
                     anchor,
-                    focus_y: last_focus_y,
+                    focus,
                     ms,
                     recog_id,
                     app_title: ctx.title,
@@ -459,9 +599,9 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
         };
 
         let engine = effective_ocr(&cfg);
-        // focus_y = None → 全行を段落結合
+        // Focus::All → 全行を段落結合
         let ctx = AppContext::capture(cx, cy, root);
-        match ocr::run(&engine, &cfg, &img, None) {
+        match ocr::run(&engine, &cfg, &img, ocr::Focus::All) {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("region OCR({engine}) {ms}ms"));
@@ -474,7 +614,7 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
                     img: Some(Arc::new(img)),
                     pin: true,
                     anchor,
-                    focus_y: None,
+                    focus: ocr::Focus::All,
                     ms,
                     recog_id,
                     app_title: ctx.title,

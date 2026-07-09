@@ -995,7 +995,7 @@ fn start_reocr(h: HWND) {
             let cap = rgba_to_captured(iw, ih, &rgba);
             let t0 = std::time::Instant::now();
             let (text, err): (Option<String>, Option<String>) =
-                match crate::ocr::run(&engine, &cfg, &cap, None) {
+                match crate::ocr::run(&engine, &cfg, &cap, crate::ocr::Focus::All) {
                     Ok(o) => (Some(o.text), None),
                     Err(e) => (None, Some(e)),
                 };

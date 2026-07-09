@@ -36,7 +36,7 @@ pub struct DetectInfo {
     pub cursor: POINT,
     /// 対象ウィンドウの矩形 (DWM拡張フレーム境界)
     pub window_rect: Option<RECT>,
-    /// OCRフォールバック時にキャプチャする帯の矩形
+    /// 実際にキャプチャされる領域 (worker::plan_capture_rect の決定結果)
     pub band_rect: Option<RECT>,
     /// TextPattern が見つかった UIA 要素の矩形
     pub uia_element: Option<RECT>,
@@ -159,22 +159,28 @@ pub fn probe(main: isize) {
             label: String::new(),
         };
         let root = unsafe { GetAncestor(WindowFromPoint(pt), GA_ROOT) };
+        let p = uia::probe_at_point(pt.x, pt.y);
+        let mut kind = None;
         if !root.is_invalid() {
             let wr = capture::window_frame_rect(root);
-            info.band_rect =
-                Some(capture::band_screen_rect(&wr, pt.x, pt.y, worker::BAND_W, worker::BAND_H));
+            // 橙枠 = 実際にキャプチャされる領域 (認識経路と同じ判定を共用)
+            let (rect, k) = worker::plan_capture_rect(&p, &wr, pt.x, pt.y);
+            info.band_rect = Some(rect);
             info.window_rect = Some(wr);
+            kind = Some(k);
         }
-        let p = uia::probe_at_point(pt.x, pt.y);
         if let Some(text) = &p.text {
             info.uia_element = p.element_rect;
             info.uia_lines = p.line_rects;
             info.label = format!("UIA: {} | {}", p.node, truncate(text, 40));
         } else if p.hover_rect.is_some() {
             info.hover_rect = p.hover_rect;
-            info.label = format!("UIA: {} (TextPatternなし) → OCR帯", p.node);
+            info.label = format!("UIA: {} (TextPatternなし)", p.node);
         } else {
-            info.label = "UIA要素なし → OCR帯".into();
+            info.label = "UIA要素なし".into();
+        }
+        if let Some(k) = kind {
+            info.label.push_str(&format!(" | 取込:{}", k.label()));
         }
         let ptr = Box::into_raw(Box::new(info)) as isize;
         unsafe {

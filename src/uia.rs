@@ -1,6 +1,6 @@
 // UIA テキスト取得経路 (SPEC §6.1)
 // ElementFromPoint → TextPattern → RangeFromPoint → 行単位に拡張 → GetText
-// TextPattern が無ければ祖先を数段探索。取得不可なら None を返し OCR 経路へ。
+// TextPattern が無ければ祖先を数段探索。取得不可なら text=None を返し OCR 経路へ。
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::Ole::{
@@ -76,18 +76,7 @@ fn find_text_hit(auto: &IUIAutomation, el: IUIAutomationElement, pt: POINT) -> O
     }
 }
 
-/// カーソル位置の1行テキストを UIA で取得する。呼び出し元スレッドは COM 初期化済みであること。
-pub fn line_at_point(x: i32, y: i32) -> Option<String> {
-    unsafe {
-        let auto: IUIAutomation =
-            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
-        let pt = POINT { x, y };
-        let el = auto.ElementFromPoint(pt).ok()?;
-        find_text_hit(&auto, el, pt).map(|h| h.text)
-    }
-}
-
-/// 領域検出モード用の UIA 検出結果 (line_at_point と同じ探索経路で得た矩形群)
+/// UIA 検出結果 (認識経路と領域検出モードで共用)
 pub struct UiaProbe {
     /// ElementFromPoint 直下要素の矩形 (TextPattern の有無に関わらず)
     pub hover_rect: Option<RECT>,
