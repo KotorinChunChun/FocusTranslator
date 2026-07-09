@@ -88,6 +88,8 @@ pub struct App {
     busy: bool,
     app_title: String,
     uia_path: String,
+    /// 直近の認識が UIA 経路(OCR不要)で得られたか
+    via_uia: bool,
     pub scroll_y: i32,
 }
 
@@ -142,6 +144,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             busy: false,
             app_title: String::new(),
             uia_path: String::new(),
+            via_uia: false,
             scroll_y: 0,
         });
     });
@@ -308,6 +311,7 @@ fn close_overlay(app: &mut App) {
     app.explanation = None;
     app.explaining = false;
     app.busy = false;
+    app.via_uia = false;
 }
 
 /// ワーカー結果の受信 (世代番号が古いものは破棄; SPEC §6.4)
@@ -324,6 +328,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                     return;
                 }
                 app.source = text;
+                app.via_uia = method == "UIA";
                 if let Some(e) = engine {
                     app.cur_ocr = e; // 実際に使ったOCRエンジン (UIA経路では変更しない)
                 }
@@ -747,6 +752,7 @@ fn sync_overlay(app: &mut App) {
         pinned: app.mode == Mode::Pinned,
         cur_ocr: app.cur_ocr.clone(),
         cur_tr: app.cur_tr.clone(),
+        via_uia: app.via_uia,
         ocr_enabled,
         tr_enabled,
         explanation: app.explanation.clone(),

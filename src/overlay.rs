@@ -5,12 +5,13 @@
 use std::cell::RefCell;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap,
+    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleBitmap, CreatePen,
     CreateCompatibleDC, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH, DT_CALCRECT,
     DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW,
     EndPaint, FONT_OUTPUT_PRECISION, FW_BOLD, FW_NORMAL, FillRect, FrameRect, GetDC,
     GetMonitorInfoW, HDC, HFONT, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint, PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    MonitorFromPoint, PAINTSTRUCT, PS_SOLID, ReleaseDC, RoundRect, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetClientRect, HTCLIENT,
@@ -57,6 +58,8 @@ pub struct OverlayContent {
     pub pinned: bool,
     pub cur_ocr: String,
     pub cur_tr: String,
+    /// 直近の認識が UIA 経路(OCR不要)で得られたか
+    pub via_uia: bool,
     pub ocr_enabled: [bool; OCR_KEYS.len()],
     pub tr_enabled: [bool; TR_KEYS.len()],
     pub explanation: Option<String>,
@@ -77,16 +80,23 @@ enum Item {
     Chip { rect: RECT, label: String, id: usize, active: bool, enabled: bool },
 }
 
+/// ブロック(カード)の背景。見出し・本文より下のレイヤーに描画される。
+struct Panel {
+    rect: RECT,
+    accent: u32,
+}
+
 struct Layout {
     w: i32,
     h: i32,
     content_h: i32,
     items: Vec<Item>,
+    panels: Vec<Panel>,
 }
 
 thread_local! {
     static CONTENT: RefCell<OverlayContent> = RefCell::new(OverlayContent::default());
-    static LAYOUT: RefCell<Layout> = const { RefCell::new(Layout { w: 0, h: 0, content_h: 0, items: Vec::new() }) };
+    static LAYOUT: RefCell<Layout> = const { RefCell::new(Layout { w: 0, h: 0, content_h: 0, items: Vec::new(), panels: Vec::new() }) };
 }
 
 // 配色 (COLORREF は 0x00BBGGRR)
@@ -100,8 +110,23 @@ const COL_CHIP_ACTIVE: u32 = 0x00D28C3C;
 const COL_CHIP_TEXT: u32 = 0x00E8E4E0;
 const COL_CHIP_DISABLED: u32 = 0x00787068;
 const COL_LABEL: u32 = 0x00908A84;
+// ブロック(カード)の背景・枠・左アクセントバー。本体背景よりわずかに明るくして境界を分かりやすくする。
+const COL_PANEL_BG: u32 = 0x002B2723;
+const COL_PANEL_BORDER: u32 = 0x00423C37;
+const COL_ACCENT_INFO: u32 = 0x00908A84;
+const COL_ACCENT_OCR: u32 = 0x00A08F6E;
+const COL_ACCENT_TR: u32 = 0x00D28C3C;
+const COL_ACCENT_EXPLAIN: u32 = 0x0050C8FF;
+/// UIA経路で取得した(OCR不要な)結果であることを示す見出しの色
+const COL_UIA_BADGE: u32 = 0x0080D0A0;
 
 const PAD: i32 = 12;
+/// ブロック(カード)左右の余白。テキストは PAD、カード枠は少し外側に広げる。
+const PANEL_MARGIN: i32 = 6;
+/// カードの角丸半径
+const PANEL_RADIUS: i32 = 8;
+/// カード左端のアクセントバーの太さ
+const ACCENT_W: i32 = 4;
 const MAXW: i32 = 620;
 const TIMER_AUTOHIDE: usize = 7;
 const TIMER_ANIMATION: usize = 8;
@@ -250,6 +275,7 @@ fn compute_layout(hwnd: HWND) -> Layout {
         unsafe {
             let hdc = GetDC(Some(hwnd));
             let mut items: Vec<Item> = Vec::new();
+            let mut panel_spans: Vec<(i32, i32, u32)> = Vec::new();
             let mut y = PAD;
             let mut need_w = 240i32;
 
@@ -266,40 +292,69 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 y += th + PAD;
                 need_w = need_w.max(tw + PAD * 2 + 4);
                 let _ = ReleaseDC(Some(hwnd), hdc);
-                return Layout { w: need_w.min(MAXW + PAD * 2), h: y, content_h: y, items };
+                return Layout { w: need_w.min(MAXW + PAD * 2), h: y, content_h: y, items, panels: Vec::new() };
             }
 
-            // 見出し行を配置し、続けて見出しの右にチップを並べる。戻り値は行の高さ。
+            // 見出し行を配置する。chips_left=true のときはチップを見出し文字の手前(左端)に、
+            // false のときは従来どおり見出し文字の右側に並べる。戻り値は行の高さ。
             let heading_row = |items: &mut Vec<Item>,
                                y: i32,
                                text: &str,
+                               color: u32,
                                chips: &[(&str, usize, bool)],
+                               chips_left: bool,
                                need_w: &mut i32|
              -> i32 {
-                let (hw, hh) = measure(hdc, text, FONT_HEADING, false, MAXW);
-                items.push(Item::Text {
-                    rect: RECT { left: PAD, top: y, right: PAD + hw + 4, bottom: y + hh },
-                    text: text.to_string(),
-                    size: FONT_HEADING,
-                    color: COL_LABEL,
-                    bold: false,
-                });
-                let mut x = PAD + hw + 10;
-                let row_h = hh.max(CLOSE_SIZE);
-                for (lab, id, enabled) in chips {
-                    let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
-                    let w = cw + 16;
-                    items.push(Item::Chip {
-                        rect: RECT { left: x, top: y - 1, right: x + w, bottom: y - 1 + CLOSE_SIZE },
-                        label: lab.to_string(),
-                        id: *id,
-                        active: false,
-                        enabled: *enabled,
+                if chips_left && !chips.is_empty() {
+                    let mut x = PAD;
+                    for (lab, id, enabled) in chips {
+                        let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
+                        let w = cw + 16;
+                        items.push(Item::Chip {
+                            rect: RECT { left: x, top: y - 1, right: x + w, bottom: y - 1 + CLOSE_SIZE },
+                            label: lab.to_string(),
+                            id: *id,
+                            active: false,
+                            enabled: *enabled,
+                        });
+                        x += w + 8;
+                    }
+                    let (hw, hh) = measure(hdc, text, FONT_HEADING, false, MAXW);
+                    items.push(Item::Text {
+                        rect: RECT { left: x, top: y, right: x + hw + 4, bottom: y + hh },
+                        text: text.to_string(),
+                        size: FONT_HEADING,
+                        color,
+                        bold: false,
                     });
-                    x += w + 6;
+                    *need_w = (*need_w).max(x + hw + PAD);
+                    hh.max(CLOSE_SIZE)
+                } else {
+                    let (hw, hh) = measure(hdc, text, FONT_HEADING, false, MAXW);
+                    items.push(Item::Text {
+                        rect: RECT { left: PAD, top: y, right: PAD + hw + 4, bottom: y + hh },
+                        text: text.to_string(),
+                        size: FONT_HEADING,
+                        color,
+                        bold: false,
+                    });
+                    let mut x = PAD + hw + 10;
+                    let row_h = hh.max(CLOSE_SIZE);
+                    for (lab, id, enabled) in chips {
+                        let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
+                        let w = cw + 16;
+                        items.push(Item::Chip {
+                            rect: RECT { left: x, top: y - 1, right: x + w, bottom: y - 1 + CLOSE_SIZE },
+                            label: lab.to_string(),
+                            id: *id,
+                            active: false,
+                            enabled: *enabled,
+                        });
+                        x += w + 6;
+                    }
+                    *need_w = (*need_w).max(x + PAD - 6);
+                    row_h
                 }
-                *need_w = (*need_w).max(x + PAD - 6);
-                row_h
             };
 
             let chip_row = |items: &mut Vec<Item>,
@@ -329,7 +384,8 @@ fn compute_layout(hwnd: HWND) -> Layout {
 
             // 【入力内容】: 対象アプリ情報 + OCR対象画像ボタン
             if !content.app_title.is_empty() || content.has_image {
-                let hh = heading_row(&mut items, y, "【入力内容】", &[], &mut need_w);
+                let block_start = y;
+                let hh = heading_row(&mut items, y, "【入力内容】", COL_LABEL, &[], false, &mut need_w);
                 y += hh + 4;
 
                 if !content.app_title.is_empty() {
@@ -365,12 +421,28 @@ fn compute_layout(hwnd: HWND) -> Layout {
                     y += CHIP_H + 4;
                 }
                 y += 4;
+                panel_spans.push((block_start, y, COL_ACCENT_INFO));
+                y += 6;
             }
 
-            // 【OCR結果】: 見出し右に📋コピー
+            // 【OCR結果】(UIA経路の場合はOCRを行わないため専用の見出しにする): コピーは左端
             if !content.source.is_empty() {
-                let heading = format!("【OCR結果 ({})】", ocr_label(&content.cur_ocr));
-                let hh = heading_row(&mut items, y, &heading, &[("📋", CHIP_COPY_SRC, true)], &mut need_w);
+                let block_start = y;
+                let heading = if content.via_uia {
+                    "【UIA読み取り結果 (OCR不要)】".to_string()
+                } else {
+                    format!("【OCR結果 ({})】", ocr_label(&content.cur_ocr))
+                };
+                let heading_color = if content.via_uia { COL_UIA_BADGE } else { COL_LABEL };
+                let hh = heading_row(
+                    &mut items,
+                    y,
+                    &heading,
+                    heading_color,
+                    &[("📋", CHIP_COPY_SRC, true)],
+                    true,
+                    &mut need_w,
+                );
                 y += hh + 4;
 
                 let (sw, sh) = measure(hdc, &content.source, FONT_BODY, false, MAXW);
@@ -395,12 +467,24 @@ fn compute_layout(hwnd: HWND) -> Layout {
                     CHIP_OCR_BASE,
                     &mut need_w,
                 );
+                let accent = if content.via_uia { COL_UIA_BADGE } else { COL_ACCENT_OCR };
+                panel_spans.push((block_start, y, accent));
+                y += 6;
             }
 
-            // 【翻訳結果】またはステータス
+            // 【翻訳結果】またはステータス: コピーは左端
             if let Some(t) = &content.translation {
+                let block_start = y;
                 let heading = format!("【翻訳結果 ({})】", tr_label(&content.cur_tr));
-                let hh = heading_row(&mut items, y, &heading, &[("📋", CHIP_COPY_TR, true)], &mut need_w);
+                let hh = heading_row(
+                    &mut items,
+                    y,
+                    &heading,
+                    COL_LABEL,
+                    &[("📋", CHIP_COPY_TR, true)],
+                    true,
+                    &mut need_w,
+                );
                 y += hh + 4;
 
                 let (tw, th) = measure(hdc, t, FONT_BODY, true, MAXW);
@@ -425,6 +509,8 @@ fn compute_layout(hwnd: HWND) -> Layout {
                     CHIP_TR_BASE,
                     &mut need_w,
                 );
+                panel_spans.push((block_start, y, COL_ACCENT_TR));
+                y += 6;
             } else if let Some(s) = &content.status {
                 let mut disp = s.clone();
                 if !content.error_only {
@@ -497,7 +583,16 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 y += th + 8;
                 need_w = need_w.max(tw + PAD * 2 + 4);
             } else if let Some(expl) = &content.explanation {
-                let hh = heading_row(&mut items, y, "【解説】", &[("解説コピー", CHIP_COPY, true)], &mut need_w);
+                let block_start = y;
+                let hh = heading_row(
+                    &mut items,
+                    y,
+                    "【解説】",
+                    COL_LABEL,
+                    &[("解説コピー", CHIP_COPY, true)],
+                    false,
+                    &mut need_w,
+                );
                 y += hh + 4;
 
                 let (tw, th) = measure(hdc, expl, FONT_BODY, false, MAXW);
@@ -511,6 +606,7 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 });
                 y += text_h + 8;
                 need_w = need_w.max(tw + PAD * 2 + 4);
+                panel_spans.push((block_start, y, COL_ACCENT_EXPLAIN));
             }
 
             let _ = ReleaseDC(Some(hwnd), hdc);
@@ -538,8 +634,17 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 });
             }
 
+            // ブロック(カード)の背景。見出しの少し上から本文の少し下までを1枚のカードにする。
+            let panels: Vec<Panel> = panel_spans
+                .iter()
+                .map(|(top, bottom, accent)| Panel {
+                    rect: RECT { left: PANEL_MARGIN, top: top - 6, right: w - PANEL_MARGIN, bottom: bottom - 2 },
+                    accent: *accent,
+                })
+                .collect();
+
             let display_h = y.min(800); // 画面に収まるように最大高さを制限
-            Layout { w, h: display_h, content_h: y, items }
+            Layout { w, h: display_h, content_h: y, items, panels }
         }
     })
 }
@@ -668,6 +773,36 @@ fn paint(hwnd: HWND) {
         SetBkMode(mem, TRANSPARENT);
 
         let sy = CONTENT.with(|c| c.borrow().scroll_y);
+
+        // ブロック(カード)の背景を先に描画し、境界を見出し・本文より分かりやすくする。
+        LAYOUT.with(|l| {
+            for panel in &l.borrow().panels {
+                let mut r = panel.rect;
+                r.top -= sy;
+                r.bottom -= sy;
+                let panel_bg = CreateSolidBrush(COLORREF(COL_PANEL_BG));
+                let panel_pen = CreatePen(PS_SOLID, 1, COLORREF(COL_PANEL_BORDER));
+                let old_brush = SelectObject(mem, HGDIOBJ(panel_bg.0));
+                let old_pen = SelectObject(mem, HGDIOBJ(panel_pen.0));
+                let _ = RoundRect(mem, r.left, r.top, r.right, r.bottom, PANEL_RADIUS, PANEL_RADIUS);
+                SelectObject(mem, old_brush);
+                SelectObject(mem, old_pen);
+                let _ = DeleteObject(HGDIOBJ(panel_bg.0));
+                let _ = DeleteObject(HGDIOBJ(panel_pen.0));
+
+                // 左端のアクセントバーでブロックの種類を色分けする
+                let accent_rect = RECT {
+                    left: r.left + 2,
+                    top: r.top + 5,
+                    right: r.left + 2 + ACCENT_W,
+                    bottom: r.bottom - 5,
+                };
+                let accent_brush = CreateSolidBrush(COLORREF(panel.accent));
+                FillRect(mem, &accent_rect, accent_brush);
+                let _ = DeleteObject(HGDIOBJ(accent_brush.0));
+            }
+        });
+
         LAYOUT.with(|l| {
             for item in &l.borrow().items {
                 match item {
