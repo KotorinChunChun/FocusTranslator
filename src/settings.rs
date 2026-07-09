@@ -130,7 +130,7 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
         // 全項目の高さ(1150px)が画面に収まらない環境で「ログビューアを開く」等の
         // 下部ボタンが画面外に隠れないよう、画面の高さに収まる位置・高さへ調整する。
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let (win_y, win_h) = (10, 1176.min(screen_h - 40));
+        let (win_y, win_h) = (10, 1150.min(screen_h - 40));
         if let Ok(h) = CreateWindowExW(
             WS_EX_TOPMOST,
             class,
@@ -161,11 +161,16 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     let mut y = 14;
     let step = 32;
 
-    label(h, inst, "ホールドキー", lx, y + 2, 150);
-    combo(h, inst, cx, y, 120, IDC_HOLDKEY);
+    // キャプチャキー(実際の翻訳ホールドキー): キー選択 + 領域表示(デバッグ用枠表示)の有効化 + 監視周期
+    label(h, inst, "キャプチャキー", lx, y + 2, 100);
+    combo(h, inst, cx, y, 90, IDC_HOLDKEY);
+    checkbox(h, inst, "領域表示", cx + 98, y + 2, 88, IDC_DETECT_MODE);
+    label(h, inst, "監視周期", cx + 192, y + 2, 62);
+    edit(h, inst, cx + 254, y, 56, IDC_POLL);
     y += step;
-    label(h, inst, "監視周期 (ms)", lx, y + 2, 150);
-    edit(h, inst, cx, y, 80, IDC_POLL);
+    // プレビューキー: 実際の翻訳は行わず、検出範囲の枠表示だけを確認できるキー (既定 LCtrl)
+    label(h, inst, "プレビューキー", lx, y + 2, 100);
+    combo(h, inst, cx, y, 90, IDC_DETECT_KEY);
     y += step;
     label(h, inst, "範囲指定ホットキー", lx, y + 2, 160);
     edit(h, inst, cx, y, 120, IDC_HOTKEY);
@@ -258,11 +263,6 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     label(h, inst, "保持上限", cx + 130, y + 2, 60);
     edit(h, inst, cx + 190, y, 60, IDC_LOG_MAX);
     button(h, inst, "ログビューアを開く", cx + 256, y - 2, 110, IDC_OPEN_LOG);
-    y += 26;
-    // 領域検出モード (デバッグ): 検出キー押下中に検出範囲を枠表示する
-    checkbox(h, inst, "領域検出モード (検出範囲を枠表示)", lx, y, 270, IDC_DETECT_MODE);
-    label(h, inst, "キー", cx + 130, y + 2, 40);
-    combo(h, inst, cx + 176, y, 100, IDC_DETECT_KEY);
     y += step;
     button(h, inst, "外部送信の同意状態をリセット", lx, y, 220, IDC_CONSENT_RESET);
     y += step;

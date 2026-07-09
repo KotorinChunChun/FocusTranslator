@@ -294,13 +294,18 @@ pub fn tick() {
     tick_detect();
 }
 
-/// 領域検出モード (デバッグ) のポーリング: 検出キー押下中はオーバーレイを表示し、
+/// 領域検出モード (デバッグ) のポーリング: プレビューキー(既定LCtrl)または
+/// キャプチャキー(既定RCtrl。実際の翻訳ホールドと兼用)の押下中はオーバーレイを表示し、
 /// 検出スレッドを1本ずつ回して結果 (WM_APP_DETECT) で枠表示を更新し続ける。
+/// 「領域表示」設定でON/OFFする(既定OFF)。
 fn tick_detect() {
     // (表示開始するインスタンス, 検出を開始する main HWND, 非表示にするか)
     let action = with_app(|app| {
         let down = app.cfg.detect_enabled
-            && unsafe { (GetAsyncKeyState(app.cfg.detect_vk()) as u16 & 0x8000) != 0 };
+            && unsafe {
+                (GetAsyncKeyState(app.cfg.detect_vk()) as u16 & 0x8000) != 0
+                    || (GetAsyncKeyState(app.cfg.hold_vk()) as u16 & 0x8000) != 0
+            };
         if !down {
             if app.detect_on {
                 app.detect_on = false;

@@ -116,9 +116,11 @@ pub struct Config {
     pub log_enabled: bool,
     /// デバッグモード: OCR時にキャプチャ画像をPNG保存 (既定OFF)
     pub debug_mode: bool,
-    /// 領域検出モード: 検出キー押下中、UIA要素やキャプチャ帯を枠表示する (既定OFF)
+    /// 領域表示: プレビューキーまたはキャプチャキー(hold_key)押下中、
+    /// UIA要素やキャプチャ範囲を枠表示するデバッグ機能 (既定OFF)
     pub detect_enabled: bool,
-    /// 領域検出モードのキー (hold_key と同じ表記、既定 LCtrl)
+    /// プレビューキー: 実際の翻訳は行わず、検出範囲の枠表示だけを確認できるキー
+    /// (hold_key と同じ表記、既定 LCtrl)
     pub detect_key: String,
     /// 認識ログの保持上限件数
     pub log_max_records: u32,
@@ -258,12 +260,12 @@ impl Config {
             .replace("{{glossary}}", &self.glossary_prompt())
     }
 
-    /// ホールドキーの仮想キーコード
+    /// キャプチャキー(ホールドキー)の仮想キーコード
     pub fn hold_vk(&self) -> i32 {
         key_vk(&self.hold_key)
     }
 
-    /// 領域検出モードのキーの仮想キーコード
+    /// プレビューキーの仮想キーコード
     pub fn detect_vk(&self) -> i32 {
         key_vk(&self.detect_key)
     }

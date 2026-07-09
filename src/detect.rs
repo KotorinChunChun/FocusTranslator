@@ -1,8 +1,9 @@
-// 領域検出モード (デバッグ用): 検出キー(既定 左Ctrl)を押している間、プログラムが
-// 認識に使う領域 — 対象ウィンドウ / OCRキャプチャ帯 / UIA要素・行矩形 — を
+// 領域表示 (デバッグ用): プレビューキー(既定 左Ctrl。実際の翻訳は行わない)、
+// またはキャプチャキー(既定 右Ctrl。実際の翻訳ホールドと兼用)を押している間、
+// プログラムが認識に使う領域 — 対象ウィンドウ / OCRキャプチャ帯 / UIA要素・行矩形 — を
 // クリック透過・最前面の全画面オーバーレイに枠表示する。
-// 実際の認識経路と同じ uia::probe_at_point / capture::band_screen_rect /
-// worker::BAND_W/H を使い、検出結果を忠実に可視化する。
+// 実際の認識経路と同じ uia::probe_at_point / worker::plan_capture_rect を使い、
+// 検出結果を忠実に可視化する。
 use crate::{capture, uia, worker};
 use std::cell::RefCell;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
