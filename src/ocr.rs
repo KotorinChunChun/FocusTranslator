@@ -21,6 +21,9 @@ pub struct OcrOutput {
     /// LLM統合モードのトークン数(ログDB用)
     pub tokens_in: Option<i64>,
     pub tokens_out: Option<i64>,
+    /// Paragraph モード時のカーソル直下1行 (Windows OCR のみ)。
+    /// UIA Name からの段落復元 (worker::paragraph_from_text) の検索キーに使う。
+    pub focus_line: Option<String>,
 }
 
 impl OcrOutput {
@@ -53,7 +56,11 @@ impl Focus {
 /// 指定エンジンでOCRを実行する。
 pub fn run(engine: &str, cfg: &Config, img: &Captured, focus: Focus) -> Result<OcrOutput, String> {
     match engine {
-        "win" => ocr_windows(img, focus).map(OcrOutput::text_only),
+        "win" => ocr_windows(img, focus).map(|(text, focus_line)| OcrOutput {
+            text,
+            focus_line,
+            ..Default::default()
+        }),
         "paddle" => {
             if crate::paddle_install::installed() {
                 // PaddleOCR は段落境界推定が未対応のため、Paragraph は帯内全行の結合で近似する
@@ -69,8 +76,9 @@ pub fn run(engine: &str, cfg: &Config, img: &Captured, focus: Focus) -> Result<O
     }
 }
 
-/// Windows.Media.Ocr によるローカルOCR
-pub fn ocr_windows(img: &Captured, focus: Focus) -> Result<String, String> {
+/// Windows.Media.Ocr によるローカルOCR。
+/// 戻り値: (採用テキスト, Paragraphモード時のカーソル直下1行)
+pub fn ocr_windows(img: &Captured, focus: Focus) -> Result<(String, Option<String>), String> {
     let engine = OcrEngine::TryCreateFromUserProfileLanguages()
         .map_err(|_| "OCRエンジンを初期化できません(言語パック未導入の可能性)".to_string())?;
     let ibuf = CryptographicBuffer::CreateFromByteArray(&img.bgra)
@@ -131,18 +139,18 @@ pub fn ocr_windows(img: &Captured, focus: Focus) -> Result<String, String> {
                     best = it;
                 }
             }
-            Ok(normalize_line(&best.2))
+            Ok((normalize_line(&best.2), None))
         }
         Focus::Paragraph(fy) => {
             // カーソル行から行間ギャップの小さい隣接行へ広げ、段落として結合する
-            let texts: Vec<String> =
-                paragraph_at(&items, fy).iter().map(|i| normalize_line(&i.2)).collect();
-            Ok(join_paragraph(&texts))
+            let (para, focus_line) = paragraph_at(&items, fy);
+            let texts: Vec<String> = para.iter().map(|i| normalize_line(&i.2)).collect();
+            Ok((join_paragraph(&texts), Some(normalize_line(focus_line))))
         }
         Focus::All => {
             // 複数行を段落として結合(範囲指定モード)
             let texts: Vec<String> = items.iter().map(|i| normalize_line(&i.2)).collect();
-            Ok(join_paragraph(&texts))
+            Ok((join_paragraph(&texts), None))
         }
     }
 }
@@ -153,7 +161,8 @@ fn line_cy(item: &(f32, f32, String)) -> f32 {
 
 /// fy を含む(最も近い)行を起点に、行間ギャップが小さい隣接行へ上下に広げて段落を切り出す。
 /// 折返しの行間は行高より十分小さく、段落間の空きは行高程度以上あることを利用する。
-fn paragraph_at(items: &[(f32, f32, String)], fy: f32) -> &[(f32, f32, String)] {
+/// 戻り値: (段落の行スライス, カーソル直下の行テキスト)
+fn paragraph_at(items: &[(f32, f32, String)], fy: f32) -> (&[(f32, f32, String)], &str) {
     let mut focus = 0;
     for (i, it) in items.iter().enumerate() {
         if (line_cy(it) - fy).abs() < (line_cy(&items[focus]) - fy).abs() {
@@ -174,7 +183,7 @@ fn paragraph_at(items: &[(f32, f32, String)], fy: f32) -> &[(f32, f32, String)] 
     while end + 1 < items.len() && items[end + 1].0 - items[end].1 <= gap_limit {
         end += 1;
     }
-    &items[start..=end]
+    (&items[start..=end], &items[focus].2)
 }
 
 /// Windows OCR は CJK でも単語間に空白を入れることがあるため整形する
@@ -320,5 +329,6 @@ pub fn llm_ocr_translate(cfg: &Config, img: &Captured, focus: Focus) -> Result<O
         raw_response: Some(crate::translate::mask_keys(cfg, &res.response_json)),
         tokens_in: res.tokens_in,
         tokens_out: res.tokens_out,
+        focus_line: None,
     })
 }

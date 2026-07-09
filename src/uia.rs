@@ -8,7 +8,7 @@ use windows::Win32::System::Ole::{
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern,
-    IUIAutomationTextRange, TextUnit_Line, UIA_TextPatternId,
+    IUIAutomationTextRange, TextUnit_Line, TextUnit_Paragraph, UIA_TextPatternId,
     UIA_DocumentControlTypeId, UIA_EditControlTypeId,
 };
 use windows::core::Interface;
@@ -60,6 +60,21 @@ fn find_text_hit(auto: &IUIAutomation, el: IUIAutomationElement, pt: POINT) -> O
                     }
 
                     if let Ok(range) = tp.RangeFromPoint(pt) {
+                        // まず段落単位で拡張する: 右端で折り返された文も改行を跨いで
+                        // 1つの段落として正確に取れる (ユーザー要望)。
+                        // 取れない・長すぎる場合は従来の行単位へフォールバック。
+                        if let Ok(para) = range.Clone() {
+                            let _ = para.ExpandToEnclosingUnit(TextUnit_Paragraph);
+                            if let Ok(t) = para.GetText(1200) {
+                                let s = t.to_string();
+                                let lines: Vec<String> =
+                                    s.lines().map(|l| l.trim().to_string()).collect();
+                                let joined = crate::ocr::join_paragraph(&lines);
+                                if !joined.is_empty() && joined.chars().count() <= 800 {
+                                    return Some(TextHit { element: e, range: Some(para), text: joined });
+                                }
+                            }
+                        }
                         let _ = range.ExpandToEnclosingUnit(TextUnit_Line);
                         if let Ok(text) = range.GetText(512) {
                             let s = text.to_string();
@@ -88,6 +103,10 @@ pub struct UiaProbe {
     pub node: String,
     /// 認識経路が返すはずのテキスト (UIA不可なら None → OCR経路)
     pub text: Option<String>,
+    /// TextPattern が無い直下要素の全テキスト (Name プロパティ)。
+    /// ブラウザ等ではテキストブロックの内容が入るため、OCRしたカーソル行を
+    /// この中から検索して正確な1段落を復元するのに使う (worker::paragraph_from_text)。
+    pub hover_text: Option<String>,
 }
 
 /// カーソル位置で line_at_point と同じ探索を行い、検出領域の矩形を返す (領域検出モード)。
@@ -99,6 +118,7 @@ pub fn probe_at_point(x: i32, y: i32) -> UiaProbe {
         line_rects: Vec::new(),
         node: String::new(),
         text: None,
+        hover_text: None,
     };
     unsafe {
         let Ok(auto) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {
@@ -110,13 +130,20 @@ pub fn probe_at_point(x: i32, y: i32) -> UiaProbe {
         };
         p.hover_rect = el.CurrentBoundingRectangle().ok();
         p.node = element_node_name(&el);
-        if let Some(hit) = find_text_hit(&auto, el, pt) {
+        if let Some(hit) = find_text_hit(&auto, el.clone(), pt) {
             p.element_rect = hit.element.CurrentBoundingRectangle().ok();
             p.node = element_node_name(&hit.element);
             if let Some(r) = &hit.range {
                 p.line_rects = range_rects(r);
             }
             p.text = Some(hit.text);
+        } else if let Ok(name) = el.CurrentName() {
+            // TextPattern なし: Name に要素の全テキストが入っていれば段落復元に使う
+            let s = name.to_string();
+            let t = s.trim();
+            if t.chars().count() >= 8 && t.chars().count() <= 10000 {
+                p.hover_text = Some(t.to_string());
+            }
         }
     }
     p

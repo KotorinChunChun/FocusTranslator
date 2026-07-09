@@ -175,8 +175,10 @@ pub const BAND_H: i32 = 160;
 /// UIA矩形とカーソルY座標の許容距離 (px)。これ以上離れた矩形は採用しない。
 const NEAR_Y_PX: i32 = 10;
 /// 直下要素(TextPatternなし)をそのままキャプチャする高さの上限 (px)。
-/// これより高い要素は段落帯 (要素幅 × カーソル中心 BAND_H) に切り替える。
+/// これより高い要素は段落帯 (要素幅 × カーソル中心 PARA_BAND_H) に切り替える。
 const HOVER_MAX_H: i32 = 320;
+/// 段落帯の高さ (px)。段落全体を拾えるよう既定帯より上下に広くとる。
+const PARA_BAND_H: i32 = 320;
 /// 採用した矩形に付ける余白 (px)。文字の欠けを防ぐ。
 const CAP_PAD: i32 = 6;
 
@@ -263,9 +265,9 @@ pub fn plan_capture_rect(p: &crate::uia::UiaProbe, win: &RECT, x: i32, y: i32) -
             if r.bottom - r.top > HOVER_MAX_H {
                 let band = RECT {
                     left: r.left,
-                    top: (y - BAND_H / 2).max(r.top),
+                    top: (y - PARA_BAND_H / 2).max(r.top),
                     right: r.right,
-                    bottom: (y + BAND_H / 2).min(r.bottom),
+                    bottom: (y + PARA_BAND_H / 2).min(r.bottom),
                 };
                 return (pad_clamp(&band, win), CapKind::HoverBand);
             }
@@ -281,6 +283,41 @@ fn focus_for(kind: CapKind, fy: f32) -> ocr::Focus {
         CapKind::HoverBand => ocr::Focus::Paragraph(fy),
         _ => ocr::Focus::Line(fy),
     }
+}
+
+/// 検索用の正規化: 空白を除去し小文字化する (OCRとUIA Nameの表記ゆれ吸収)
+fn normalize_for_match(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).flat_map(|c| c.to_lowercase()).collect()
+}
+
+/// 要素の全テキスト (UIA Name) から、OCRで得たカーソル直下1行に合致する段落を取り出す。
+/// 折返しは Name 上では改行にならないため、改行区切り=段落として扱える。
+/// これにより画像に写っていない折返し部分も含む正確な1段落が復元できる (ユーザー提案)。
+pub fn paragraph_from_text(full: &str, ocr_line: &str) -> Option<String> {
+    let key = normalize_for_match(ocr_line);
+    if key.chars().count() < 4 {
+        return None;
+    }
+    // OCR誤認識に備え、行全体 → 先頭12文字 → 末尾12文字 の順で検索キーを緩める
+    let chars: Vec<char> = key.chars().collect();
+    let head: String = chars.iter().take(12).collect();
+    let tail: String = chars.iter().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect();
+    let mut keys: Vec<&str> = vec![&key];
+    if chars.len() > 12 {
+        keys.push(&head);
+        keys.push(&tail);
+    }
+    for k in keys {
+        if k.chars().count() < 6 && k != key {
+            continue;
+        }
+        for para in full.split(['\n', '\r']).map(str::trim).filter(|p| !p.is_empty()) {
+            if normalize_for_match(para).contains(k) {
+                return Some(para.to_string());
+            }
+        }
+    }
+    None
 }
 
 struct Band {
@@ -420,6 +457,14 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 used = wide;
             }
         }
+        // 段落帯: OCRしたカーソル直下行を直下要素の全テキスト (UIA Name) から検索し、
+        // 合致した段落で置き換える。画像外へ折り返された部分も正確に復元できる。
+        if let Ok(o) = &mut out
+            && let Some(full) = &probe.hover_text
+            && let Some(line) = &o.focus_line
+            && let Some(para) = paragraph_from_text(full, line) {
+                o.text = para;
+            }
         match out {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
@@ -487,6 +532,7 @@ pub fn reocr(
     std::thread::spawn(move || {
         init_com();
         let t0 = Instant::now();
+        let mut hover_text: Option<String> = None;
         let (image, focus) = match img {
             Some(i) => (i, focus),
             None => {
@@ -495,6 +541,7 @@ pub fn reocr(
                 match capture_probe(x, y, target, &probe) {
                     Ok((b, kind)) => {
                         let f = focus_for(kind, b.focus_y);
+                        hover_text = probe.hover_text;
                         (Arc::new(b.img), f)
                     }
                     Err(e) => {
@@ -505,7 +552,15 @@ pub fn reocr(
             }
         };
         let ctx = AppContext::capture(x, y, HWND(target as *mut _));
-        match ocr::run(&ocr_engine, &cfg, &image, focus) {
+        let mut result = ocr::run(&ocr_engine, &cfg, &image, focus);
+        // 段落帯の再キャプチャ時も、直下要素の全テキストから段落を復元する
+        if let Ok(o) = &mut result
+            && let Some(full) = &hover_text
+            && let Some(line) = &o.focus_line
+            && let Some(para) = paragraph_from_text(full, line) {
+                o.text = para;
+            }
+        match result {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("reocr {ocr_engine} {ms}ms"));
@@ -673,4 +728,42 @@ pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, prof
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::paragraph_from_text;
+
+    #[test]
+    fn 完全一致で段落を取り出せる() {
+        let full = "First paragraph here.\nThe quick brown fox jumps over the lazy dog and continues wrapping.\nThird paragraph.";
+        let got = paragraph_from_text(full, "quick brown fox jumps");
+        assert_eq!(got.as_deref(), Some("The quick brown fox jumps over the lazy dog and continues wrapping."));
+    }
+
+    #[test]
+    fn 空白やケースのゆれを吸収する() {
+        let full = "段落その一。\nこれは 折り返された テキストの段落です。長い文章が続きます。\n段落その三。";
+        // Windows OCR がCJKに空白を挟んでも一致する
+        let got = paragraph_from_text(full, "折り返された テキスト の段落");
+        assert_eq!(got.as_deref(), Some("これは 折り返された テキストの段落です。長い文章が続きます。"));
+    }
+
+    #[test]
+    fn 末尾が誤認識でも先頭キーで一致する() {
+        let full = "aaa\nAn example paragraph that wraps at the right edge of the view.\nbbb";
+        // 行末の誤認識 (edge→edqe) があっても先頭12文字で拾う
+        let got = paragraph_from_text(full, "An example paragraph that wraps at the right edqe");
+        assert_eq!(got.as_deref(), Some("An example paragraph that wraps at the right edge of the view."));
+    }
+
+    #[test]
+    fn 短すぎるキーは不採用() {
+        assert_eq!(paragraph_from_text("abc def ghi", "ab"), None);
+    }
+
+    #[test]
+    fn 一致しなければ_none() {
+        assert_eq!(paragraph_from_text("全く別のテキスト", "hello world example"), None);
+    }
 }
