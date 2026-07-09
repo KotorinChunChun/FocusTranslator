@@ -25,6 +25,8 @@ pub enum WorkerMsg {
         recog_id: Option<i64>,
         app_title: String,
         uia_path: String,
+        /// UIAパスの各ノード (ボタン化してオーバーレイに表示。クリックでOCRの代わりに採用)
+        uia_nodes: Vec<uia::UiaPathNode>,
     },
     Translation {
         text: String,
@@ -68,18 +70,44 @@ fn init_com() {
 struct AppContext {
     exe: Option<String>,
     title: String,
+    /// ログ・コピー・解説プロンプト用のパス文字列。子孫連結ノードがあれば全文を追記する
+    /// (ボタン表示は10文字程度に切り詰めるが、ログには常に全文を残すため)。
     uia_path: String,
+    /// UIAパスの各ノード (ボタン化してオーバーレイに表示。クリックでOCRの代わりに採用)
+    uia_nodes: Vec<uia::UiaPathNode>,
 }
 
 impl AppContext {
     fn capture(x: i32, y: i32, target: HWND) -> Self {
         let (exe, title) = util::get_window_context(target);
+        let uia_nodes = uia::path_nodes_at_point(x, y);
         AppContext {
             exe,
             title: title.unwrap_or_default(),
-            uia_path: uia::path_at_point(x, y),
+            uia_path: build_uia_path_log(&uia_nodes),
+            uia_nodes,
         }
     }
+}
+
+/// ログ・コピー用のパス文字列を組み立てる。祖先ノードのラベルを " > " で連結し、
+/// 子孫連結ノードがあれば末尾に全文(未省略)を追記する。
+fn build_uia_path_log(nodes: &[uia::UiaPathNode]) -> String {
+    let labels: Vec<&str> = nodes
+        .iter()
+        .filter(|n| n.kind == uia::NodeKind::Ancestor)
+        .map(|n| n.label.as_str())
+        .collect();
+    let mut s = labels.join(" > ");
+    if let Some(children) = nodes.iter().find(|n| n.kind == uia::NodeKind::ChildrenConcat)
+        && !children.text.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str("[子要素] ");
+            s.push_str(&children.text);
+        }
+    s
 }
 
 /// 認識ログを記録し recognition_id を返す(ログOFF時は None)。
@@ -430,6 +458,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 recog_id,
                 app_title: ctx.title,
                 uia_path: ctx.uia_path,
+                uia_nodes: ctx.uia_nodes,
             });
             translate(generation, cfg, text, tr_engine, main, recog_id);
             return;
@@ -485,6 +514,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                     recog_id,
                     app_title: ctx.title,
                     uia_path: ctx.uia_path,
+                    uia_nodes: ctx.uia_nodes,
                 });
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, &t0);
             }
@@ -580,6 +610,7 @@ pub fn reocr(
                     recog_id,
                     app_title: ctx.title,
                     uia_path: ctx.uia_path,
+                    uia_nodes: ctx.uia_nodes,
                 });
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, &t0);
             }
@@ -674,6 +705,7 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
                     recog_id,
                     app_title: ctx.title,
                     uia_path: ctx.uia_path,
+                    uia_nodes: ctx.uia_nodes,
                 });
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, &t0);
             }
@@ -732,7 +764,7 @@ pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, prof
 
 #[cfg(test)]
 mod tests {
-    use super::paragraph_from_text;
+    use super::{build_uia_path_log, paragraph_from_text};
 
     #[test]
     fn 完全一致で段落を取り出せる() {
@@ -765,5 +797,35 @@ mod tests {
     #[test]
     fn 一致しなければ_none() {
         assert_eq!(paragraph_from_text("全く別のテキスト", "hello world example"), None);
+    }
+
+    fn node(label: &str, text: &str, kind: crate::uia::NodeKind) -> crate::uia::UiaPathNode {
+        crate::uia::UiaPathNode { label: label.into(), text: text.into(), kind }
+    }
+
+    #[test]
+    fn 祖先ノードのみなら区切りで連結() {
+        use crate::uia::NodeKind::Ancestor;
+        let nodes = vec![node("Document", "", Ancestor), node("Edit", "", Ancestor), node("Pane1", "", Ancestor)];
+        assert_eq!(build_uia_path_log(&nodes), "Document > Edit > Pane1");
+    }
+
+    #[test]
+    fn 子孫連結ノードの全文を末尾に追記する() {
+        use crate::uia::NodeKind::{Ancestor, ChildrenConcat};
+        let nodes = vec![
+            node("Document", "", Ancestor),
+            node("子要素", "line1\nline2\nlong text that must not be truncated in the log", ChildrenConcat),
+        ];
+        let s = build_uia_path_log(&nodes);
+        assert!(s.starts_with("Document\n[子要素] "));
+        assert!(s.contains("long text that must not be truncated in the log"));
+    }
+
+    #[test]
+    fn 子孫連結が空なら追記しない() {
+        use crate::uia::NodeKind::{Ancestor, ChildrenConcat};
+        let nodes = vec![node("Document", "", Ancestor), node("子要素", "", ChildrenConcat)];
+        assert_eq!(build_uia_path_log(&nodes), "Document");
     }
 }

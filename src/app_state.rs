@@ -91,6 +91,8 @@ pub struct App {
     busy: bool,
     app_title: String,
     uia_path: String,
+    /// UIAパスの各ノード (オーバーレイでボタン化。クリックでOCRの代わりに採用)
+    uia_nodes: Vec<crate::uia::UiaPathNode>,
     /// 直近の認識が UIA 経路(OCR不要)で得られたか
     via_uia: bool,
     pub scroll_y: i32,
@@ -151,6 +153,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             busy: false,
             app_title: String::new(),
             uia_path: String::new(),
+            uia_nodes: Vec::new(),
             via_uia: false,
             scroll_y: 0,
             detect_on: false,
@@ -399,7 +402,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
         }
         app.busy = false; // ワーカー完了 (成否問わずロック解除)
         match msg {
-            worker::WorkerMsg::Source { text, method, engine, img, pin, anchor, focus, ms, recog_id, app_title, uia_path } => {
+            worker::WorkerMsg::Source { text, method, engine, img, pin, anchor, focus, ms, recog_id, app_title, uia_path, uia_nodes } => {
                 if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
                     return;
                 }
@@ -419,6 +422,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.recog_id = recog_id;
                 app.app_title = app_title;
                 app.uia_path = uia_path;
+                app.uia_nodes = uia_nodes;
                 app.scroll_y = 0; // 新しいテキストの時はスクロールをリセット
 
                 if pin {
@@ -721,6 +725,30 @@ pub fn handle_chip(id: usize) {
         .unwrap_or(0);
         let cfg2 = Config::load();
         worker::retranslate(new_gen, key, cfg2, source, main, recog_id);
+    } else if id >= overlay::CHIP_UIA_NODE_BASE {
+        // UIAパスノード選択 (ユーザー要望): そのノード自身(または末端要素の子孫連結)の
+        // 全文テキストを、OCRの代わりに原文として採用し、現在の翻訳エンジンで再翻訳する。
+        let idx = id - overlay::CHIP_UIA_NODE_BASE;
+        let Some(text) = with_app(|app| app.uia_nodes.get(idx).map(|n| n.text.trim().to_string()))
+            .flatten()
+            .filter(|t| !t.is_empty())
+        else {
+            return;
+        };
+        let new_gen = with_app(|app| {
+            app.generation += 1;
+            app.mode = Mode::Pinned;
+            app.source = text.clone();
+            app.via_uia = true;
+            app.translation = None;
+            app.status = Some("翻訳中…".into());
+            app.busy = true;
+            sync_overlay(app);
+            app.generation
+        })
+        .unwrap_or(0);
+        let cfg2 = Config::load();
+        worker::retranslate(new_gen, cur_tr, cfg2, text, main, recog_id);
     }
 }
 
@@ -858,7 +886,7 @@ fn sync_overlay(app: &mut App) {
         explaining: app.explaining,
         error_only: app.error_only,
         app_title: app.app_title.clone(),
-        uia_path: app.uia_path.clone(),
+        uia_nodes: app.uia_nodes.clone(),
         scroll_y: app.scroll_y,
         has_image: app.last_img.is_some(),
         busy: app.busy,

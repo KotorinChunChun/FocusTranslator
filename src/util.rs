@@ -105,6 +105,16 @@ pub fn dpapi_decrypt(enc_b64: &str) -> String {
     }
 }
 
+/// 文字数で切り詰め、超過分は "…" で省略する(ボタン表示等の短縮用)
+pub fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max_chars).collect();
+        format!("{t}…")
+    }
+}
+
 /// 日本語・中国語圏の文字を含むか(翻訳方向の推定用)
 pub fn contains_cjk(s: &str) -> bool {
     s.chars().any(|c| {

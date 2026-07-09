@@ -183,31 +183,127 @@ fn first_meaningful_line(s: &str) -> String {
     s.lines().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("").to_string()
 }
 
-/// カーソル位置の要素のUIAパス(親→子順に AutomationId / Name / ControlType を連結)を取得する。
-/// 解説機能の同一コンテキスト判定キーに使う (SPEC v0.2 §2.3.1)。
-pub fn path_at_point(x: i32, y: i32) -> String {
+/// パスノードの種別。祖先ノード(パス階層)か、末端ノードの子孫テキストを連結した合成ノードか。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NodeKind {
+    /// 祖先要素 (AutomationId/Name/ControlType のパス階層)
+    Ancestor,
+    /// カーソル直下の末端要素の子孫テキストをすべて連結した合成ノード
+    ChildrenConcat,
+}
+
+/// UIAパスの1ノード。ボタン化・クリック時のテキスト採用・ログ記録に使う。
+#[derive(Clone, Debug)]
+pub struct UiaPathNode {
+    /// ボタン表示用の短い識別ラベル (AutomationId/Name/ControlType)。
+    /// text が空の場合のフォールバック表示にも使う。
+    pub label: String,
+    /// このノードから抽出したテキスト (クリック時に原文として採用する全文)
+    pub text: String,
+    pub kind: NodeKind,
+}
+
+/// 子孫走査の上限(パフォーマンスと無関係テキスト混入の抑制のため)
+const DESC_MAX_DEPTH: u32 = 6;
+const DESC_MAX_NODES: usize = 200;
+const DESC_MAX_CHARS: usize = 4000;
+
+/// カーソル位置の要素のUIAパスノード列を取得する。
+/// 祖先方向に最大5段(AutomationId/Name/ControlTypeの短い識別子 + そのノード自身から
+/// 抽出したテキスト)を積み、末尾にカーソル直下の末端要素の子孫テキストを再帰的に
+/// 走査して1行ずつ連結した合成ノードを追加する (ボタン化してOCRの代わりに採用するため)。
+/// 解説機能の同一コンテキスト判定キーや認識ログにも使う (SPEC v0.2 §2.3.1)。
+pub fn path_nodes_at_point(x: i32, y: i32) -> Vec<UiaPathNode> {
     unsafe {
         let Ok(auto) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {
-            return String::new();
+            return Vec::new();
         };
         let Ok(el) = auto.ElementFromPoint(POINT { x, y }) else {
-            return String::new();
+            return Vec::new();
         };
         let Ok(walker) = auto.ControlViewWalker() else {
-            return String::new();
+            return Vec::new();
         };
+        let leaf = el.clone();
         let mut path = Vec::new();
         let mut cur = Some(el);
         for _ in 0..5 {
             let Some(e) = cur.clone() else { break };
             let name = element_node_name(&e);
             if !name.is_empty() {
-                path.push(name);
+                let text = element_own_text(&e);
+                path.push(UiaPathNode { label: name, text, kind: NodeKind::Ancestor });
             }
             cur = walker.GetParentElement(&e).ok();
         }
         path.reverse();
-        path.join(" > ")
+
+        let mut lines = Vec::new();
+        let mut visited = DESC_MAX_NODES;
+        let mut budget = DESC_MAX_CHARS;
+        let mut seen = std::collections::HashSet::new();
+        collect_descendant_texts(&walker, &leaf, DESC_MAX_DEPTH, &mut visited, &mut budget, &mut seen, &mut lines);
+        if !lines.is_empty() {
+            path.push(UiaPathNode {
+                label: "子要素".into(),
+                text: lines.join("\n"),
+                kind: NodeKind::ChildrenConcat,
+            });
+        }
+        path
+    }
+}
+
+/// 要素自身のテキストを抽出する。TextPattern があれば全文、無ければ Name を使う。
+fn element_own_text(e: &IUIAutomationElement) -> String {
+    unsafe {
+        if let Ok(unk) = e.GetCurrentPattern(UIA_TextPatternId)
+            && let Ok(tp) = unk.cast::<IUIAutomationTextPattern>()
+            && let Ok(doc) = tp.DocumentRange()
+            && let Ok(t) = doc.GetText(4000) {
+                let s = t.to_string();
+                let s = s.trim();
+                if !s.is_empty() {
+                    return s.to_string();
+                }
+            }
+        e.CurrentName().map(|n| n.to_string().trim().to_string()).unwrap_or_default()
+    }
+}
+
+/// parent の子孫を深さ優先で走査し、各ノード自身のテキスト(element_own_text)を1行ずつ集める。
+/// depth・件数・総文字数の上限で打ち切り、親と同一のテキストは重複除外する
+/// (アクセシビリティツリーでは親のNameが単一の子の集約になっていることが多いため)。
+#[allow(clippy::too_many_arguments)]
+fn collect_descendant_texts(
+    walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
+    parent: &IUIAutomationElement,
+    depth: u32,
+    visited: &mut usize,
+    budget: &mut usize,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    if depth == 0 || *visited == 0 || *budget == 0 {
+        return;
+    }
+    let mut cur = unsafe { walker.GetFirstChildElement(parent).ok() };
+    while let Some(e) = cur {
+        if *visited == 0 || *budget == 0 {
+            break;
+        }
+        *visited -= 1;
+        let t = element_own_text(&e);
+        if !t.is_empty() && seen.insert(t.clone()) {
+            let take = t.chars().count().min(*budget);
+            let s: String = t.chars().take(take).collect();
+            *budget -= take;
+            if !s.is_empty() {
+                out.push(s);
+            }
+        }
+        collect_descendant_texts(walker, &e, depth - 1, visited, budget, seen, out);
+        cur = unsafe { walker.GetNextSiblingElement(&e).ok() };
     }
 }
 

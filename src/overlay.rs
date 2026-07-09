@@ -37,6 +37,8 @@ pub const CHIP_SETTINGS: usize = 105;
 pub const CHIP_PIN: usize = 106;
 pub const CHIP_IMAGE: usize = 107;
 pub const CHIP_COPY_INFO: usize = 108;
+/// UIAパスノードのボタンID基点(祖先ノード最大5 + 子孫連結ノード1の範囲を確保)
+pub const CHIP_UIA_NODE_BASE: usize = 200;
 
 pub const OCR_KEYS: [&str; 5] = ["win", "paddle", "yomitoku", "ndl", "llm"];
 pub const OCR_LABELS: [&str; 5] = ["Win", "Paddle", "YomiToku", "NDL", "LLM(統合)"];
@@ -69,7 +71,9 @@ pub struct OverlayContent {
     pub explaining: bool,
     pub error_only: bool,
     pub app_title: String,
-    pub uia_path: String,
+    /// UIAパスの各ノード。クリックでOCRの代わりにそのノードのテキストを原文として採用する
+    /// (末尾は末端要素の子孫テキストを連結した合成ノードの場合がある)。
+    pub uia_nodes: Vec<crate::uia::UiaPathNode>,
     pub scroll_y: i32,
     /// OCR対象画像を保持しているか (「OCR対象画像」ボタンの表示条件)
     pub has_image: bool,
@@ -389,8 +393,8 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 *y += CHIP_H + 6;
             };
 
-            // 【入力内容】: 対象アプリ情報 + OCR対象画像ボタン。コピーは見出しラベルの左端。
-            if !content.app_title.is_empty() || content.has_image {
+            // 【入力内容】: 対象アプリ情報 + UIAパスノードボタン + OCR対象画像ボタン。コピーは見出しラベルの左端。
+            if !content.app_title.is_empty() || content.has_image || !content.uia_nodes.is_empty() {
                 let block_start = y;
                 let hh = heading_row(
                     &mut items,
@@ -404,11 +408,7 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 y += hh + 4;
 
                 if !content.app_title.is_empty() {
-                    let mut info = format!("対象: {}", content.app_title);
-                    if !content.uia_path.is_empty() {
-                        info.push_str("\r\nパス: ");
-                        info.push_str(&content.uia_path);
-                    }
+                    let info = format!("対象: {}", content.app_title);
                     // 右上のピン/閉じるボタンと重ならないよう幅を控える
                     let info_w = MAXW - (CLOSE_SIZE * 2 + 14);
                     let (tw, th) = measure(hdc, &info, FONT_INFO, false, info_w);
@@ -421,6 +421,34 @@ fn compute_layout(hwnd: HWND) -> Layout {
                     });
                     y += th + 4;
                     need_w = need_w.max(tw + PAD * 2 + 4);
+                }
+
+                // UIAパスの各ノードをボタン化: クリックでOCRの代わりにそのテキストを原文採用する。
+                // キャプションは抽出テキストの先頭10文字程度(無ければノード識別ラベル)、
+                // 現在の原文と一致するノードは選択中として強調表示する。
+                if !content.uia_nodes.is_empty() {
+                    let mut x = PAD;
+                    for (i, node) in content.uia_nodes.iter().enumerate() {
+                        let node_text = node.text.trim();
+                        let has_text = !node_text.is_empty();
+                        let lab = if has_text {
+                            crate::util::truncate_chars(node_text, 10)
+                        } else {
+                            node.label.clone()
+                        };
+                        let (cw, _) = measure(hdc, &lab, FONT_CHIP, false, 160);
+                        let w = cw + 18;
+                        items.push(Item::Chip {
+                            rect: RECT { left: x, top: y, right: x + w, bottom: y + CHIP_H },
+                            label: lab,
+                            id: CHIP_UIA_NODE_BASE + i,
+                            active: has_text && node_text == content.source.trim(),
+                            enabled: has_text,
+                        });
+                        x += w + 6;
+                    }
+                    need_w = need_w.max(x + PAD - 6);
+                    y += CHIP_H + 6;
                 }
 
                 if content.has_image {

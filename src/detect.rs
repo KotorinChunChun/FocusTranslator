@@ -173,7 +173,7 @@ pub fn probe(main: isize) {
         if let Some(text) = &p.text {
             info.uia_element = p.element_rect;
             info.uia_lines = p.line_rects;
-            info.label = format!("UIA: {} | {}", p.node, truncate(text, 40));
+            info.label = format!("UIA: {} | {}", p.node, crate::util::truncate_chars(text, 40));
         } else if p.hover_rect.is_some() {
             info.hover_rect = p.hover_rect;
             info.label = format!("UIA: {} (TextPatternなし)", p.node);
@@ -193,15 +193,6 @@ pub fn probe(main: isize) {
             );
         }
     });
-}
-
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(max_chars).collect();
-        format!("{t}…")
-    }
 }
 
 /// スクリーン座標の矩形をウィンドウ(仮想スクリーン)座標へ変換
