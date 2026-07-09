@@ -168,6 +168,10 @@ fn effective_translator(cfg: &Config) -> String {
     if allowed { e.to_string() } else { "local".to_string() }
 }
 
+/// ホールド認識で切り出すカーソル周辺帯のサイズ (px)。領域検出モードの枠表示と共用。
+pub const BAND_W: i32 = 1200;
+pub const BAND_H: i32 = 160;
+
 struct Band {
     img: Captured,
     focus_y: f32,
@@ -237,7 +241,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
 
             // OCRは行っていないが、後でOCRエンジンへ切り替えた際に再キャプチャ不要で使えるよう、
             // また認識ログにも紐づけられるよう、この時点で注目行周辺の帯画像を撮影しておく。
-            let band = capture_band(x, y, target, 1200, 160).ok();
+            let band = capture_band(x, y, target, BAND_W, BAND_H).ok();
             let log_img: Option<Captured> =
                 band.as_ref().map(|b| ocr::crop_for_focus(&b.img, Some(b.focus_y)).into_owned());
             let focus_y = band.as_ref().map(|b| b.focus_y);
@@ -266,7 +270,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
 
         // 経路B: WGC + 帯OCR
         let engine = effective_ocr(&cfg);
-        let band = match capture_band(x, y, target, 1200, 160) {
+        let band = match capture_band(x, y, target, BAND_W, BAND_H) {
             Ok(b) => b,
             Err(e) => {
                 log_recog(&cfg, "hold", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, &ctx);
@@ -352,7 +356,7 @@ pub fn reocr(
         let t0 = Instant::now();
         let (image, last_focus_y) = match img {
             Some(i) => (i, focus_y),
-            None => match capture_band(x, y, target, 1200, 160) {
+            None => match capture_band(x, y, target, BAND_W, BAND_H) {
                 Ok(b) => (Arc::new(b.img), Some(b.focus_y)),
                 Err(e) => {
                     post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: None });

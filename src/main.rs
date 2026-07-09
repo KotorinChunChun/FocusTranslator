@@ -6,6 +6,7 @@
 mod app_state;
 mod capture;
 mod config;
+mod detect;
 mod llm_api;
 mod logdb;
 mod logviewer;

@@ -116,6 +116,10 @@ pub struct Config {
     pub log_enabled: bool,
     /// デバッグモード: OCR時にキャプチャ画像をPNG保存 (既定OFF)
     pub debug_mode: bool,
+    /// 領域検出モード: 検出キー押下中、UIA要素やキャプチャ帯を枠表示する (既定OFF)
+    pub detect_enabled: bool,
+    /// 領域検出モードのキー (hold_key と同じ表記、既定 LCtrl)
+    pub detect_key: String,
     /// 認識ログの保持上限件数
     pub log_max_records: u32,
     /// ローカルONNX翻訳のモデル種別: "opus_mt" | "fugu_mt" | "nllb200"
@@ -165,6 +169,8 @@ impl Default for Config {
             perf_log: false,
             log_enabled: false,
             debug_mode: false,
+            detect_enabled: false,
+            detect_key: "LCtrl".into(),
             log_max_records: 5000,
             local_model_variant: "opus_mt".into(),
             glossary: Vec::new(),
@@ -254,13 +260,12 @@ impl Config {
 
     /// ホールドキーの仮想キーコード
     pub fn hold_vk(&self) -> i32 {
-        match self.hold_key.as_str() {
-            "LCtrl" => 0xA2,
-            "RShift" => 0xA1,
-            "RAlt" => 0xA5,
-            "F8" => 0x77,
-            _ => 0xA3, // RCtrl
-        }
+        key_vk(&self.hold_key)
+    }
+
+    /// 領域検出モードのキーの仮想キーコード
+    pub fn detect_vk(&self) -> i32 {
+        key_vk(&self.detect_key)
     }
 
     /// 範囲指定ホットキーの (修飾キー, 仮想キー)。解析失敗時は Ctrl+Alt+T。
@@ -289,6 +294,17 @@ impl Config {
             "google" => !self.google_key_enc.is_empty(),
             _ => false,
         }
+    }
+}
+
+/// キー名(ホールドキー/検出キー共通の表記) → 仮想キーコード
+fn key_vk(name: &str) -> i32 {
+    match name {
+        "LCtrl" => 0xA2,
+        "RShift" => 0xA1,
+        "RAlt" => 0xA5,
+        "F8" => 0x77,
+        _ => 0xA3, // RCtrl
     }
 }
 

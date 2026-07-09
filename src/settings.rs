@@ -68,6 +68,8 @@ const IDC_GLOSSARY: i32 = 141;
 const IDC_PROF_PROMPT_OCR: i32 = 142;
 const IDC_PROF_PROMPT_TR: i32 = 143;
 const IDC_PROF_PROMPT_EXP: i32 = 144;
+const IDC_DETECT_MODE: i32 = 145;
+const IDC_DETECT_KEY: i32 = 146;
 
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
@@ -128,7 +130,7 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
         // 全項目の高さ(1150px)が画面に収まらない環境で「ログビューアを開く」等の
         // 下部ボタンが画面外に隠れないよう、画面の高さに収まる位置・高さへ調整する。
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let (win_y, win_h) = (10, 1150.min(screen_h - 40));
+        let (win_y, win_h) = (10, 1176.min(screen_h - 40));
         if let Ok(h) = CreateWindowExW(
             WS_EX_TOPMOST,
             class,
@@ -256,6 +258,11 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     label(h, inst, "保持上限", cx + 130, y + 2, 60);
     edit(h, inst, cx + 190, y, 60, IDC_LOG_MAX);
     button(h, inst, "ログビューアを開く", cx + 256, y - 2, 110, IDC_OPEN_LOG);
+    y += 26;
+    // 領域検出モード (デバッグ): 検出キー押下中に検出範囲を枠表示する
+    checkbox(h, inst, "領域検出モード (検出範囲を枠表示)", lx, y, 270, IDC_DETECT_MODE);
+    label(h, inst, "キー", cx + 130, y + 2, 40);
+    combo(h, inst, cx + 176, y, 100, IDC_DETECT_KEY);
     y += step;
     button(h, inst, "外部送信の同意状態をリセット", lx, y, 220, IDC_CONSENT_RESET);
     y += step;
@@ -420,6 +427,13 @@ fn populate(h: HWND) {
     check_set(h, IDC_PERFLOG, cfg.perf_log);
     check_set(h, IDC_LOG_ENABLED, cfg.log_enabled);
     check_set(h, IDC_DEBUG_MODE, cfg.debug_mode);
+    check_set(h, IDC_DETECT_MODE, cfg.detect_enabled);
+    combo_fill(
+        h,
+        IDC_DETECT_KEY,
+        &HOLD_KEYS,
+        HOLD_KEYS.iter().position(|k| *k == cfg.detect_key).unwrap_or(1), // 既定 LCtrl
+    );
     set_text(h, IDC_LOG_MAX, &cfg.log_max_records.to_string());
     let glossary_text = cfg.glossary.iter().map(|e| format!("{}={}", e.source, e.target)).collect::<Vec<_>>().join("\r\n");
     set_text(h, IDC_GLOSSARY, &glossary_text);
@@ -599,6 +613,8 @@ fn save(h: HWND) {
     cfg.perf_log = check_get(h, IDC_PERFLOG);
     cfg.log_enabled = check_get(h, IDC_LOG_ENABLED);
     cfg.debug_mode = check_get(h, IDC_DEBUG_MODE);
+    cfg.detect_enabled = check_get(h, IDC_DETECT_MODE);
+    cfg.detect_key = HOLD_KEYS[combo_sel(h, IDC_DETECT_KEY).min(HOLD_KEYS.len() - 1)].to_string();
     cfg.log_max_records = get_text(h, IDC_LOG_MAX).trim().parse().unwrap_or(5000).clamp(100, 100000);
     
     let glos_text = get_text(h, IDC_GLOSSARY);

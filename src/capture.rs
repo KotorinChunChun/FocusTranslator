@@ -46,6 +46,18 @@ pub fn window_frame_rect(hwnd: HWND) -> RECT {
     }
 }
 
+/// OCRキャプチャ帯のスクリーン座標矩形 (領域検出モードの可視化用)。
+/// capture_band と同じ「カーソル中心 bw×bh」をウィンドウ矩形へクランプした領域。
+/// WGCフレームはウィンドウの物理ピクセルとほぼ1:1のため、スケールは1とみなす。
+pub fn band_screen_rect(win: &RECT, x: i32, y: i32, bw: i32, bh: i32) -> RECT {
+    RECT {
+        left: (x - bw / 2).max(win.left),
+        top: (y - bh / 2).max(win.top),
+        right: (x + bw / 2).min(win.right),
+        bottom: (y + bh / 2).min(win.bottom),
+    }
+}
+
 /// HWND を WGC でキャプチャして1フレーム取得する
 pub fn capture_window(hwnd: HWND) -> Result<Captured, String> {
     unsafe {

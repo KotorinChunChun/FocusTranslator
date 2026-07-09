@@ -3,6 +3,7 @@
 // カーソル近傍にオーバーレイ表示するタスクトレイ常駐ツール。
 use crate::capture;
 use crate::config::Config;
+use crate::detect;
 use crate::overlay;
 use crate::logviewer;
 use crate::region;
@@ -44,6 +45,7 @@ pub const WM_APP_WORKER: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP +
 pub const WM_APP_CHIP: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 3;
 pub const WM_APP_REGION: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 4;
 pub const WM_APP_CFG: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 5;
+pub const WM_APP_DETECT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 6;
 
 pub const TIMER_POLL: usize = 1;
 pub const HOTKEY_REGION: i32 = 1;
@@ -91,6 +93,10 @@ pub struct App {
     /// 直近の認識が UIA 経路(OCR不要)で得られたか
     via_uia: bool,
     pub scroll_y: i32,
+    /// 領域検出モード: 検出キー押下中でオーバーレイ表示中か
+    detect_on: bool,
+    /// 領域検出モード: 検出スレッドの実行中 (多重起動防止)
+    detect_busy: bool,
 }
 
 thread_local! {
@@ -146,6 +152,8 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             uia_path: String::new(),
             via_uia: false,
             scroll_y: 0,
+            detect_on: false,
+            detect_busy: false,
         });
     });
 }
@@ -189,6 +197,19 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         WM_APP_CFG => {
             reload_config(hwnd);
+            LRESULT(0)
+        }
+        WM_APP_DETECT => {
+            let info = unsafe { Box::from_raw(lparam.0 as *mut detect::DetectInfo) };
+            // 検出スレッド完了。キーが既に離されていれば結果は捨てる。
+            let showing = with_app(|app| {
+                app.detect_busy = false;
+                app.detect_on
+            })
+            .unwrap_or(false);
+            if showing {
+                detect::update(*info);
+            }
             LRESULT(0)
         }
         windows::Win32::UI::WindowsAndMessaging::WM_DESTROY => {
@@ -267,6 +288,52 @@ pub fn tick() {
 
     if let Some((generation, x, y, target, cfg, main)) = action {
         worker::recognize_cycle(generation, x, y, target, cfg, main);
+    }
+
+    tick_detect();
+}
+
+/// 領域検出モード (デバッグ) のポーリング: 検出キー押下中はオーバーレイを表示し、
+/// 検出スレッドを1本ずつ回して結果 (WM_APP_DETECT) で枠表示を更新し続ける。
+fn tick_detect() {
+    // (表示開始するインスタンス, 検出を開始する main HWND, 非表示にするか)
+    let action = with_app(|app| {
+        let down = app.cfg.detect_enabled
+            && unsafe { (GetAsyncKeyState(app.cfg.detect_vk()) as u16 & 0x8000) != 0 };
+        if !down {
+            if app.detect_on {
+                app.detect_on = false;
+                app.detect_busy = false;
+                return Some((None, None, true));
+            }
+            return None;
+        }
+        let show = if !app.detect_on {
+            app.detect_on = true;
+            Some(app.instance)
+        } else {
+            None
+        };
+        let probe = if !app.detect_busy {
+            app.detect_busy = true;
+            Some(app.main.0 as isize)
+        } else {
+            None
+        };
+        Some((show, probe, false))
+    })
+    .flatten();
+
+    if let Some((show, probe, hide)) = action {
+        if hide {
+            detect::hide();
+        }
+        if let Some(inst) = show {
+            detect::show(inst);
+        }
+        if let Some(main) = probe {
+            detect::probe(main);
+        }
     }
 }
 
