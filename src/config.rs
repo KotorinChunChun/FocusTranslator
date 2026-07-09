@@ -116,12 +116,14 @@ pub struct Config {
     pub log_enabled: bool,
     /// デバッグモード: OCR時にキャプチャ画像をPNG保存 (既定OFF)
     pub debug_mode: bool,
-    /// 領域表示: プレビューキーまたはキャプチャキー(hold_key)押下中、
-    /// UIA要素やキャプチャ範囲を枠表示するデバッグ機能 (既定OFF)
+    /// 領域表示 (キャプチャキー側): キャプチャキー(hold_key)押下中、UIA要素や
+    /// キャプチャ範囲を枠表示するデバッグ機能 (既定OFF)
     pub detect_enabled: bool,
     /// プレビューキー: 実際の翻訳は行わず、検出範囲の枠表示だけを確認できるキー
     /// (hold_key と同じ表記、既定 LCtrl)
     pub detect_key: String,
+    /// 領域表示 (プレビューキー側): プレビューキー(detect_key)押下中も枠表示するか (既定OFF)
+    pub preview_detect_enabled: bool,
     /// 認識ログの保持上限件数
     pub log_max_records: u32,
     /// ローカルONNX翻訳のモデル種別: "opus_mt" | "fugu_mt" | "nllb200"
@@ -173,6 +175,7 @@ impl Default for Config {
             debug_mode: false,
             detect_enabled: false,
             detect_key: "LCtrl".into(),
+            preview_detect_enabled: false,
             log_max_records: 5000,
             local_model_variant: "opus_mt".into(),
             glossary: Vec::new(),

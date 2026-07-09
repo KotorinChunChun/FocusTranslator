@@ -70,6 +70,7 @@ const IDC_PROF_PROMPT_TR: i32 = 143;
 const IDC_PROF_PROMPT_EXP: i32 = 144;
 const IDC_DETECT_MODE: i32 = 145;
 const IDC_DETECT_KEY: i32 = 146;
+const IDC_PREVIEW_DETECT_MODE: i32 = 147;
 
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
@@ -171,6 +172,7 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     // プレビューキー: 実際の翻訳は行わず、検出範囲の枠表示だけを確認できるキー (既定 LCtrl)
     label(h, inst, "プレビューキー", lx, y + 2, 100);
     combo(h, inst, cx, y, 90, IDC_DETECT_KEY);
+    checkbox(h, inst, "領域表示", cx + 98, y + 2, 88, IDC_PREVIEW_DETECT_MODE);
     y += step;
     label(h, inst, "範囲指定ホットキー", lx, y + 2, 160);
     edit(h, inst, cx, y, 120, IDC_HOTKEY);
@@ -434,6 +436,7 @@ fn populate(h: HWND) {
         &HOLD_KEYS,
         HOLD_KEYS.iter().position(|k| *k == cfg.detect_key).unwrap_or(1), // 既定 LCtrl
     );
+    check_set(h, IDC_PREVIEW_DETECT_MODE, cfg.preview_detect_enabled);
     set_text(h, IDC_LOG_MAX, &cfg.log_max_records.to_string());
     let glossary_text = cfg.glossary.iter().map(|e| format!("{}={}", e.source, e.target)).collect::<Vec<_>>().join("\r\n");
     set_text(h, IDC_GLOSSARY, &glossary_text);
@@ -615,6 +618,7 @@ fn save(h: HWND) {
     cfg.debug_mode = check_get(h, IDC_DEBUG_MODE);
     cfg.detect_enabled = check_get(h, IDC_DETECT_MODE);
     cfg.detect_key = HOLD_KEYS[combo_sel(h, IDC_DETECT_KEY).min(HOLD_KEYS.len() - 1)].to_string();
+    cfg.preview_detect_enabled = check_get(h, IDC_PREVIEW_DETECT_MODE);
     cfg.log_max_records = get_text(h, IDC_LOG_MAX).trim().parse().unwrap_or(5000).clamp(100, 100000);
     
     let glos_text = get_text(h, IDC_GLOSSARY);
