@@ -20,7 +20,7 @@ use windows::Win32::Foundation::{
     HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GetAncestor, GetCursorPos, MessageBoxW,
+    GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow, MessageBoxW,
     WindowFromPoint, KillTimer, SetTimer, MB_OK, MB_ICONWARNING,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -231,8 +231,11 @@ pub fn tick() {
         let down = unsafe { (GetAsyncKeyState(app.cfg.hold_vk()) as u16 & 0x8000) != 0 };
         let esc = unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 };
 
-        // ピン留め中のEscで閉じる (SPEC §2.1)
-        if app.mode == Mode::Pinned && esc {
+        // ピン留め中のEscで閉じる (SPEC §2.1)。
+        // ただし対象アプリがアクティブ(フォアグラウンド)なときのみ。設定・解説編集など
+        // 自アプリの別ウィンドウや無関係な他アプリがアクティブな間のEscでは閉じない。
+        let target_active = unsafe { GetForegroundWindow() } == HWND(app.target as *mut _);
+        if app.mode == Mode::Pinned && esc && target_active {
             close_overlay(app);
             app.hold = down;
             return None;
@@ -504,6 +507,11 @@ pub fn handle_chip(id: usize) {
             return;
         }
         overlay::CHIP_EXPLAIN => {
+            // 押した瞬間にピン留め状態にする(ダイアログ表示中にホールド解除で閉じないように)
+            with_app(|app| {
+                app.mode = Mode::Pinned;
+                sync_overlay(app);
+            });
             if let Some(r_id) = recog_id {
                 let text = overlay::current_text().1.unwrap_or(source.clone());
                 if !text.is_empty() {

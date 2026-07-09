@@ -16,11 +16,11 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, GetWindowTextLengthW,
+    DestroyWindow, GetSystemMetrics, GetWindowTextLengthW,
     GetWindowTextW, IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_OK,
-    MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SW_SHOW, SW_SHOWNORMAL, SendMessageW,
-    SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
+    MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL,
+    SendMessageW, SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_DESTROY, WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
 };
 use windows::core::{PCWSTR, w};
 
@@ -125,15 +125,19 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
                 *r.borrow_mut() = true;
             }
         });
+        // 全項目の高さ(1150px)が画面に収まらない環境で「ログビューアを開く」等の
+        // 下部ボタンが画面外に隠れないよう、画面の高さに収まる位置・高さへ調整する。
+        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+        let (win_y, win_h) = (10, 1150.min(screen_h - 40));
         if let Ok(h) = CreateWindowExW(
             WS_EX_TOPMOST,
             class,
             w!("Focus Translator 設定"),
             WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT,
-            CW_USEDEFAULT,
+            win_y,
             640,
-            1150,
+            win_h,
             None,
             None,
             Some(instance),

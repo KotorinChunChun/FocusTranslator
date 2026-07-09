@@ -389,10 +389,18 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 *y += CHIP_H + 6;
             };
 
-            // 【入力内容】: 対象アプリ情報 + OCR対象画像ボタン
+            // 【入力内容】: 対象アプリ情報 + OCR対象画像ボタン。コピーは見出しラベルの左端。
             if !content.app_title.is_empty() || content.has_image {
                 let block_start = y;
-                let hh = heading_row(&mut items, y, "【入力内容】", COL_LABEL, &[], false, &mut need_w);
+                let hh = heading_row(
+                    &mut items,
+                    y,
+                    "【入力内容】",
+                    COL_LABEL,
+                    &[("📋", CHIP_COPY_INFO, true)],
+                    true,
+                    &mut need_w,
+                );
                 y += hh + 4;
 
                 if !content.app_title.is_empty() {
@@ -401,28 +409,18 @@ fn compute_layout(hwnd: HWND) -> Layout {
                         info.push_str("\r\nパス: ");
                         info.push_str(&content.uia_path);
                     }
-                    // 左に📋コピーボタン。右上のピン/閉じるボタンと重ならないよう幅を控える
-                    let (copy_w, _) = measure(hdc, "📋", FONT_CHIP, false, 200);
-                    let copy_w = copy_w + 16;
-                    let text_x = PAD + copy_w + 6;
-                    let info_w = MAXW - text_x - (CLOSE_SIZE * 2 + 14);
+                    // 右上のピン/閉じるボタンと重ならないよう幅を控える
+                    let info_w = MAXW - (CLOSE_SIZE * 2 + 14);
                     let (tw, th) = measure(hdc, &info, FONT_INFO, false, info_w);
-                    items.push(Item::Chip {
-                        rect: RECT { left: PAD, top: y, right: PAD + copy_w, bottom: y + CLOSE_SIZE },
-                        label: "📋".to_string(),
-                        id: CHIP_COPY_INFO,
-                        active: false,
-                        enabled: true,
-                    });
                     items.push(Item::Text {
-                        rect: RECT { left: text_x, top: y, right: text_x + info_w, bottom: y + th.max(CLOSE_SIZE) },
+                        rect: RECT { left: PAD, top: y, right: PAD + info_w, bottom: y + th },
                         text: info,
                         size: FONT_INFO,
                         color: COL_LABEL,
                         bold: false,
                     });
-                    y += th.max(CLOSE_SIZE) + 4;
-                    need_w = need_w.max(text_x + tw + PAD + 4);
+                    y += th + 4;
+                    need_w = need_w.max(tw + PAD * 2 + 4);
                 }
 
                 if content.has_image {
@@ -446,7 +444,7 @@ fn compute_layout(hwnd: HWND) -> Layout {
             if !content.source.is_empty() {
                 let block_start = y;
                 let heading = if content.via_uia {
-                    "【UIA読み取り結果 (OCR不要)】".to_string()
+                    "【画面読み取り結果 (UIA取得)】".to_string()
                 } else {
                     format!("【OCR結果 ({})】", ocr_label(&content.cur_ocr))
                 };
@@ -474,12 +472,14 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 y += text_h + 6;
                 need_w = need_w.max(sw + PAD * 2 + 4);
 
+                // UIA経路はOCRを行っていないため、どのOCRエンジンもアクティブ表示にしない
+                let ocr_cur: &str = if content.via_uia { "" } else { content.cur_ocr.as_str() };
                 chip_row(
                     &mut items,
                     &mut y,
                     &OCR_KEYS,
                     &OCR_LABELS,
-                    &content.cur_ocr,
+                    ocr_cur,
                     &content.ocr_enabled,
                     CHIP_OCR_BASE,
                     &mut need_w,

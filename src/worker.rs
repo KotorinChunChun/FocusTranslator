@@ -234,15 +234,27 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         if let Some(text) = uia::line_at_point(x, y) {
             let ms = t0.elapsed().as_millis();
             util::perf_log(cfg.perf_log, &format!("source UIA {ms}ms"));
-            let recog_id = log_recog(&cfg, "hold", "uia", "uia", ms, Some(&text), None, None, &ctx);
+
+            // OCRは行っていないが、後でOCRエンジンへ切り替えた際に再キャプチャ不要で使えるよう、
+            // また認識ログにも紐づけられるよう、この時点で注目行周辺の帯画像を撮影しておく。
+            let band = capture_band(x, y, target, 1200, 160).ok();
+            let log_img: Option<Captured> =
+                band.as_ref().map(|b| ocr::crop_for_focus(&b.img, Some(b.focus_y)).into_owned());
+            let focus_y = band.as_ref().map(|b| b.focus_y);
+            let img = band.map(|b| Arc::new(b.img));
+
+            let recog_id = log_recog(
+                &cfg, "hold", "uia", "uia", ms, Some(&text), None,
+                log_img.as_ref(), &ctx,
+            );
             post(main, generation, WorkerMsg::Source {
                 text: text.clone(),
                 method: "UIA",
                 engine: None,
-                img: None,
+                img,
                 pin: true,
                 anchor: (x, y),
-                focus_y: None,
+                focus_y,
                 ms,
                 recog_id,
                 app_title: ctx.title,
