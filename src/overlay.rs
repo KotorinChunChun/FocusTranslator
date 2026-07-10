@@ -429,6 +429,20 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 if !content.uia_nodes.is_empty() {
                     let mut x = PAD;
                     for (i, node) in content.uia_nodes.iter().enumerate() {
+                        if i > 0 {
+                            // ノード間の区切り「＞」(パス階層であることを示す)
+                            let sep = "＞";
+                            let (sw, sh) = measure(hdc, sep, FONT_CHIP, false, 40);
+                            let sy = y + (CHIP_H - sh) / 2;
+                            items.push(Item::Text {
+                                rect: RECT { left: x, top: sy, right: x + sw, bottom: sy + sh },
+                                text: sep.to_string(),
+                                size: FONT_CHIP,
+                                color: COL_LABEL,
+                                bold: false,
+                            });
+                            x += sw + 6;
+                        }
                         let node_text = node.text.trim();
                         let has_text = !node_text.is_empty();
                         let lab = if has_text {
@@ -436,7 +450,11 @@ fn compute_layout(hwnd: HWND) -> Layout {
                         } else {
                             node.label.clone()
                         };
-                        let (cw, _) = measure(hdc, &lab, FONT_CHIP, false, 160);
+                        // maxwは単一行の実幅がそのまま返るよう十分大きく取る(ボタン内は
+                        // DT_SINGLELINEで描画するため、word-wrap前提の幅で測ると文字が
+                        // 欠けてしまう)。ラベル自体は10文字+省略記号までに絞っているので
+                        // 幅が際限なく伸びることはない。
+                        let (cw, _) = measure(hdc, &lab, FONT_CHIP, false, 600);
                         let w = cw + 18;
                         items.push(Item::Chip {
                             rect: RECT { left: x, top: y, right: x + w, bottom: y + CHIP_H },
