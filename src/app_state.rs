@@ -99,10 +99,14 @@ pub struct App {
     pub scroll_y: i32,
     /// 領域検出モード: 検出キー押下中でオーバーレイ表示中か
     detect_on: bool,
-    /// 領域検出モード: 検出スレッドの実行中
-    detect_busy: bool,
-    /// Ctrl+Z のエッジ検出用 (ポーリングで前回押下状態を保持)
-    ctrl_z_prev: bool,
+    /// 領域検出処理が現在実行中か
+    pub detect_busy: bool,
+    /// 直前のループでCtrl+Zが押されていたか (エッジ検出用)
+    pub ctrl_z_prev: bool,
+    /// 現在インライン編集中の対象ブロック (SPECv0.4)
+    pub editing_block: overlay::EditBlock,
+    /// ホールド開始時刻 (5秒長押しでピン留め)
+    pub hold_start: Option<std::time::Instant>,
 }
 
 thread_local! {
@@ -136,6 +140,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             generation: 0,
             hold: false,
             mode: Mode::Idle,
+            hold_start: None,
             origin: POINT::default(),
             target: 0,
             source: String::new(),
@@ -164,6 +169,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             detect_on: false,
             detect_busy: false,
             ctrl_z_prev: false,
+            editing_block: overlay::EditBlock::None,
         });
     });
 }
@@ -297,8 +303,21 @@ pub fn tick() {
         let prev = app.hold;
         app.hold = down;
         match (prev, down) {
-            (false, true) => start_cycle_params(app),
+            (false, true) => {
+                app.hold_start = Some(std::time::Instant::now());
+                start_cycle_params(app)
+            }
+            (true, true) => {
+                if let Some(start) = app.hold_start {
+                    if start.elapsed().as_secs() >= app.cfg.pin_hold_seconds as u64 && app.mode != Mode::Pinned {
+                        app.mode = Mode::Pinned;
+                        sync_overlay(app);
+                    }
+                }
+                None
+            }
             (true, false) => {
+                app.hold_start = None;
                 if app.mode != Mode::Pinned {
                     close_overlay(app);
                 }
@@ -584,6 +603,7 @@ pub fn sync_overlay(app: &mut App) {
         busy: app.busy,
         // overlay::update 内で EDIT (overlay.rs内) の実データから都度上書きされる
         edit: None,
+        editing_block: app.editing_block,
     };
     overlay::update(app.overlay, content);
 }

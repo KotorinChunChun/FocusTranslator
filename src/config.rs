@@ -78,6 +78,8 @@ pub struct Config {
     pub hold_key: String,
     /// GetAsyncKeyState の監視周期 (ms)
     pub poll_ms: u32,
+    /// ホールドピン留めまでの秒数 (既定: 3秒)
+    pub pin_hold_seconds: u32,
     /// 範囲指定ホットキー (例: "Ctrl+Alt+T")
     pub region_hotkey: String,
     /// 既定OCRエンジン: "win" | "paddle" | "yomitoku" | "ndl" | "gemini"
@@ -177,6 +179,7 @@ impl Default for Config {
         Config {
             hold_key: "RCtrl".into(),
             poll_ms: 100,
+            pin_hold_seconds: 3,
             region_hotkey: "Ctrl+Alt+T".into(),
             default_ocr: "win".into(),
             default_translator: "local".into(),

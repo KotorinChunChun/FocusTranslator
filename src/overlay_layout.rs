@@ -7,7 +7,7 @@ use crate::overlay::{
     CHIP_COPY_SRC, CHIP_COPY_TR, CHIP_EDIT_APPLY, CHIP_EDIT_CANCEL, CHIP_EDIT_ERASE,
     CHIP_EDIT_LASSO, CHIP_EDIT_RECT, CHIP_EDIT_RESET, CHIP_EDIT_UNDO, CHIP_EXPLAIN,
     CHIP_EXPLAIN_QUICK, CHIP_IMAGE, CHIP_OCR_BASE, CHIP_OPEN_LOG, CHIP_PIN, CHIP_SETTINGS,
-    CHIP_SWAP_LANG, CHIP_TR_BASE, CHIP_UIA_NODE_BASE,
+    CHIP_SWAP_LANG, CHIP_TR_BASE, CHIP_UIA_NODE_BASE, CHIP_EDIT_SRC, CHIP_EDIT_TR, CHIP_EDIT_EXP,
 };
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -149,66 +149,50 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             return Layout { w: need_w.min(MAXW + PAD * 2), h: y, content_h: y, items, panels: Vec::new(), edit_preview: None };
         }
 
-        // 見出し行を配置する。chips_left=true のときはチップを見出し文字の手前(左端)に、
-        // false のときは従来どおり見出し文字の右側に並べる。戻り値は行の高さ。
+        // 見出し行を配置する。見出し文字は左寄せ、チップは右端に寄せて配置する。
+        // 戻り値は行の高さ。
         let heading_row = |items: &mut Vec<Item>,
                            y: i32,
                            text: &str,
                            color: u32,
                            chips: &[(&str, usize, bool)],
-                           chips_left: bool,
                            need_w: &mut i32|
          -> i32 {
-            if chips_left && !chips.is_empty() {
-                let mut x = PAD;
-                for (lab, id, enabled) in chips {
-                    let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
-                    let w = cw + 16;
-                    items.push(Item::Chip {
-                        rect: RECT { left: x, top: y - 1, right: x + w, bottom: y - 1 + CLOSE_SIZE },
-                        label: lab.to_string(),
-                        id: *id,
-                        active: false,
-                        enabled: *enabled,
-                    });
-                    x += w + 8;
-                }
-                let (hw, hh) = measure(hdc, text, FONT_HEADING, false, MAXW);
-                items.push(Item::Text {
-                    rect: RECT { left: x, top: y, right: x + hw + 4, bottom: y + hh },
-                    text: text.to_string(),
-                    size: FONT_HEADING,
-                    color,
-                    bold: false,
-                });
-                *need_w = (*need_w).max(x + hw + PAD);
-                hh.max(CLOSE_SIZE)
-            } else {
-                let (hw, hh) = measure(hdc, text, FONT_HEADING, false, MAXW);
-                items.push(Item::Text {
-                    rect: RECT { left: PAD, top: y, right: PAD + hw + 4, bottom: y + hh },
-                    text: text.to_string(),
-                    size: FONT_HEADING,
-                    color,
-                    bold: false,
-                });
-                let mut x = PAD + hw + 10;
-                let row_h = hh.max(CLOSE_SIZE);
-                for (lab, id, enabled) in chips {
-                    let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
-                    let w = cw + 16;
-                    items.push(Item::Chip {
-                        rect: RECT { left: x, top: y - 1, right: x + w, bottom: y - 1 + CLOSE_SIZE },
-                        label: lab.to_string(),
-                        id: *id,
-                        active: false,
-                        enabled: *enabled,
-                    });
-                    x += w + 6;
-                }
-                *need_w = (*need_w).max(x + PAD - 6);
-                row_h
+            let (hw, hh) = measure(hdc, text, FONT_HEADING, false, MAXW);
+            items.push(Item::Text {
+                rect: RECT { left: PAD, top: y, right: PAD + hw + 4, bottom: y + hh },
+                text: text.to_string(),
+                size: FONT_HEADING,
+                color,
+                bold: false,
+            });
+            
+            // チップ全体の幅を計算
+            let mut chips_w = 0;
+            let mut chip_sizes = Vec::new();
+            for (lab, _, _) in chips {
+                let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
+                let w = cw + 16;
+                chip_sizes.push(w);
+                chips_w += w + 6;
             }
+            
+            // 右端(MAXW + PAD)から逆算して配置
+            let mut x = MAXW + PAD - chips_w;
+            let row_h = hh.max(CLOSE_SIZE);
+            for (i, (lab, id, enabled)) in chips.iter().enumerate() {
+                let w = chip_sizes[i];
+                items.push(Item::Chip {
+                    rect: RECT { left: x, top: y - 1, right: x + w, bottom: y - 1 + CLOSE_SIZE },
+                    label: lab.to_string(),
+                    id: *id,
+                    active: false,
+                    enabled: *enabled,
+                });
+                x += w + 6;
+            }
+            *need_w = (*need_w).max(MAXW + PAD);
+            row_h
         };
 
         let chip_row = |items: &mut Vec<Item>,
@@ -298,7 +282,6 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 "【入力内容】",
                 COL_LABEL,
                 &[("📋", CHIP_COPY_INFO, true)],
-                true,
                 &mut need_w,
             );
             y += hh + 4;
@@ -408,16 +391,16 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 y,
                 &heading,
                 heading_color,
-                &[("📋", CHIP_COPY_SRC, true)],
-                true,
+                &[("📋", CHIP_COPY_SRC, true), ("✏️", CHIP_EDIT_SRC, true)],
                 &mut need_w,
             );
             y += hh + 4;
 
             let (sw, sh) = measure(hdc, &content.source, FONT_BODY, false, MAXW);
             let text_h = sh.max(24);
+            let rect = RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h };
             items.push(Item::Text {
-                rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h },
+                rect,
                 text: content.source.clone(),
                 size: FONT_BODY,
                 color: COL_TEXT,
@@ -450,7 +433,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 let lab = format!("{}→{}", content.source_lang, content.target_lang);
                 let (cw, _) = measure(hdc, &lab, FONT_CHIP, false, 200);
                 need_w = need_w.max(PAD + 200 + cw + 18 + PANEL_MARGIN + 6);
-                swap_btn = Some((lab, cw + 18, y));
+                swap_btn = Some((lab, cw + 18, 0)); // y will be updated later
             }
             let heading = if content.cur_tr == "llm" {
                 if let Some(detail) = &content.tr_engine_detail {
@@ -466,16 +449,16 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 y,
                 &heading,
                 COL_LABEL,
-                &[("📋", CHIP_COPY_TR, true)],
-                true,
+                &[("📋", CHIP_COPY_TR, true), ("✏️", CHIP_EDIT_TR, true)],
                 &mut need_w,
             );
             y += hh + 4;
 
             let (tw, th) = measure(hdc, t, FONT_BODY, true, MAXW);
             let text_h = th.max(24);
+            let rect = RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h };
             items.push(Item::Text {
-                rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h },
+                rect,
                 text: t.clone(),
                 size: FONT_BODY,
                 color: COL_TEXT,
@@ -494,6 +477,9 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 CHIP_TR_BASE,
                 &mut need_w,
             );
+            if let Some((_, _, ref mut by)) = swap_btn {
+                *by = y - CHIP_H;
+            }
             panel_spans.push((block_start, y, COL_ACCENT_TR));
             y += 6;
         }
@@ -510,7 +496,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             "【解説】".to_string()
         };
 
-        let copy_btns: &[(&str, usize, bool)] = &[("📋", CHIP_COPY, true)];
+        let copy_btns: &[(&str, usize, bool)] = &[("📋", CHIP_COPY, true), ("✏️", CHIP_EDIT_EXP, true)];
 
         let hh = heading_row(
             &mut items,
@@ -518,7 +504,6 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             &heading,
             COL_ACCENT_EXPLAIN,
             copy_btns,
-            true,
             &mut need_w,
         );
         y += hh + 4;
@@ -537,8 +522,9 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         } else if let Some(expl) = &content.explanation {
             let (tw, th) = measure(hdc, expl, FONT_BODY, false, MAXW);
             let text_h = th.max(20);
+            let rect = RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h };
             items.push(Item::Text {
-                rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h },
+                rect,
                 text: expl.clone(),
                 size: FONT_BODY,
                 color: COL_TEXT,

@@ -30,6 +30,7 @@ mod uia;
 mod ui_helpers;
 mod util;
 mod worker;
+mod input_dialog;
 
 use config::Config;
 use windows::Win32::Foundation::{

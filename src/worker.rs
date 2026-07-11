@@ -361,7 +361,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
             let hash = log_img.as_ref().map(crate::capture::hash_hex);
             let recog_id = log_recog(&cfg, capture_id, "uia", "uia", ms, Some(&text), None, hash.as_deref());
             post(main, generation, ctx.source_msg(
-                text.clone(), "UIA", None, img, true, (x, y), focus, ms, capture_id, recog_id,
+                text.clone(), "UIA", None, img, false, (x, y), focus, ms, capture_id, recog_id,
             ));
             // UIA経路なので ocr_engine は空文字 (SPECv0.4 §7.1)
             let pc = prompt_ctx(&ctx, "");
@@ -410,7 +410,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 let hash = crate::capture::hash_hex(&log_img);
                 let capture_id = log_cap(&cfg, "hold", &ctx, Some(&log_img));
                 let recog_id = log_recog(&cfg, capture_id, "ocr", &engine, ms, Some(&o.text), None, Some(&hash));
-                let pin = o.text.contains('\n');
+                let pin = false;
                 post(main, generation, ctx.source_msg(
                     o.text.clone(), "OCR", Some(engine.clone()), Some(Arc::new(used.img)), pin,
                     (x, y), focus, ms, capture_id, recog_id,

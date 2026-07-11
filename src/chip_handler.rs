@@ -223,6 +223,69 @@ pub fn handle_chip(id: usize) {
             perform_edit_undo();
             return;
         }
+        
+        // テキスト編集ポップアップ
+        overlay::CHIP_EDIT_SRC => {
+            let (hwnd, text) = with_app(|app| (app.overlay, app.source.clone())).unwrap();
+            if let Some(new_text) = crate::input_dialog::show(hwnd, "原文を編集", &text) {
+                if new_text.is_empty() || new_text == source {
+                    return;
+                }
+                if let Some(rid) = recog_id {
+                    crate::logdb::update_recog_text(rid, &new_text);
+                }
+                let new_gen = with_app(|app| {
+                    app.source = new_text.clone();
+                    app.translation = None;
+                    app.mode = Mode::Pinned;
+                    app.status = Some("修正された原文で再翻訳中…".into());
+                    app.busy = true;
+                    sync_overlay(app);
+                    app.generation += 1;
+                    app.generation
+                }).unwrap_or(0);
+                
+                let cfg2 = Config::load();
+                let pc = prompt_ctx_from_app(&new_text);
+                crate::worker::retranslate(new_gen, cur_tr, cfg2, new_text, main, recog_id, pc);
+            }
+            return;
+        }
+        overlay::CHIP_EDIT_TR => {
+            let (hwnd, text) = with_app(|app| (app.overlay, app.translation.clone().unwrap_or_default())).unwrap();
+            if let Some(new_text) = crate::input_dialog::show(hwnd, "翻訳結果を編集", &text) {
+                let prev_tr = with_app(|app| app.translation.clone()).flatten().unwrap_or_default();
+                if !new_text.is_empty() && new_text != prev_tr {
+                    if let Some(rid) = recog_id {
+                        crate::logdb::update_trans_text(rid, &new_text);
+                    }
+                    with_app(|app| {
+                        app.translation = Some(new_text);
+                        app.mode = Mode::Pinned;
+                        sync_overlay(app);
+                    });
+                }
+            }
+            return;
+        }
+        overlay::CHIP_EDIT_EXP => {
+            let (hwnd, text) = with_app(|app| (app.overlay, app.explanation.clone().unwrap_or_default())).unwrap();
+            if let Some(new_text) = crate::input_dialog::show(hwnd, "解説を編集", &text) {
+                let prev_exp = with_app(|app| app.explanation.clone()).flatten().unwrap_or_default();
+                if !new_text.is_empty() && new_text != prev_exp {
+                    if let Some(rid) = recog_id {
+                        crate::logdb::update_explain_text(rid, &new_text);
+                    }
+                    with_app(|app| {
+                        app.explanation = Some(new_text);
+                        app.mode = Mode::Pinned;
+                        sync_overlay(app);
+                    });
+                }
+            }
+            return;
+        }
+        
         overlay::CHIP_SWAP_LANG => {
             // 翻訳方向を反転 (en→ja ⇄ ja→en)
             if source.is_empty() {
