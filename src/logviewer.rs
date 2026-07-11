@@ -225,7 +225,7 @@ fn add_col(lvh: HWND, idx: i32, text: &str, width: i32) {
 
 fn build(h: HWND, inst: HINSTANCE) {
     let recog = lv(h, inst, IDC_RECOG_LV);
-    add_col(recog, 0, "時刻", 140);
+    add_col(recog, 0, "日時", 150);
     add_col(recog, 1, "アプリ", 100);
     add_col(recog, 2, "モード", 50);
     add_col(recog, 3, "エンジン", 70);
@@ -234,7 +234,7 @@ fn build(h: HWND, inst: HINSTANCE) {
     add_col(recog, 6, "認識テキスト", 380);
 
     let trans = lv(h, inst, IDC_TRANS_LV);
-    add_col(trans, 0, "時刻", 140);
+    add_col(trans, 0, "日時", 150);
     add_col(trans, 1, "エンジン", 70);
     add_col(trans, 2, "方向", 70);
     add_col(trans, 3, "ms", 50);
@@ -565,14 +565,47 @@ fn in_rect(r: &RECT, x: i32, y: i32) -> bool {
 }
 
 fn fmt_ts(ts_ms: i64) -> String {
-    // 簡易ローカル時刻(UTCms → HH:MM:SS 表示のみ、日付は MM/DD)
-    let secs = ts_ms / 1000;
-    let days = secs / 86400;
+    // 日本時間 (JST = UTC + 9時間) に補正
+    let jst_ms = ts_ms.max(0) + 9 * 3600 * 1000;
+    let secs = jst_ms / 1000;
+    
+    // エポック (1970-01-01) からの経過日数と、その日の時分秒
+    let mut days = secs / 86400;
     let tod = secs % 86400;
     let (h, m, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
-    // 1970-01-01 からの日数 → 月日は概算せず、経過日ベースは分かりづらいので時刻主体
-    let _ = days;
-    format!("{h:02}:{m:02}:{s:02}")
+
+    // 1970年からの年月日計算 (うるう年を考慮)
+    let mut year = 1970;
+    loop {
+        let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+        let year_days = if leap { 366 } else { 365 };
+        if days >= year_days {
+            days -= year_days;
+            year += 1;
+        } else {
+            break;
+        }
+    }
+
+    let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let month_days = if leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1;
+    for &md in &month_days {
+        if days >= md {
+            days -= md;
+            month += 1;
+        } else {
+            break;
+        }
+    }
+    let day = days + 1;
+
+    format!("{year:04}/{month:02}/{day:02} {h:02}:{m:02}:{s:02}")
 }
 
 fn lv_clear(lvh: HWND) {
