@@ -70,6 +70,23 @@ pub const CHIP_EDIT_CANCEL: usize = 116;
 pub const CHIP_EDIT_UNDO: usize = 117;
 /// 選択範囲を消す: 選択範囲の内側を隣接色で塗りつぶす(サイズは変わらない)
 pub const CHIP_EDIT_ERASE: usize = 118;
+/// インライン編集関連チップ
+pub const CHIP_EDIT_SRC: usize = 119;
+pub const CHIP_SAVE_SRC: usize = 120;
+pub const CHIP_EDIT_TR: usize = 121;
+pub const CHIP_SAVE_TR: usize = 122;
+pub const CHIP_EDIT_EXP: usize = 123;
+pub const CHIP_SAVE_EXP: usize = 124;
+
+/// テキストのインライン編集対象ブロック
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum EditBlock {
+    #[default]
+    None,
+    Source,
+    Translation,
+    Explanation,
+}
 
 /// 画像編集の選択ツール (SPECv0.4 §3)
 #[derive(Clone, Copy, PartialEq)]
@@ -160,6 +177,8 @@ pub struct OverlayContent {
     /// 画像編集モードの要約 (overlay::update 内で EDIT の内容から自動的に設定される。
     /// 呼び出し側 (chip_handler/app_state) が明示的に設定する必要はない)
     pub edit: Option<EditLayoutInfo>,
+    /// インライン編集中の対象ブロック (SPECv0.4 オーバーレイインライン編集機能)
+    pub editing_block: EditBlock,
 }
 
 const TIMER_AUTOHIDE: usize = 7;
@@ -347,8 +366,8 @@ pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
             ..Default::default()
         };
         RegisterClassW(&wc);
-        CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        let hwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::WS_EX_TRANSPARENT,
             class,
             w!("FocusTranslator"),
             WS_POPUP,
@@ -360,8 +379,8 @@ pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
             None,
             Some(instance),
             None,
-        )
-        .unwrap_or_default()
+        ).unwrap_or_default();
+        hwnd
     }
 }
 
@@ -382,10 +401,13 @@ pub fn update(hwnd: HWND, mut content: OverlayContent) {
             has_undo: !st.undo.is_empty(),
         })
     });
-    let error_only = content.error_only;
-    let pinned = content.pinned;
+
+    let (_cur_block, has_progress, error_only, pinned) = CONTENT.with(|c| {
+        let c = c.borrow();
+        (c.editing_block, c.explaining || c.busy || (c.has_image && c.app_title.is_empty()), c.error_only, c.pinned)
+    });
+    
     let anchor = content.anchor;
-    let has_progress = content.status.as_deref().is_some_and(|s| s.ends_with('…'));
     CONTENT.with(|c| *c.borrow_mut() = content);
 
     let same_session = LAST_ANCHOR.with(|a| *a.borrow() == Some(anchor));
@@ -403,6 +425,7 @@ pub fn update(hwnd: HWND, mut content: OverlayContent) {
     };
     let layout = CONTENT.with(|c| overlay_layout::compute_layout(hwnd, &c.borrow()));
     let (w, h) = (layout.w, layout.h);
+    
     LAYOUT.with(|l| *l.borrow_mut() = layout);
 
     let (x, y) = place(anchor, w, h, kept);
@@ -772,7 +795,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 } else {
                     begin_window_drag(hwnd);
                 }
-            } else if CONTENT.with(|c| c.borrow().pinned) {
+            } else {
+                let main = CONTENT.with(|c| c.borrow().main_hwnd);
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(HWND(main as *mut _)),
+                        crate::app_state::WM_APP_CHIP,
+                        WPARAM(CHIP_PIN),
+                        LPARAM(0),
+                    );
+                }
                 begin_window_drag(hwnd);
             }
             LRESULT(0)
@@ -946,6 +978,7 @@ fn paint(hwnd: HWND) {
                         SelectObject(mem, old);
                         let _ = DeleteObject(HGDIOBJ(font.0));
                     }
+
                 }
             }
         });

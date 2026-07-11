@@ -75,6 +75,7 @@ const IDC_PREVIEW_DETECT_MODE: i32 = 147;
 const IDC_HELP_PROMPT_TR: i32 = 148;
 const IDC_HELP_PROMPT_OCR: i32 = 149;
 const IDC_HELP_PROMPT_EXP: i32 = 150;
+const IDC_PIN_HOLD: i32 = 151;
 
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
@@ -195,6 +196,9 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         y += STEP;
         label(h, inst, "監視周期 (ms)", lx, y + 2, 130);
         edit(h, inst, cx, y, 60, IDC_POLL);
+        y += STEP;
+        label(h, inst, "ピン留め長押し時間 (秒)", lx, y + 2, 130);
+        edit(h, inst, cx, y, 60, IDC_PIN_HOLD);
     }
 
     // ---- 左列 グループ2: OCR設定 ----
@@ -435,6 +439,7 @@ fn populate(h: HWND) {
         HOLD_KEYS.iter().position(|k| *k == cfg.hold_key).unwrap_or(0),
     );
     set_text(h, IDC_POLL, &cfg.poll_ms.to_string());
+    set_text(h, IDC_PIN_HOLD, &cfg.pin_hold_seconds.to_string());
     set_text(h, IDC_HOTKEY, &cfg.region_hotkey);
     combo_fill(
         h,
@@ -662,6 +667,7 @@ fn save(h: HWND) {
     let mut cfg = Config::load();
     cfg.hold_key = HOLD_KEYS[combo_sel(h, IDC_HOLDKEY).min(HOLD_KEYS.len() - 1)].to_string();
     cfg.poll_ms = get_text(h, IDC_POLL).trim().parse().unwrap_or(100).clamp(20, 1000);
+    cfg.pin_hold_seconds = get_text(h, IDC_PIN_HOLD).trim().parse().unwrap_or(3);
     let hk = get_text(h, IDC_HOTKEY);
     if crate::config::parse_hotkey(&hk).is_some() {
         cfg.region_hotkey = hk.trim().to_string();

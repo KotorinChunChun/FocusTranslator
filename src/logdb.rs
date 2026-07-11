@@ -657,6 +657,39 @@ pub fn delete_translation(id: i64) {
     let Some(m) = conn() else { return };
     let Ok(guard) = m.lock() else { return };
     let _ = guard.execute("DELETE FROM translations WHERE id=?1", rusqlite::params![id]);
+    let _ = guard.execute("DELETE FROM translations WHERE id=?1", rusqlite::params![id]);
+}
+
+/// 認識結果テキストを上書き修正する (SPECv0.4: オーバーレイインライン編集用)
+pub fn update_recog_text(recog_id: i64, new_text: &str) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    let _ = guard.execute(
+        "UPDATE recognitions SET source_text = ?1 WHERE id = ?2",
+        rusqlite::params![new_text, recog_id],
+    );
+}
+
+/// 翻訳結果テキストを上書き修正する (SPECv0.4: オーバーレイインライン編集用)。
+/// 最新の(一番 ts_ms が新しい)翻訳結果を更新する。
+pub fn update_trans_text(recog_id: i64, new_text: &str) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    let _ = guard.execute(
+        "UPDATE translations SET translated_text = ?1 WHERE recognition_id = ?2 AND ts_ms = (SELECT MAX(ts_ms) FROM translations WHERE recognition_id = ?2)",
+        rusqlite::params![new_text, recog_id],
+    );
+}
+
+/// 解説テキストを上書き修正する (SPECv0.4: オーバーレイインライン編集用)。
+/// 最新の解説結果を更新する。
+pub fn update_explain_text(recog_id: i64, new_text: &str) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    let _ = guard.execute(
+        "UPDATE explanations SET explanation_text = ?1 WHERE recognition_id = ?2 AND ts_ms = (SELECT MAX(ts_ms) FROM explanations WHERE recognition_id = ?2)",
+        rusqlite::params![new_text, recog_id],
+    );
 }
 
 #[cfg(test)]
