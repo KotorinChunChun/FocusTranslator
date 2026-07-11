@@ -56,9 +56,17 @@ impl ApiType {
     }
     pub fn default_url(&self) -> &'static str {
         match self {
-            ApiType::Gemini => "",
+            ApiType::Gemini => crate::llm_api::GEMINI_URL_BASE,
             ApiType::OpenAI => crate::llm_api::DEFAULT_OPENAI_URL,
             ApiType::Claude => crate::llm_api::DEFAULT_CLAUDE_URL,
+        }
+    }
+    /// 表示用のプロバイダ名 (解説結果ブロックの見出しなど)
+    pub fn label(&self) -> &'static str {
+        match self {
+            ApiType::Gemini => "Gemini",
+            ApiType::OpenAI => "OpenAI",
+            ApiType::Claude => "Claude",
         }
     }
 }
