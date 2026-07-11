@@ -4,7 +4,7 @@ use crate::config::{ApiProfile, ApiType};
 
 pub const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
 pub const DEFAULT_CLAUDE_URL: &str = "https://api.anthropic.com/v1/messages";
-const GEMINI_URL_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+pub const GEMINI_URL_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 /// Claude API は max_tokens が必須
 const CLAUDE_MAX_TOKENS: u32 = 1024;
 
@@ -79,7 +79,8 @@ fn call_gemini(prof: &ApiProfile, key: &str, req: &LlmRequest) -> Result<LlmResp
     if req.json_mode {
         body["generationConfig"] = serde_json::json!({ "responseMimeType": "application/json" });
     }
-    let url = format!("{GEMINI_URL_BASE}/{}:generateContent", prof.model_name);
+    let base = url_or(&prof.api_url, GEMINI_URL_BASE);
+    let url = format!("{base}/{}:generateContent", prof.model_name);
     let request_json = body.to_string();
     let v = post_json(&url, &[("x-goog-api-key", key)], &body, "Gemini")?;
     let text = v["candidates"][0]["content"]["parts"][0]["text"]
