@@ -16,7 +16,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetClientRect, HTCLIENT,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowRect,
+    IsWindowVisible, HTCLIENT,
     HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, KillTimer, LoadCursorW, MA_NOACTIVATE, PostMessageW,
     RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowPos,
     ShowWindow, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_TIMER,
@@ -37,6 +38,12 @@ pub const CHIP_SETTINGS: usize = 105;
 pub const CHIP_PIN: usize = 106;
 pub const CHIP_IMAGE: usize = 107;
 pub const CHIP_COPY_INFO: usize = 108;
+/// 解説(即時): 既定プロンプトを編集ダイアログ無しでそのまま送信する
+pub const CHIP_EXPLAIN_QUICK: usize = 109;
+/// 翻訳方向の反転 (source_lang ⇄ target_lang)
+pub const CHIP_SWAP_LANG: usize = 110;
+/// ログビューアを開く
+pub const CHIP_OPEN_LOG: usize = 111;
 /// UIAパスノードのボタンID基点(祖先ノード最大5 + 子孫連結ノード1の範囲を確保)
 pub const CHIP_UIA_NODE_BASE: usize = 200;
 
@@ -63,6 +70,13 @@ pub struct OverlayContent {
     pub pinned: bool,
     pub cur_ocr: String,
     pub cur_tr: String,
+    /// 現在の翻訳方向 (翻訳結果ブロックの反転ボタン表示用)
+    pub source_lang: String,
+    pub target_lang: String,
+    /// LLM翻訳時の詳細(プロファイル名とモデル名)。例: "Gemini Default gemini-3.5-flash"
+    pub tr_engine_detail: Option<String>,
+    /// 解説を生成するLLMの表示名 (解説結果ブロックの見出し用。例: "Gemini")
+    pub explain_engine: String,
     /// 直近の認識が UIA 経路(OCR不要)で得られたか
     pub via_uia: bool,
     pub ocr_enabled: [bool; OCR_KEYS.len()],
@@ -101,18 +115,21 @@ struct Layout {
     panels: Vec<Panel>,
 }
 
+
 thread_local! {
     static CONTENT: RefCell<OverlayContent> = RefCell::new(OverlayContent::default());
     static LAYOUT: RefCell<Layout> = const { RefCell::new(Layout { w: 0, h: 0, content_h: 0, items: Vec::new(), panels: Vec::new() }) };
     /// マウスカーソルが乗っているチップID (✕ボタンのホバー強調に使用)
     static HOVER_ID: RefCell<Option<usize>> = const { RefCell::new(None) };
+    /// 直近に表示したアンカー。同一アンカーでの再描画(ボタン操作による内容変更)では、
+    /// ボタンを押す直前の「実際のウィンドウ位置」(ドラッグ後の位置も含む)を左上として維持する。
+    static LAST_ANCHOR: RefCell<Option<(i32, i32)>> = const { RefCell::new(None) };
 }
 
 // 配色 (COLORREF は 0x00BBGGRR)
 const COL_BG: u32 = 0x00221E1C;
 const COL_BORDER: u32 = 0x00524A46;
 const COL_TEXT: u32 = 0x00F0EEEC;
-const COL_SRC: u32 = 0x00B4AFAA;
 const COL_STATUS: u32 = 0x0050C8FF;
 const COL_CHIP: u32 = 0x003F3833;
 const COL_CHIP_ACTIVE: u32 = 0x00D28C3C;
@@ -122,10 +139,10 @@ const COL_LABEL: u32 = 0x00908A84;
 // ブロック(カード)の背景・枠・左アクセントバー。本体背景よりわずかに明るくして境界を分かりやすくする。
 const COL_PANEL_BG: u32 = 0x002B2723;
 const COL_PANEL_BORDER: u32 = 0x00423C37;
-const COL_ACCENT_INFO: u32 = 0x00908A84;
-const COL_ACCENT_OCR: u32 = 0x00A08F6E;
-const COL_ACCENT_TR: u32 = 0x00D28C3C;
-const COL_ACCENT_EXPLAIN: u32 = 0x0050C8FF;
+const COL_ACCENT_INFO: u32 = 0x0050B4FF;     // Gold/Yellow
+const COL_ACCENT_OCR: u32 = 0x007864FF;      // Coral/Pink
+const COL_ACCENT_TR: u32 = 0x00C850DC;       // Magenta/Purple
+const COL_ACCENT_EXPLAIN: u32 = 0x00FF5082;  // Indigo/Violet
 /// UIA経路で取得した(OCR不要な)結果であることを示す見出しの色
 const COL_UIA_BADGE: u32 = 0x0080D0A0;
 /// 閉じる(✕)ボタンにマウスが乗っているときの背景色
@@ -187,14 +204,34 @@ pub fn update(hwnd: HWND, content: OverlayContent) {
     let error_only = content.error_only;
     let pinned = content.pinned;
     let anchor = content.anchor;
-    let has_status = content.status.is_some();
+    // 進行中メッセージ(末尾「…」)のみドットをアニメーションする。静的なエラー文では不要。
+    let has_progress = content.status.as_deref().is_some_and(|s| s.ends_with('…'));
     CONTENT.with(|c| *c.borrow_mut() = content);
+
+    // 同一アンカー(同じ認識セッション)での再描画(各種ボタンによる切り替え)では、
+    // ボタンを押す直前の「実際のウィンドウ位置」を左上として維持する。記憶した値ではなく
+    // GetWindowRect で現在位置を読むため、ユーザーがドラッグで動かした後の位置も保たれる。
+    // サイズは内容に合わせて自然に変わってよい(縮小も許容)。
+    let same_session = LAST_ANCHOR.with(|a| *a.borrow() == Some(anchor));
+    let kept = if same_session {
+        unsafe {
+            let mut r = RECT::default();
+            if IsWindowVisible(hwnd).as_bool() && GetWindowRect(hwnd, &mut r).is_ok() {
+                Some((r.left, r.top))
+            } else {
+                None
+            }
+        }
+    } else {
+        None
+    };
     let layout = compute_layout(hwnd);
     let (w, h) = (layout.w, layout.h);
     LAYOUT.with(|l| *l.borrow_mut() = layout);
 
-    // 画面下端では上側に表示 (SPEC §10)
-    let (x, y) = place(anchor, w, h);
+    // 画面下端では上側に表示 (SPEC §10)。同一セッションなら現在の左上を維持する。
+    let (x, y) = place(anchor, w, h, kept);
+    LAST_ANCHOR.with(|a| *a.borrow_mut() = Some(anchor));
     unsafe {
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -204,7 +241,7 @@ pub fn update(hwnd: HWND, content: OverlayContent) {
         } else {
             let _ = KillTimer(Some(hwnd), TIMER_AUTOHIDE);
         }
-        if has_status && !error_only {
+        if has_progress && !error_only {
             SetTimer(Some(hwnd), TIMER_ANIMATION, 300, None);
         } else {
             let _ = KillTimer(Some(hwnd), TIMER_ANIMATION);
@@ -216,28 +253,45 @@ pub fn hide(hwnd: HWND) {
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
+    // 次に表示するときは新規配置扱いにする(別セッションで左上を引き継がない)
+    LAST_ANCHOR.with(|a| *a.borrow_mut() = None);
 }
 
-fn place(anchor: (i32, i32), w: i32, h: i32) -> (i32, i32) {
+/// 表示位置を決める。同じアンカー(=同一の認識セッション。OCR/翻訳/UIA各ボタンによる
+/// 内容変更での再描画)では前回の左上 `kept` を固定して使い、サイズ変化だけを反映する。
+/// 画面外へはみ出す場合に限りXYを寄せる。`kept` が None(新しい認識)ならカーソル直下に新規配置する。
+fn place(anchor: (i32, i32), w: i32, h: i32, kept: Option<(i32, i32)>) -> (i32, i32) {
     unsafe {
         let pt = POINT { x: anchor.0, y: anchor.1 };
         let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
         let _ = GetMonitorInfoW(hmon, &mut mi);
         let wa = mi.rcWork;
-        let mut x = anchor.0 - 16;
-        let mut y = anchor.1 + 28;
-        if y + h > wa.bottom {
-            y = anchor.1 - h - 28;
-        }
-        if y < wa.top {
-            y = wa.top;
-        }
+
+        let (mut x, mut y) = match kept {
+            Some(xy) => xy,
+            None => {
+                // 新規配置: カーソル直下(画面下端では上側)に置く
+                let x = anchor.0 - 16;
+                let mut y = anchor.1 + 28;
+                if y + h > wa.bottom {
+                    y = anchor.1 - h - 28;
+                }
+                (x, y)
+            }
+        };
+        // 画面内へクランプ(左上固定でも、拡大で画面外へ出る分だけXYを寄せる)
         if x + w > wa.right {
             x = wa.right - w;
         }
         if x < wa.left {
             x = wa.left;
+        }
+        if y + h > wa.bottom {
+            y = wa.bottom - h;
+        }
+        if y < wa.top {
+            y = wa.top;
         }
         (x, y)
     }
@@ -289,6 +343,13 @@ fn compute_layout(hwnd: HWND) -> Layout {
             let mut panel_spans: Vec<(i32, i32, u32)> = Vec::new();
             let mut y = PAD;
             let mut need_w = 240i32;
+            // 翻訳結果ブロックの言語反転ボタン (ラベル, 幅, 見出しY)。最終幅の確定後に右端へ置く。
+            let mut swap_btn: Option<(String, i32, i32)> = None;
+            // 【アプリケーション】行の右端ボタン (キャプチャ画像幅(0なら無し), 上端Y)。
+            // 最終幅の確定後に、右端へ配置する。
+            let mut app_row_cap_btn: Option<(i32, i32)> = None;
+            // システムメッセージ行の右端ボタン (設定ボタン幅, ログを開く幅, 上端Y)。
+            let sys_msg_btns: Option<(i32, i32, i32)>;
 
             if content.error_only {
                 let msg = content.status.clone().unwrap_or_default();
@@ -393,6 +454,59 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 *y += CHIP_H + 6;
             };
 
+            // システムメッセージ行 (テキスト ＋ 右端に[設定][ログを開く])
+            // 進行中メッセージ(末尾が「…」)はドットをアニメーションし、エラー等はそのまま出す。
+            let mut sys_disp = String::new();
+            if let Some(s) = &content.status {
+                let is_progress = s.ends_with('…');
+                sys_disp = s.clone();
+                if is_progress {
+                    let millis = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    let count = (millis / 300) % 4;
+                    sys_disp = sys_disp.replace("…", "");
+                    sys_disp.push_str(&".".repeat(count as usize));
+                }
+            }
+
+            if let Some(b) = &content.badge {
+                if !sys_disp.is_empty() {
+                    sys_disp.push_str("  ");
+                }
+                sys_disp.push_str(&format!("[{}]", b));
+            }
+
+            // ボタンの幅計算
+            let (set_cw, _) = measure(hdc, "設定", FONT_CHIP, false, 200);
+            let set_w = set_cw + 20;
+            let (log_cw, _) = measure(hdc, "ログを開く", FONT_CHIP, false, 200);
+            let log_w = log_cw + 20;
+            let sys_btns_w = set_w + 6 + log_w;
+
+            // テキストの描画
+            let row_h = CHIP_H;
+            let mut sys_text_h = 0;
+            let mut sys_text_w = 0;
+            if !sys_disp.is_empty() {
+                let (tw, th) = measure(hdc, &sys_disp, FONT_HEADING, false, MAXW - sys_btns_w - 20);
+                sys_text_w = tw;
+                sys_text_h = th;
+                let text_y = y + (row_h.max(th) - th) / 2;
+                items.push(Item::Text {
+                    rect: RECT { left: PAD, top: text_y, right: PAD + tw + 4, bottom: text_y + th },
+                    text: sys_disp,
+                    size: FONT_HEADING,
+                    color: COL_STATUS,
+                    bold: false,
+                });
+            }
+            let sys_row_h = row_h.max(sys_text_h);
+            sys_msg_btns = Some((set_w, log_w, y + (sys_row_h - CHIP_H) / 2));
+            need_w = need_w.max(PAD + sys_text_w + 10 + sys_btns_w + PAD);
+            y += sys_row_h + 8;
+
             // 【入力内容】: 対象アプリ情報 + UIAパスノードボタン + OCR対象画像ボタン。コピーは見出しラベルの左端。
             if !content.app_title.is_empty() || content.has_image || !content.uia_nodes.is_empty() {
                 let block_start = y;
@@ -407,20 +521,43 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 );
                 y += hh + 4;
 
+                // 【アプリケーション】行: アプリ名を1行で表示し、行の右端に
+                // [キャプチャ画像] ボタンを右寄せで配置する。
+                // ボタンは最終幅の確定後に配置する。文字色は白 (COL_TEXT)。
                 if !content.app_title.is_empty() {
-                    let info = format!("対象: {}", content.app_title);
-                    // 右上のピン/閉じるボタンと重ならないよう幅を控える
-                    let info_w = MAXW - (CLOSE_SIZE * 2 + 14);
-                    let (tw, th) = measure(hdc, &info, FONT_INFO, false, info_w);
+                    let cap_w = if content.has_image {
+                        let (cw, _) = measure(hdc, "キャプチャ画像", FONT_CHIP, false, 200);
+                        cw + 20
+                    } else {
+                        0
+                    };
+                    let btns_w = if content.has_image { cap_w + 6 } else { 0 };
+                    // アプリ名はボタン群と右上ピン/閉じるに重ならないよう1行に収める(超過分は…で省略)
+                    let reserve = btns_w + 12 + CLOSE_SIZE * 2 + 14;
+                    let avail = (MAXW - reserve).max(80);
+                    let mut info = format!("アプリケーション：{}", content.app_title);
+                    let (mut tw, th) = measure(hdc, &info, FONT_INFO, false, 4000);
+                    if tw > avail {
+                        // 1行に収まるよう末尾を切り詰める
+                        let base = "アプリケーション：";
+                        let budget = ((avail as f32 / tw.max(1) as f32) * content.app_title.chars().count() as f32) as usize;
+                        info = format!("{base}{}", crate::util::truncate_chars(&content.app_title, budget.max(4)));
+                        let (tw2, _) = measure(hdc, &info, FONT_INFO, false, 4000);
+                        tw = tw2;
+                    }
+                    let row_h = th.max(CHIP_H);
+                    let text_y = y + (row_h - th) / 2;
                     items.push(Item::Text {
-                        rect: RECT { left: PAD, top: y, right: PAD + info_w, bottom: y + th },
+                        rect: RECT { left: PAD, top: text_y, right: PAD + tw + 4, bottom: text_y + th },
                         text: info,
                         size: FONT_INFO,
-                        color: COL_LABEL,
+                        color: COL_TEXT,
                         bold: false,
                     });
-                    y += th + 4;
-                    need_w = need_w.max(tw + PAD * 2 + 4);
+                    // 右寄せ配置は最終幅の確定後。テキストと重ならない最小幅を確保しておく。
+                    app_row_cap_btn = Some((cap_w, y));
+                    need_w = need_w.max(PAD + tw + 12 + btns_w + PANEL_MARGIN + 6);
+                    y += row_h + 4;
                 }
 
                 // UIAパスの各ノードをボタン化: クリックでOCRの代わりにそのテキストを原文採用する。
@@ -469,8 +606,9 @@ fn compute_layout(hwnd: HWND) -> Layout {
                     y += CHIP_H + 6;
                 }
 
-                if content.has_image {
-                    let lab = "OCR対象画像";
+                // アプリ名が無い場合のフォールバック(通常は【対象】行の右端に置く)
+                if content.has_image && content.app_title.is_empty() {
+                    let lab = "キャプチャ画像";
                     let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                     items.push(Item::Chip {
                         rect: RECT { left: PAD, top: y, right: PAD + cw + 20, bottom: y + CHIP_H },
@@ -512,7 +650,7 @@ fn compute_layout(hwnd: HWND) -> Layout {
                     rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h },
                     text: content.source.clone(),
                     size: FONT_BODY,
-                    color: COL_SRC,
+                    color: COL_TEXT,
                     bold: false,
                 });
                 y += text_h + 6;
@@ -535,10 +673,25 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 y += 6;
             }
 
-            // 【翻訳結果】またはステータス: コピーは左端
+            // 【翻訳結果】またはステータス: コピーは左端、言語反転は右端(後で配置)
             if let Some(t) = &content.translation {
                 let block_start = y;
-                let heading = format!("【翻訳結果 ({})】", tr_label(&content.cur_tr));
+                if !content.source_lang.is_empty() {
+                    let lab = format!("{}→{}", content.source_lang, content.target_lang);
+                    let (cw, _) = measure(hdc, &lab, FONT_CHIP, false, 200);
+                    // 見出し文字が言語反転ボタンに重ならないよう、その分の幅を確保しておく
+                    need_w = need_w.max(PAD + 200 + cw + 18 + PANEL_MARGIN + 6);
+                    swap_btn = Some((lab, cw + 18, y));
+                }
+                let heading = if content.cur_tr == "llm" {
+                    if let Some(detail) = &content.tr_engine_detail {
+                        format!("【翻訳結果(LLM:{})】", detail)
+                    } else {
+                        format!("【翻訳結果 ({})】", tr_label(&content.cur_tr))
+                    }
+                } else {
+                    format!("【翻訳結果 ({})】", tr_label(&content.cur_tr))
+                };
                 let hh = heading_row(
                     &mut items,
                     y,
@@ -574,48 +727,64 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 );
                 panel_spans.push((block_start, y, COL_ACCENT_TR));
                 y += 6;
-            } else if let Some(s) = &content.status {
-                let mut disp = s.clone();
-                if !content.error_only {
-                    let millis = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis();
-                    let count = (millis / 300) % 4;
-                    disp = disp.replace("…", "");
-                    disp.push_str(&".".repeat(count as usize));
+            }
+
+            // 【解説】ブロック
+            let block_start = y;
+            let heading = if let Some(_) = &content.explanation {
+                if content.explain_engine.is_empty() {
+                    "【解説結果】".to_string()
+                } else {
+                    format!("【解説結果 ({})】", content.explain_engine)
                 }
-                let (tw, th) = measure(hdc, &disp, FONT_HEADING, false, MAXW);
+            } else {
+                "【解説】".to_string()
+            };
+
+            let copy_btns: &[(&str, usize, bool)] = &[("📋", CHIP_COPY, true)];
+
+            let hh = heading_row(
+                &mut items,
+                y,
+                &heading,
+                COL_ACCENT_EXPLAIN,
+                copy_btns,
+                true,
+                &mut need_w,
+            );
+            y += hh + 4;
+
+            if content.explaining {
+                let (tw, th) = measure(hdc, "解説を取得中...", FONT_HEADING, false, MAXW);
                 items.push(Item::Text {
                     rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
-                    text: disp,
+                    text: "解説を取得中...".to_string(),
                     size: FONT_HEADING,
                     color: COL_STATUS,
                     bold: false,
                 });
                 y += th + 8;
                 need_w = need_w.max(tw + PAD * 2 + 4);
-            }
-
-            // バッジ (「コピーしました」等の一時通知)
-            if let Some(b) = &content.badge {
-                let text = format!("[{b}]");
-                let (tw, th) = measure(hdc, &text, FONT_INFO, false, MAXW);
+            } else if let Some(expl) = &content.explanation {
+                let (tw, th) = measure(hdc, expl, FONT_BODY, false, MAXW);
+                let text_h = th.max(20);
                 items.push(Item::Text {
-                    rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
-                    text,
-                    size: FONT_INFO,
-                    color: COL_STATUS,
+                    rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h },
+                    text: expl.clone(),
+                    size: FONT_BODY,
+                    color: COL_TEXT,
                     bold: false,
                 });
-                y += th + 4;
+                y += text_h + 8;
                 need_w = need_w.max(tw + PAD * 2 + 4);
             }
 
-            // 操作行: 解説 / 設定 (ピン留めは右上角、閉じるは右上角、画像は入力内容、コピーは各見出し左)
-            y += 2;
+            // 操作チップ: 解説 / プロンプト編集
             let mut x = PAD;
-            let ops: &[(&str, usize)] = &[("解説", CHIP_EXPLAIN), ("設定", CHIP_SETTINGS)];
+            let ops: &[(&str, usize)] = &[
+                ("解説", CHIP_EXPLAIN_QUICK),
+                ("解説プロンプトを編集して送信", CHIP_EXPLAIN),
+            ];
             for (lab, id) in ops {
                 let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                 let w = cw + 20;
@@ -629,46 +798,10 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 x += w + 6;
             }
             need_w = need_w.max(x + PAD - 6);
-            y += CHIP_H + PAD;
+            y += CHIP_H + 6;
 
-            // 【解説】領域
-            if content.explaining {
-                let (tw, th) = measure(hdc, "解説を取得中...", FONT_HEADING, false, MAXW);
-                items.push(Item::Text {
-                    rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
-                    text: "解説を取得中...".to_string(),
-                    size: FONT_HEADING,
-                    color: COL_STATUS,
-                    bold: false,
-                });
-                y += th + 8;
-                need_w = need_w.max(tw + PAD * 2 + 4);
-            } else if let Some(expl) = &content.explanation {
-                let block_start = y;
-                let hh = heading_row(
-                    &mut items,
-                    y,
-                    "【解説】",
-                    COL_LABEL,
-                    &[("解説コピー", CHIP_COPY, true)],
-                    false,
-                    &mut need_w,
-                );
-                y += hh + 4;
-
-                let (tw, th) = measure(hdc, expl, FONT_BODY, false, MAXW);
-                let text_h = th.max(20);
-                items.push(Item::Text {
-                    rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h },
-                    text: expl.clone(),
-                    size: FONT_BODY,
-                    color: COL_TEXT,
-                    bold: false,
-                });
-                y += text_h + 8;
-                need_w = need_w.max(tw + PAD * 2 + 4);
-                panel_spans.push((block_start, y, COL_ACCENT_EXPLAIN));
-            }
+            panel_spans.push((block_start, y, COL_ACCENT_EXPLAIN));
+            y += 6;
 
             let _ = ReleaseDC(Some(hwnd), hdc);
             let w = need_w.min(MAXW + PAD * 2);
@@ -684,27 +817,80 @@ fn compute_layout(hwnd: HWND) -> Layout {
                 }
             }
 
-            // 右上角: ピン留めボタン(📌、常時表示・トグル状態を背景色で表示)。
-            // ピン留め時のみ、その右隣に閉じる(✕)ボタンを追加する。いずれもスクロールに追従せず固定。
+            // 右上角: システムメッセージ行と同じ行に [設定] [ログを開く] [📌] [✕] を右寄せで配置する。
+            // 閉じるボタンはピン留め前でも常時表示する。いずれもスクロールに追従せず固定。
+            let ty_base = sys_msg_btns.map(|(_, _, y)| y).unwrap_or(6);
+            let ty_close = ty_base + (CHIP_H - CLOSE_SIZE) / 2;
+
             let close_right = w - 6;
             let close_left = close_right - CLOSE_SIZE;
-            let pin_right = if content.pinned { close_left - 4 } else { close_right };
+            let pin_right = close_left - 4;
             let pin_left = pin_right - CLOSE_SIZE;
+
             items.push(Item::Chip {
-                rect: RECT { left: pin_left, top: 6, right: pin_right, bottom: 6 + CLOSE_SIZE },
+                rect: RECT { left: pin_left, top: ty_close, right: pin_right, bottom: ty_close + CLOSE_SIZE },
                 label: "📌".to_string(),
                 id: CHIP_PIN,
                 active: content.pinned,
                 enabled: !content.busy,
             });
-            if content.pinned {
+            items.push(Item::Chip {
+                rect: RECT { left: close_left, top: ty_close, right: close_right, bottom: ty_close + CLOSE_SIZE },
+                label: "✕".to_string(),
+                id: CHIP_CLOSE,
+                active: false,
+                enabled: true,
+            });
+
+            // 翻訳結果ブロックの右上に言語反転ボタン(例: en→ja)。最終幅が確定してから
+            // 右端へ配置する(見出しは左端のコピー、これは右端で対称になる)。
+            if let Some((lab, bw, hy)) = swap_btn {
+                let right = w - PANEL_MARGIN - 6;
+                let left = right - bw;
                 items.push(Item::Chip {
-                    rect: RECT { left: close_left, top: 6, right: close_right, bottom: 6 + CLOSE_SIZE },
-                    label: "✕".to_string(),
-                    id: CHIP_CLOSE,
+                    rect: RECT { left, top: hy - 1, right, bottom: hy - 1 + CLOSE_SIZE },
+                    label: lab,
+                    id: CHIP_SWAP_LANG,
                     active: false,
-                    enabled: true,
+                    enabled: !content.busy,
                 });
+            }
+
+            // システムメッセージ行の右端に [設定][ログを開く] を配置する。
+            if let Some((set_w, log_w, ty)) = sys_msg_btns {
+                let log_right = pin_left - 6;
+                let log_left = log_right - log_w;
+                items.push(Item::Chip {
+                    rect: RECT { left: log_left, top: ty, right: log_right, bottom: ty + CHIP_H },
+                    label: "ログを開く".to_string(),
+                    id: CHIP_OPEN_LOG,
+                    active: false,
+                    enabled: !content.busy,
+                });
+                let set_right = log_left - 6;
+                let set_left = set_right - set_w;
+                items.push(Item::Chip {
+                    rect: RECT { left: set_left, top: ty, right: set_right, bottom: ty + CHIP_H },
+                    label: "設定".to_string(),
+                    id: CHIP_SETTINGS,
+                    active: false,
+                    enabled: !content.busy,
+                });
+            }
+
+            // 【アプリケーション】行の右端に [キャプチャ画像] を配置する。
+            if let Some((cap_w, ty)) = app_row_cap_btn {
+                if cap_w > 0 {
+                    let cap_right = w - PANEL_MARGIN - 6;
+                    let cap_left = cap_right - cap_w;
+                    items.push(Item::Chip {
+                        rect: RECT { left: cap_left, top: ty, right: cap_right, bottom: ty + CHIP_H },
+                        label: "キャプチャ画像".to_string(),
+                        id: CHIP_IMAGE,
+                        active: false,
+                        enabled: !content.busy,
+                    });
+                }
             }
 
             // ブロック(カード)の背景。見出しの少し上から本文の少し下までを1枚のカードにする。
@@ -963,22 +1149,38 @@ fn paint(hwnd: HWND) {
                         r.top -= off;
                         r.bottom -= off;
                         let hovered = HOVER_ID.with(|h| *h.borrow() == Some(*id));
-                        let bgc = if *id == CHIP_CLOSE && hovered {
-                            COL_CLOSE_HOVER
-                        } else if *active {
-                            COL_CHIP_ACTIVE
+                        // キャプチャ画像ボタンは他と区別するため枠線スタイル(中空+アクセント色の縁取り)。
+                        let outlined = *id == CHIP_IMAGE;
+                        let text_col = if !*enabled {
+                            COL_CHIP_DISABLED
+                        } else if outlined {
+                            COL_ACCENT_INFO
                         } else {
-                            COL_CHIP
+                            COL_CHIP_TEXT
                         };
-                        let brush = CreateSolidBrush(COLORREF(bgc));
-                        FillRect(mem, &r, brush);
-                        let _ = DeleteObject(HGDIOBJ(brush.0));
+                        if outlined {
+                            // 背景はカード地色、縁だけアクセント色で描く
+                            let fill = CreateSolidBrush(COLORREF(COL_PANEL_BG));
+                            FillRect(mem, &r, fill);
+                            let _ = DeleteObject(HGDIOBJ(fill.0));
+                            let border = CreateSolidBrush(COLORREF(COL_ACCENT_INFO));
+                            FrameRect(mem, &r, border);
+                            let _ = DeleteObject(HGDIOBJ(border.0));
+                        } else {
+                            let bgc = if *id == CHIP_CLOSE && hovered {
+                                COL_CLOSE_HOVER
+                            } else if *active {
+                                COL_CHIP_ACTIVE
+                            } else {
+                                COL_CHIP
+                            };
+                            let brush = CreateSolidBrush(COLORREF(bgc));
+                            FillRect(mem, &r, brush);
+                            let _ = DeleteObject(HGDIOBJ(brush.0));
+                        }
                         let font = make_font(FONT_CHIP, *active);
                         let old = SelectObject(mem, HGDIOBJ(font.0));
-                        SetTextColor(
-                            mem,
-                            COLORREF(if *enabled { COL_CHIP_TEXT } else { COL_CHIP_DISABLED }),
-                        );
+                        SetTextColor(mem, COLORREF(text_col));
                         let mut wide: Vec<u16> = label.encode_utf16().collect();
                         DrawTextW(
                             mem,

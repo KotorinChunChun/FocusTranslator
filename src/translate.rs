@@ -64,7 +64,8 @@ pub fn translate(engine: &str, cfg: &Config, text: &str) -> Result<Translated, S
         if let Some(hit) = map.get(&key) {
             return Ok(Translated {
                 text: hit.clone(),
-                badge: Some("cache".into()),
+                // キャッシュヒットは内部的な最適化であり利用者には無関係なのでバッジは出さない
+                badge: None,
                 engine: engine.into(),
                 source_lang: source,
                 target_lang: target,
