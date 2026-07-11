@@ -422,7 +422,7 @@ pub fn delete_translation(id: i64) {
     let _ = guard.execute("DELETE FROM translation_logs WHERE id=?1", rusqlite::params![id]);
 }
 
-/// 解説文のみ取得 (SPEC v0.2 §2.2.2 キャッシュ判定用)
+/// 解説文のみ取得
 pub fn get_explanation(recog_id: i64) -> Option<String> {
     get_explanation_and_tags(recog_id).map(|(e, _)| e)
 }

@@ -140,7 +140,7 @@ pub fn open(instance: HINSTANCE) {
                     lpfnWndProc: Some(wndproc),
                     hInstance: instance,
                     hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                    hIcon: crate::app_icon(),
+                    hIcon: crate::app_state::app_icon(),
                     hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as usize as *mut _),
                     lpszClassName: class,
                     ..Default::default()
@@ -680,7 +680,7 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-/// DBから再読込して認識一覧を更新 (検索欄・exeフィルタを適用; SPEC v0.2 §2.3.2)
+/// DBから再読込して認識一覧を更新 (検索欄・exeフィルタを適用; SPEC v0.3 §2.3.2)
 fn reload() {
     let h = hwnd();
     let query = edit_text(h, IDC_SEARCH_EDIT);
@@ -1176,7 +1176,7 @@ fn open_image_1to1(parent: HWND) {
                     lpfnWndProc: Some(img_wndproc),
                     hInstance: inst,
                     hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                    hIcon: crate::app_icon(),
+                    hIcon: crate::app_state::app_icon(),
                     hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as usize as *mut _),
                     lpszClassName: class,
                     ..Default::default()

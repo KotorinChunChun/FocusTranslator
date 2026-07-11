@@ -212,7 +212,7 @@ const DESC_MAX_CHARS: usize = 4000;
 /// 祖先方向に最大5段(AutomationId/Name/ControlTypeの短い識別子 + そのノード自身から
 /// 抽出したテキスト)を積み、末尾にカーソル直下の末端要素の子孫テキストを再帰的に
 /// 走査して1行ずつ連結した合成ノードを追加する (ボタン化してOCRの代わりに採用するため)。
-/// 解説機能の同一コンテキスト判定キーや認識ログにも使う (SPEC v0.2 §2.3.1)。
+/// 解説機能の同一コンテキスト判定キーや認識ログにも使う。
 pub fn path_nodes_at_point(x: i32, y: i32) -> Vec<UiaPathNode> {
     unsafe {
         let Ok(auto) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {

@@ -1,12 +1,15 @@
-// Focus Translator v0.1 — カーソル位置翻訳ツール (FocusTranslator_SPECv0.1.md 準拠)
+// Focus Translator v0.3 — カーソル位置翻訳ツール (FocusTranslator_SPECv0.3.md 準拠)
 // 右Ctrlホールド中のみ、マウスポインタ直下のテキスト1行を認識・翻訳して
 // カーソル近傍にオーバーレイ表示するタスクトレイ常駐ツール。
 #![windows_subsystem = "windows"]
 
 mod app_state;
 mod capture;
+mod capture_plan;
+mod chip_handler;
 mod config;
 mod detect;
+mod engine;
 mod llm_api;
 mod logdb;
 mod logviewer;
@@ -14,6 +17,7 @@ mod ocr;
 mod onnx_translate;
 mod onnx_translate_install;
 mod overlay;
+mod overlay_layout;
 mod paddle_install;
 mod paddle_ocr;
 mod prompt_edit;
@@ -45,8 +49,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::w;
-
-pub use app_state::*;
 
 
 
@@ -132,5 +134,3 @@ fn main() {
         }
     }
 }
-
-
