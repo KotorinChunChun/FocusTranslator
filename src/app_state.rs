@@ -413,7 +413,11 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 }
                 app.last_img = img;
                 app.last_focus = focus;
-                app.status = None;
+                if app.via_uia {
+                    app.status = Some("UIからの文字抽出に成功しました。".to_string());
+                } else {
+                    app.status = Some("画像認識により文字起こししました。".to_string());
+                }
                 app.badge = None;
                 app.error_only = false;
                 app.anchor = anchor;
@@ -453,14 +457,21 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                     app.failed_ocr.insert(e);
                 }
                 app.explaining = false;
-                // 短時間のエラー表示 (SPEC §5.3, §11)
-                app.source.clear();
-                app.translation = None;
-                app.status = Some(msg);
-                app.anchor = anchor;
-                app.error_only = true;
-                if app.mode == Mode::Recognizing {
-                    app.mode = Mode::ShowingHold;
+                if !app.source.is_empty() {
+                    // 既に結果を表示中(再OCR/再翻訳/解説の失敗など)なら、その表示は残したまま
+                    // エラーをオーバーレイ内にステータスとして併記する。原文・訳文は消さない。
+                    // (UIA取得結果をOCRへ切り替えて失敗しても表示が消えないようにするため)
+                    app.status = Some(msg);
+                    app.error_only = false;
+                } else {
+                    // まだ何も表示していない初期認識の失敗: 従来どおり短時間のエラー表示 (SPEC §5.3, §11)
+                    app.translation = None;
+                    app.status = Some(msg);
+                    app.anchor = anchor;
+                    app.error_only = true;
+                    if app.mode == Mode::Recognizing {
+                        app.mode = Mode::ShowingHold;
+                    }
                 }
                 sync_overlay(app);
             }
@@ -583,6 +594,80 @@ pub fn handle_chip(id: usize) {
             }
             return;
         }
+        overlay::CHIP_SWAP_LANG => {
+            // 翻訳方向を反転 (en→ja ⇄ ja→en)。設定を書き換えて保存し、現在の原文を再翻訳する。
+            if source.is_empty() {
+                return;
+            }
+            let new_gen = with_app(|app| {
+                std::mem::swap(&mut app.cfg.source_lang, &mut app.cfg.target_lang);
+                app.cfg.save();
+                app.generation += 1;
+                app.mode = Mode::Pinned;
+                app.translation = None;
+                let engine_name = if app.cur_tr == "llm" {
+                    format!("LLM:{}", app.cfg.active_profile().map(|p| p.name.clone()).unwrap_or_default())
+                } else {
+                    overlay::tr_label(&app.cur_tr).to_string()
+                };
+                app.status = Some(format!("{} で翻訳中…", engine_name));
+                app.busy = true;
+                sync_overlay(app);
+                app.generation
+            })
+            .unwrap_or(0);
+            let cfg2 = Config::load();
+            worker::retranslate(new_gen, cur_tr, cfg2, source, main, recog_id);
+            return;
+        }
+        overlay::CHIP_EXPLAIN_QUICK => {
+            // 解説(即時): 編集ダイアログを出さず、既定プロンプトをそのまま送信する。
+            with_app(|app| {
+                app.mode = Mode::Pinned;
+                sync_overlay(app);
+            });
+            let Some(r_id) = recog_id else { return };
+            let text = overlay::current_text().1.unwrap_or(source.clone());
+            if text.is_empty() {
+                return;
+            }
+            // キャッシュ済みの解説があれば即表示する
+            if let Some(expl) = crate::logdb::get_explanation(r_id) {
+                with_app(|app| {
+                    app.mode = Mode::Pinned;
+                    app.status = None;
+                    app.error_only = false;
+                    app.explanation = Some(expl);
+                    sync_overlay(app);
+                });
+                return;
+            }
+            let (app_title, uia_path) =
+                with_app(|app| (app.app_title.clone(), app.uia_path.clone())).unwrap_or_default();
+            let prompt =
+                crate::worker::build_explain_prompt(&cfg, &text, &app_title, &uia_path).unwrap_or_default();
+            if prompt.is_empty() {
+                with_app(|app| {
+                    app.badge = Some("LLM APIが設定されていません".into());
+                    sync_overlay(app);
+                });
+                return;
+            }
+            let profile = cfg.active_api_profile.clone();
+            let new_gen = with_app(|app| {
+                app.generation += 1;
+                app.mode = Mode::Pinned;
+                app.status = Some(format!("LLM:{} で解説を取得中…", profile));
+                app.explaining = true;
+                app.busy = true;
+                sync_overlay(app);
+                app.generation
+            })
+            .unwrap_or(0);
+            let cfg2 = crate::config::Config::load();
+            crate::worker::explain(new_gen, r_id, cfg2, prompt, profile, main);
+            return;
+        }
         overlay::CHIP_EXPLAIN => {
             // 押した瞬間にピン留め状態にする(ダイアログ表示中にホールド解除で閉じないように)
             with_app(|app| {
@@ -592,16 +677,6 @@ pub fn handle_chip(id: usize) {
             if let Some(r_id) = recog_id {
                 let text = overlay::current_text().1.unwrap_or(source.clone());
                 if !text.is_empty() {
-                    if let Some(expl) = crate::logdb::get_explanation(r_id) {
-                        with_app(|app| {
-                            app.mode = Mode::Pinned;
-                            app.status = None;
-                            app.error_only = false;
-                            app.explanation = Some(expl);
-                            sync_overlay(app);
-                        });
-                        return;
-                    }
 
                     // アプリ名・UIAパスを前提情報としてプロンプトへ、
                     // 編集ダイアログはオーバーレイの近くに表示する
@@ -644,7 +719,7 @@ pub fn handle_chip(id: usize) {
                             let new_gen = with_app(|app| {
                                 app.generation += 1;
                                 app.mode = Mode::Pinned;
-                                app.status = Some("解説を取得中…".into());
+                                app.status = Some(format!("LLM:{} で解説を取得中…", profile));
                                 app.explaining = true;
                                 app.busy = true;
                                 sync_overlay(app);
@@ -662,6 +737,11 @@ pub fn handle_chip(id: usize) {
         overlay::CHIP_SETTINGS => {
             let inst = with_app(|app| app.instance).unwrap_or_default();
             crate::settings::open(inst, main_hwnd());
+            return;
+        }
+        overlay::CHIP_OPEN_LOG => {
+            let inst = with_app(|app| app.instance).unwrap_or_default();
+            crate::logviewer::open(inst);
             return;
         }
         _ => {}
@@ -716,7 +796,12 @@ pub fn handle_chip(id: usize) {
             app.generation += 1;
             app.mode = Mode::Pinned;
             app.cur_tr = key.clone();
-            app.status = Some("翻訳中…".into());
+            let engine_name = if key == "llm" {
+                format!("LLM:{}", app.cfg.active_profile().map(|p| p.name.clone()).unwrap_or_default())
+            } else {
+                overlay::tr_label(&key).to_string()
+            };
+            app.status = Some(format!("{} で翻訳中…", engine_name));
             app.translation = None;
             app.busy = true;
             sync_overlay(app);
@@ -741,7 +826,12 @@ pub fn handle_chip(id: usize) {
             app.source = text.clone();
             app.via_uia = true;
             app.translation = None;
-            app.status = Some("翻訳中…".into());
+            let engine_name = if app.cur_tr == "llm" {
+                format!("LLM:{}", app.cfg.active_profile().map(|p| p.name.clone()).unwrap_or_default())
+            } else {
+                overlay::tr_label(&app.cur_tr).to_string()
+            };
+            app.status = Some(format!("{} で翻訳中…", engine_name));
             app.busy = true;
             sync_overlay(app);
             app.generation
@@ -879,6 +969,18 @@ fn sync_overlay(app: &mut App) {
         pinned: app.mode == Mode::Pinned,
         cur_ocr: app.cur_ocr.clone(),
         cur_tr: app.cur_tr.clone(),
+        source_lang: app.cfg.source_lang.clone(),
+        target_lang: app.cfg.target_lang.clone(),
+        tr_engine_detail: if app.cur_tr == "llm" {
+            app.cfg.active_profile().map(|p| format!("{} {}", p.name, p.model_name))
+        } else {
+            None
+        },
+        explain_engine: app
+            .cfg
+            .active_profile()
+            .map(|p| p.api_type.label().to_string())
+            .unwrap_or_default(),
         via_uia: app.via_uia,
         ocr_enabled,
         tr_enabled,
