@@ -90,6 +90,92 @@ pub fn lasso_crop(img: &Captured, pts: &[(i32, i32)]) -> Option<Captured> {
     Some(out)
 }
 
+/// 選択範囲を「消す」(トリミングはせず、選択範囲の内側だけを周辺色で塗りつぶして
+/// 元と同じサイズの画像を返す) (SPECv0.4追補)。
+/// 塗りつぶし色は選択範囲のバウンディングボックスを外側へ RING px 拡張したリング領域
+/// (=選択範囲に隣接するピクセル)の平均色とする。リングが空(=画像全体が選択範囲)の
+/// 場合は白にフォールバックする。
+pub fn erase_selection(img: &Captured, sel: &Selection) -> Option<Captured> {
+    let w = img.width as i32;
+    let h = img.height as i32;
+    let mut inside = vec![false; (w * h) as usize];
+    let (l, t, r, b) = match sel {
+        Selection::Rect { x0, y0, x1, y1 } => {
+            let l = (*x0).min(*x1).clamp(0, w);
+            let r = (*x0).max(*x1).clamp(0, w);
+            let t = (*y0).min(*y1).clamp(0, h);
+            let b = (*y0).max(*y1).clamp(0, h);
+            if r - l < MIN_SEL || b - t < MIN_SEL {
+                return None;
+            }
+            for y in t..b {
+                for x in l..r {
+                    inside[(y * w + x) as usize] = true;
+                }
+            }
+            (l, t, r, b)
+        }
+        Selection::Lasso(pts) => {
+            if pts.len() < 3 {
+                return None;
+            }
+            let l = pts.iter().map(|p| p.0).min()?.clamp(0, w);
+            let r = pts.iter().map(|p| p.0).max()?.clamp(0, w);
+            let t = pts.iter().map(|p| p.1).min()?.clamp(0, h);
+            let b = pts.iter().map(|p| p.1).max()?.clamp(0, h);
+            if r - l < MIN_SEL || b - t < MIN_SEL {
+                return None;
+            }
+            for y in t..b {
+                let spans = scanline_spans(pts, y, 0); // フル画像座標のまま使う (offset無し)
+                for (sx, ex) in spans {
+                    let sx = sx.clamp(0, w);
+                    let ex = ex.clamp(0, w);
+                    for x in sx..ex {
+                        inside[(y * w + x) as usize] = true;
+                    }
+                }
+            }
+            (l, t, r, b)
+        }
+    };
+
+    // 隣接色の平均: バウンディングボックスを外側へ RING px 拡張したリング領域
+    // (=選択範囲の外側かつ拡張範囲内)の平均色。無ければ白にフォールバック。
+    const RING: i32 = 12;
+    let el = (l - RING).max(0);
+    let et = (t - RING).max(0);
+    let er = (r + RING).min(w);
+    let eb = (b + RING).min(h);
+    let (mut sb, mut sg, mut sr, mut n) = (0u64, 0u64, 0u64, 0u64);
+    for y in et..eb {
+        for x in el..er {
+            let idx = (y * w + x) as usize;
+            if !inside[idx] {
+                let p = idx * 4;
+                sb += img.bgra[p] as u64;
+                sg += img.bgra[p + 1] as u64;
+                sr += img.bgra[p + 2] as u64;
+                n += 1;
+            }
+        }
+    }
+    let fill = if n > 0 {
+        [(sb / n) as u8, (sg / n) as u8, (sr / n) as u8, 255]
+    } else {
+        [255, 255, 255, 255]
+    };
+
+    let mut out = img.clone();
+    for (i, is_in) in inside.iter().enumerate() {
+        if *is_in {
+            let p = i * 4;
+            out.bgra[p..p + 4].copy_from_slice(&fill);
+        }
+    }
+    Some(out)
+}
+
 /// 多角形と水平線 y の交差から内側スパン [(開始x, 終了x)] を求める (偶奇規則)。
 /// x はクロップ後座標に合わせるため offset_x を引いて返す。
 fn scanline_spans(pts: &[(i32, i32)], y: i32, offset_x: i32) -> Vec<(i32, i32)> {
@@ -186,5 +272,46 @@ mod tests {
     fn 点が少なすぎる投げ輪は無効() {
         let img = solid(40, 40, [0, 0, 0, 255]);
         assert!(lasso_crop(&img, &[(1, 1), (2, 2)]).is_none());
+    }
+
+    #[test]
+    fn 矩形の消去は同サイズのまま内側だけ隣接色で塗る() {
+        let img = solid(60, 60, [10, 20, 30, 255]);
+        let sel = Selection::Rect { x0: 20, y0: 20, x1: 40, y1: 40 };
+        let out = erase_selection(&img, &sel).unwrap();
+        // サイズは変わらない (トリミングしない)
+        assert_eq!((out.width, out.height), (60, 60));
+        // 選択範囲内は周辺色(単色画像なので同じ色)で塗られる
+        assert_eq!(px(&out, 30, 30), [10, 20, 30, 255]);
+        // 選択範囲外は元のまま
+        assert_eq!(px(&out, 0, 0), [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn 消去は選択範囲に隣接する色を使う_遠い背景の影響を受けない() {
+        // 画像全体は白。選択範囲(左上)のすぐ外だけを黒で囲む。
+        let mut img = solid(80, 80, [255, 255, 255, 255]);
+        // 選択範囲 (20,20)-(40,40) の周囲(リング内)を黒で塗る
+        for y in 5..55u32 {
+            for x in 5..55u32 {
+                let is_ring = !(20..40).contains(&x) || !(20..40).contains(&y);
+                if is_ring {
+                    let p = ((y * 80 + x) * 4) as usize;
+                    img.bgra[p..p + 4].copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+        }
+        let sel = Selection::Rect { x0: 20, y0: 20, x1: 40, y1: 40 };
+        let out = erase_selection(&img, &sel).unwrap();
+        // 隣接色(黒)で塗られるので、選択範囲内は黒に近い値になる(遠くの白背景の影響を受けない)
+        let c = px(&out, 30, 30);
+        assert!(c[0] < 40, "隣接する黒に近い色で塗られるはず (got {c:?})");
+    }
+
+    #[test]
+    fn 小さすぎる選択の消去は無効() {
+        let img = solid(60, 60, [0, 0, 0, 255]);
+        let sel = Selection::Rect { x0: 10, y0: 10, x1: 12, y1: 12 };
+        assert!(erase_selection(&img, &sel).is_none());
     }
 }

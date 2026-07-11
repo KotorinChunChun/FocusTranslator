@@ -101,6 +101,8 @@ pub struct App {
     detect_on: bool,
     /// 領域検出モード: 検出スレッドの実行中
     detect_busy: bool,
+    /// Ctrl+Z のエッジ検出用 (ポーリングで前回押下状態を保持)
+    ctrl_z_prev: bool,
 }
 
 thread_local! {
@@ -161,6 +163,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             scroll_y: 0,
             detect_on: false,
             detect_busy: false,
+            ctrl_z_prev: false,
         });
     });
 }
@@ -252,8 +255,34 @@ pub fn handle_command(hwnd: HWND, cmd: usize) {
     }
 }
 
+/// 画像編集パネル表示中の Ctrl+Z (元に戻す) をエッジ検出する。オーバーレイは
+/// WS_EX_NOACTIVATE でキーボードフォーカスを持てないため、他のホットキーと同様に
+/// GetAsyncKeyState のポーリングで検出する (SPECv0.4追補)。
+fn tick_edit_undo_hotkey() {
+    if !overlay::is_editing_image() {
+        with_app(|app| app.ctrl_z_prev = false);
+        return;
+    }
+    const VK_CONTROL: i32 = 0x11;
+    const VK_Z: i32 = 0x5A;
+    let down = unsafe {
+        (GetAsyncKeyState(VK_CONTROL) as u16 & 0x8000) != 0
+            && (GetAsyncKeyState(VK_Z) as u16 & 0x8000) != 0
+    };
+    let edge = with_app(|app| {
+        let prev = app.ctrl_z_prev;
+        app.ctrl_z_prev = down;
+        !prev && down
+    })
+    .unwrap_or(false);
+    if edge {
+        crate::chip_handler::perform_edit_undo();
+    }
+}
+
 /// 100ms周期のポーリング (SPEC §4)
 pub fn tick() {
+    tick_edit_undo_hotkey();
     let action = with_app(|app| {
         let down = unsafe { (GetAsyncKeyState(app.cfg.hold_vk()) as u16 & 0x8000) != 0 };
         let esc = unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 };

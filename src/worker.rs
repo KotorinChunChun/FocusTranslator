@@ -91,6 +91,41 @@ impl AppContext {
             uia_nodes,
         }
     }
+
+    /// 認識結果を表す WorkerMsg::Source を組み立てる。アプリ情報 (exe/title/uia) は
+    /// このコンテキストから埋めるため、各認識経路 (ホールド/範囲/チップ/画像編集) の
+    /// 呼び出し側は認識固有の値だけを渡せばよい。
+    #[allow(clippy::too_many_arguments)]
+    fn source_msg(
+        &self,
+        text: String,
+        method: &'static str,
+        engine: Option<String>,
+        img: Option<Arc<Captured>>,
+        pin: bool,
+        anchor: (i32, i32),
+        focus: ocr::Focus,
+        ms: u128,
+        capture_id: Option<i64>,
+        recog_id: Option<i64>,
+    ) -> WorkerMsg {
+        WorkerMsg::Source {
+            text,
+            method,
+            engine,
+            img,
+            pin,
+            anchor,
+            focus,
+            ms,
+            capture_id,
+            recog_id,
+            app_title: self.title.clone(),
+            app_exe: self.exe.clone().unwrap_or_default(),
+            uia_path: self.uia_path.clone(),
+            uia_nodes: self.uia_nodes.clone(),
+        }
+    }
 }
 
 /// AppContext からプロンプト置換用コンテキストを組み立てる (SPECv0.4 §7.1)。
@@ -139,6 +174,8 @@ fn log_cap(cfg: &Config, mode: &str, ctx: &AppContext, image: Option<&Captured>)
 }
 
 /// 認識ログを記録し recognition_id を返す(ログOFF時・capture未記録時は None)。
+/// image_hash は同一画像+同一エンジンでの再OCR判定に使う (SPECv0.4追補)。
+#[allow(clippy::too_many_arguments)]
 fn log_recog(
     cfg: &Config,
     capture_id: Option<i64>,
@@ -147,11 +184,12 @@ fn log_recog(
     ms: u128,
     text: Option<&str>,
     error: Option<&str>,
+    image_hash: Option<&str>,
 ) -> Option<i64> {
     if !cfg.log_enabled {
         return None;
     }
-    crate::logdb::log_recognition(capture_id?, method, engine, ms, text, error)
+    crate::logdb::log_recognition(capture_id?, method, engine, ms, text, error, image_hash)
 }
 
 /// engine=llm のときだけアクティブプロファイル名を返す (translations.llm_profile 用)
@@ -160,7 +198,12 @@ fn llm_profile_of(cfg: &Config, engine: &str) -> Option<String> {
 }
 
 /// 翻訳成功ログを記録する(ログOFF時は何もしない)。
+/// 同一入力+同一エンジンのキャッシュヒット時(translate::translate内のメモリキャッシュ)は
+/// 再翻訳しておらず、ログにも新規記録しない (SPECv0.4追補: OCRのハッシュキャッシュと同様の扱い)。
 fn log_trans_ok(cfg: &Config, recog_id: Option<i64>, ms: u128, t: &crate::translate::Translated) {
+    if t.cache_hit {
+        return;
+    }
     let Some(rid) = recog_id else { return };
     if !cfg.log_enabled {
         return;
@@ -315,23 +358,11 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
             let img = cap.map(|(b, _)| Arc::new(b.img));
 
             let capture_id = log_cap(&cfg, "hold", &ctx, log_img.as_ref());
-            let recog_id = log_recog(&cfg, capture_id, "uia", "uia", ms, Some(&text), None);
-            post(main, generation, WorkerMsg::Source {
-                text: text.clone(),
-                method: "UIA",
-                engine: None,
-                img,
-                pin: true,
-                anchor: (x, y),
-                focus,
-                ms,
-                capture_id,
-                recog_id,
-                app_title: ctx.title.clone(),
-                app_exe: ctx.exe.clone().unwrap_or_default(),
-                uia_path: ctx.uia_path.clone(),
-                uia_nodes: ctx.uia_nodes.clone(),
-            });
+            let hash = log_img.as_ref().map(crate::capture::hash_hex);
+            let recog_id = log_recog(&cfg, capture_id, "uia", "uia", ms, Some(&text), None, hash.as_deref());
+            post(main, generation, ctx.source_msg(
+                text.clone(), "UIA", None, img, true, (x, y), focus, ms, capture_id, recog_id,
+            ));
             // UIA経路なので ocr_engine は空文字 (SPECv0.4 §7.1)
             let pc = prompt_ctx(&ctx, "");
             translate(generation, cfg, text, tr_engine, main, recog_id, pc);
@@ -344,7 +375,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
             Ok(c) => c,
             Err(e) => {
                 let capture_id = log_cap(&cfg, "hold", &ctx, None);
-                log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e));
+                log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
                 post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), engine: None });
                 return;
             }
@@ -376,29 +407,19 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 util::perf_log(cfg.perf_log, &format!("source OCR({engine}) {ms}ms"));
                 // ログにはOCR対象領域だけを保存する (全体は保持画像=再OCR用)
                 let log_img = ocr::crop_for_focus(&used.img, focus);
+                let hash = crate::capture::hash_hex(&log_img);
                 let capture_id = log_cap(&cfg, "hold", &ctx, Some(&log_img));
-                let recog_id = log_recog(&cfg, capture_id, "ocr", &engine, ms, Some(&o.text), None);
-                post(main, generation, WorkerMsg::Source {
-                    text: o.text.clone(),
-                    method: "OCR",
-                    engine: Some(engine.clone()),
-                    img: Some(Arc::new(used.img)),
-                    pin: o.text.contains('\n'),
-                    anchor: (x, y),
-                    focus,
-                    ms,
-                    capture_id,
-                    recog_id,
-                    app_title: ctx.title.clone(),
-                    app_exe: ctx.exe.clone().unwrap_or_default(),
-                    uia_path: ctx.uia_path.clone(),
-                    uia_nodes: ctx.uia_nodes.clone(),
-                });
+                let recog_id = log_recog(&cfg, capture_id, "ocr", &engine, ms, Some(&o.text), None, Some(&hash));
+                let pin = o.text.contains('\n');
+                post(main, generation, ctx.source_msg(
+                    o.text.clone(), "OCR", Some(engine.clone()), Some(Arc::new(used.img)), pin,
+                    (x, y), focus, ms, capture_id, recog_id,
+                ));
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
                 let capture_id = log_cap(&cfg, "hold", &ctx, None);
-                log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e));
+                log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
                 post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), engine: Some(engine) });
             }
         }
@@ -431,10 +452,14 @@ fn translate(
     });
 }
 
-/// OCRチップ切替: 保持画像(無ければ再キャプチャ)で選択エンジンOCR→再翻訳 (SPEC §8)
+/// OCRチップ切替: 保持画像(無ければ再キャプチャ)で選択エンジンOCR→再翻訳 (SPEC §8)。
+/// 保持画像がある場合は同じ capture_id を引き継ぎ、新しいcaptureは作らず読み取り結果を
+/// 追記する (SPECv0.4追補)。同一画像+同一エンジンの認識が既にログにあれば、再OCRせず
+/// その結果を再利用する (ログへの新規記録も行わない)。
 #[allow(clippy::too_many_arguments)]
 pub fn reocr(
     generation: u64,
+    capture_id: Option<i64>,
     img: Option<Arc<Captured>>,
     focus: ocr::Focus,
     x: i32,
@@ -450,10 +475,12 @@ pub fn reocr(
         init_com();
         let t0 = Instant::now();
         let mut hover_text: Option<String> = None;
+        let held = img.is_some();
         let (image, focus) = match img {
             Some(i) => (i, focus),
             None => {
-                // 保持画像なし: 初回と同じ基準 (UIA検出領域優先) で再キャプチャする
+                // 保持画像なし: 初回と同じ基準 (UIA検出領域優先) で再キャプチャする。
+                // 対象が変わっている可能性があるため、この場合のみ新しいcaptureとして扱う。
                 let probe = uia::probe_at_point(x, y);
                 match capture_plan::capture_probe(x, y, target, &probe) {
                     Ok((b, kind)) => {
@@ -470,6 +497,30 @@ pub fn reocr(
         };
         let ctx = AppContext::capture(x, y, HWND(target as *mut _));
         let pc = prompt_ctx(&ctx, &ocr_engine);
+        // ログにはOCR対象領域だけを保存する
+        let log_img = ocr::crop_for_focus(&image, focus);
+        let hash = crate::capture::hash_hex(&log_img);
+
+        // 同一画像+同一エンジンの既存認識結果があれば再利用する (再OCRなし・ログ追記なし)
+        // 保持画像があれば既存captureへ追記、無ければ(=対象が変わりうる)新規captureを作る。
+        // ここでは画像ありのcapture_idを先に決める(エラー時は画像なしで作り直す)。
+        let capture_with_img = || if held { capture_id } else { log_cap(&cfg, "chip", &ctx, Some(&log_img)) };
+
+        // 同一画像+同一エンジンの既存認識結果があれば再利用する (再OCRなし・ログ追記なし)
+        if let Some((rid, text)) = crate::logdb::find_cached_recognition(&hash, &ocr_engine) {
+            let ms = t0.elapsed().as_millis();
+            util::perf_log(cfg.perf_log, &format!("reocr {ocr_engine} {ms}ms (cached)"));
+            let use_capture_id = capture_with_img();
+            let pin = text.contains('\n');
+            post(main, generation, ctx.source_msg(
+                text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), pin, anchor, focus, ms,
+                use_capture_id, Some(rid),
+            ));
+            let o = ocr::OcrOutput { text, ..Default::default() };
+            dispatch_translation(generation, cfg, o, tr_engine, main, Some(rid), pc, &t0);
+            return;
+        }
+
         let mut result = ocr::run(&ocr_engine, &cfg, &image, focus, &pc);
         // 段落帯の再キャプチャ時も、直下要素の全テキストから段落を復元する
         if let Ok(o) = &mut result
@@ -482,31 +533,18 @@ pub fn reocr(
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("reocr {ocr_engine} {ms}ms"));
-                // ログにはOCR対象領域だけを保存する
-                let log_img = ocr::crop_for_focus(&image, focus);
-                let capture_id = log_cap(&cfg, "chip", &ctx, Some(&log_img));
-                let recog_id = log_recog(&cfg, capture_id, "ocr", &ocr_engine, ms, Some(&o.text), None);
-                post(main, generation, WorkerMsg::Source {
-                    text: o.text.clone(),
-                    method: "OCR",
-                    engine: Some(ocr_engine.clone()),
-                    img: Some(image),
-                    pin: o.text.contains('\n'),
-                    anchor,
-                    focus,
-                    ms,
-                    capture_id,
-                    recog_id,
-                    app_title: ctx.title.clone(),
-                    app_exe: ctx.exe.clone().unwrap_or_default(),
-                    uia_path: ctx.uia_path.clone(),
-                    uia_nodes: ctx.uia_nodes.clone(),
-                });
+                let use_capture_id = capture_with_img();
+                let recog_id = log_recog(&cfg, use_capture_id, "ocr", &ocr_engine, ms, Some(&o.text), None, Some(&hash));
+                let pin = o.text.contains('\n');
+                post(main, generation, ctx.source_msg(
+                    o.text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), pin, anchor, focus,
+                    ms, use_capture_id, recog_id,
+                ));
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
-                let capture_id = log_cap(&cfg, "chip", &ctx, None);
-                log_recog(&cfg, capture_id, "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e));
+                let use_capture_id = if held { capture_id } else { log_cap(&cfg, "chip", &ctx, None) };
+                log_recog(&cfg, use_capture_id, "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e), Some(&hash));
                 post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: Some(ocr_engine) });
             }
         }
@@ -515,6 +553,8 @@ pub fn reocr(
 
 /// 画像編集(トリミング)適用後の再認識 (SPECv0.4 §4-3, §8.2.1):
 /// 新しい capture は作らず、同じ capture の下に認識行を追加する。
+/// 同一画像+同一エンジンの認識が既にログにあれば、再OCRせずその結果を再利用する
+/// (ログへの新規記録も行わない) (SPECv0.4追補)。
 #[allow(clippy::too_many_arguments)]
 pub fn reocr_edited(
     generation: u64,
@@ -540,33 +580,36 @@ pub fn reocr_edited(
             uia_nodes,
         };
         let pc = prompt_ctx(&ctx, &ocr_engine);
+        let hash = crate::capture::hash_hex(&image);
+
+        // 同一画像+同一エンジンの既存認識結果があれば再利用する (再OCRなし・ログ追記なし)
+        if let Some((rid, text)) = crate::logdb::find_cached_recognition(&hash, &ocr_engine) {
+            let ms = t0.elapsed().as_millis();
+            util::perf_log(cfg.perf_log, &format!("reocr_edited {ocr_engine} {ms}ms (cached)"));
+            post(main, generation, ctx.source_msg(
+                text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), true, anchor,
+                ocr::Focus::All, ms, capture_id, Some(rid),
+            ));
+            let o = ocr::OcrOutput { text, ..Default::default() };
+            dispatch_translation(generation, cfg, o, tr_engine, main, Some(rid), pc, &t0);
+            return;
+        }
+
         // クロップ済みの新しい画像を対象とするため、行/段落の絞り込みは行わず全体をOCRする
         let result = ocr::run(&ocr_engine, &cfg, &image, ocr::Focus::All, &pc);
         match result {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("reocr_edited {ocr_engine} {ms}ms"));
-                let recog_id = log_recog(&cfg, capture_id, "ocr", &ocr_engine, ms, Some(&o.text), None);
-                post(main, generation, WorkerMsg::Source {
-                    text: o.text.clone(),
-                    method: "OCR",
-                    engine: Some(ocr_engine.clone()),
-                    img: Some(image),
-                    pin: true,
-                    anchor,
-                    focus: ocr::Focus::All,
-                    ms,
-                    capture_id,
-                    recog_id,
-                    app_title: ctx.title.clone(),
-                    app_exe: ctx.exe.clone().unwrap_or_default(),
-                    uia_path: ctx.uia_path.clone(),
-                    uia_nodes: ctx.uia_nodes.clone(),
-                });
+                let recog_id = log_recog(&cfg, capture_id, "ocr", &ocr_engine, ms, Some(&o.text), None, Some(&hash));
+                post(main, generation, ctx.source_msg(
+                    o.text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), true, anchor,
+                    ocr::Focus::All, ms, capture_id, recog_id,
+                ));
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
-                log_recog(&cfg, capture_id, "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e));
+                log_recog(&cfg, capture_id, "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e), Some(&hash));
                 post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: Some(ocr_engine) });
             }
         }
@@ -651,29 +694,18 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("region OCR({engine}) {ms}ms"));
+                let hash = crate::capture::hash_hex(&img);
                 let capture_id = log_cap(&cfg, "region", &ctx, Some(&img));
-                let recog_id = log_recog(&cfg, capture_id, "ocr", &engine, ms, Some(&o.text), None);
-                post(main, generation, WorkerMsg::Source {
-                    text: o.text.clone(),
-                    method: "OCR",
-                    engine: Some(engine.clone()),
-                    img: Some(Arc::new(img)),
-                    pin: true,
-                    anchor,
-                    focus: ocr::Focus::All,
-                    ms,
-                    capture_id,
-                    recog_id,
-                    app_title: ctx.title.clone(),
-                    app_exe: ctx.exe.clone().unwrap_or_default(),
-                    uia_path: ctx.uia_path.clone(),
-                    uia_nodes: ctx.uia_nodes.clone(),
-                });
+                let recog_id = log_recog(&cfg, capture_id, "ocr", &engine, ms, Some(&o.text), None, Some(&hash));
+                post(main, generation, ctx.source_msg(
+                    o.text.clone(), "OCR", Some(engine.clone()), Some(Arc::new(img)), true, anchor,
+                    ocr::Focus::All, ms, capture_id, recog_id,
+                ));
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
                 let capture_id = log_cap(&cfg, "region", &ctx, None);
-                log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e));
+                log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
                 post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: Some(engine) });
             }
         }

@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
@@ -43,7 +43,7 @@ fn conn() -> Option<&'static Mutex<Connection>> {
     }
 }
 
-/// 旧スキーマ(v3未満)のDBを検出したら、DBファイルとimages配下PNGを破棄する (SPECv0.4 §8.4)。
+/// 旧スキーマ(SCHEMA_VERSION未満)のDBを検出したら、DBファイルとimages配下PNGを破棄する (SPECv0.4 §8.4)。
 fn discard_old_db_if_needed() -> Result<(), String> {
     let path = db_path();
     if !path.exists() {
@@ -101,7 +101,8 @@ fn init_db() -> Result<Connection, String> {
             source_text TEXT,
             success INTEGER NOT NULL,
             error TEXT,
-            tags TEXT
+            tags TEXT,
+            image_hash TEXT
          );
          CREATE TABLE IF NOT EXISTS translations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,6 +136,7 @@ fn init_db() -> Result<Connection, String> {
             tokens_out INTEGER
          );
          CREATE INDEX IF NOT EXISTS idx_recog_capture ON recognitions(capture_id);
+         CREATE INDEX IF NOT EXISTS idx_recog_hash ON recognitions(image_hash, engine);
          CREATE INDEX IF NOT EXISTS idx_tr_recog ON translations(recognition_id);
          CREATE INDEX IF NOT EXISTS idx_ex_recog ON explanations(recognition_id);",
     )
@@ -198,7 +200,8 @@ pub fn replace_capture_image(capture_id: i64, image: &crate::capture::Captured) 
     store_capture_image(&guard, capture_id, image);
 }
 
-/// 認識ログを記録し recognition_id を返す。
+/// 認識ログを記録し recognition_id を返す。image_hash は同一画像+同一エンジンでの
+/// 再OCR判定に使う (SPECv0.4追補)。ハッシュを算出できない/不要な場合は None。
 pub fn log_recognition(
     capture_id: i64,
     method: &str,
@@ -206,23 +209,41 @@ pub fn log_recognition(
     duration_ms: u128,
     source_text: Option<&str>,
     error: Option<&str>,
+    image_hash: Option<&str>,
 ) -> Option<i64> {
     let m = conn()?;
     let guard = m.lock().ok()?;
     let success = error.is_none();
     if let Err(e) = guard.execute(
         "INSERT INTO recognitions
-            (capture_id, ts_ms, method, engine, duration_ms, source_text, success, error, tags)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+            (capture_id, ts_ms, method, engine, duration_ms, source_text, success, error, tags, image_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9)",
         rusqlite::params![
             capture_id, now_ms(), method, engine, duration_ms as i64,
-            source_text, success as i64, error
+            source_text, success as i64, error, image_hash
         ],
     ) {
         util::app_log(&format!("log_recognition failed: {e}"));
         return None;
     }
     Some(guard.last_insert_rowid())
+}
+
+/// 同一画像(image_hash)+同一エンジンでの成功済み認識結果があれば、その
+/// (recognition_id, source_text) を返す (SPECv0.4追補: 再OCR/再ログを避けるためのキャッシュ)。
+/// 最新のものを優先する。
+pub fn find_cached_recognition(image_hash: &str, engine: &str) -> Option<(i64, String)> {
+    let m = conn()?;
+    let guard = m.lock().ok()?;
+    guard
+        .query_row(
+            "SELECT id, source_text FROM recognitions
+             WHERE image_hash = ?1 AND engine = ?2 AND success = 1 AND source_text IS NOT NULL
+             ORDER BY ts_ms DESC LIMIT 1",
+            rusqlite::params![image_hash, engine],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()
 }
 
 /// 翻訳ログを記録する。
@@ -658,7 +679,7 @@ mod tests {
             "hold", Some("game.exe"), Some("Game Window"), Some("Root > Panel"), None, false,
         )
         .expect("capture id");
-        let rid = log_recognition(cid, "ocr", "win", 200, Some("hello"), None).expect("recognition id");
+        let rid = log_recognition(cid, "ocr", "win", 200, Some("hello"), None, Some("hash-a")).expect("recognition id");
         log_translation(
             rid, "llm", Some("prof1"), "en", "ja", 300, false, Some("こんにちは"), None,
             Some("{\"req\":1}"), Some("{\"res\":2}"), Some(10), Some(5),
@@ -695,8 +716,13 @@ mod tests {
         assert_eq!(recognitions_for(cid)[0].tags, "重要");
 
         // 再OCR相当: 同じ capture に認識行を追加
-        let rid2 = log_recognition(cid, "ocr", "paddle", 100, Some("hello2"), None).unwrap();
+        let rid2 = log_recognition(cid, "ocr", "paddle", 100, Some("hello2"), None, Some("hash-b")).unwrap();
         assert_eq!(recognitions_for(cid).len(), 2);
+
+        // 同一画像+同一エンジンの既存認識はキャッシュとして取得できる (再OCR回避, SPECv0.4追補)
+        assert_eq!(find_cached_recognition("hash-a", "win"), Some((rid, "hello".to_string())));
+        assert_eq!(find_cached_recognition("hash-a", "paddle"), None, "エンジンが違えばヒットしない");
+        assert_eq!(find_cached_recognition("hash-x", "win"), None, "ハッシュが違えばヒットしない");
 
         // CASCADE削除: recognition を消すと配下の翻訳・解説も消える
         delete_recognition(rid);
@@ -713,7 +739,7 @@ mod tests {
         let mut last_rid = 0;
         for i in 0..4 {
             let c = log_capture("hold", None, None, None, None, false).unwrap();
-            last_rid = log_recognition(c, "ocr", "win", 100, Some(&format!("line{i}")), None).unwrap();
+            last_rid = log_recognition(c, "ocr", "win", 100, Some(&format!("line{i}")), None, None).unwrap();
         }
         rotate(2);
         assert_eq!(search_captures("", "", 100).len(), 2, "rotate should cap captures");

@@ -4,15 +4,17 @@
 use crate::engine;
 use crate::overlay::{
     EditTool, OverlayContent, CHIP_CLOSE, CHIP_COPY, CHIP_COPY_INFO,
-    CHIP_COPY_SRC, CHIP_COPY_TR, CHIP_EDIT_APPLY, CHIP_EDIT_CANCEL, CHIP_EDIT_LASSO,
-    CHIP_EDIT_RECT, CHIP_EDIT_RESET, CHIP_EXPLAIN, CHIP_EXPLAIN_QUICK, CHIP_IMAGE, CHIP_OCR_BASE,
-    CHIP_OPEN_LOG, CHIP_PIN, CHIP_SETTINGS, CHIP_SWAP_LANG, CHIP_TR_BASE, CHIP_UIA_NODE_BASE,
+    CHIP_COPY_SRC, CHIP_COPY_TR, CHIP_EDIT_APPLY, CHIP_EDIT_CANCEL, CHIP_EDIT_ERASE,
+    CHIP_EDIT_LASSO, CHIP_EDIT_RECT, CHIP_EDIT_RESET, CHIP_EDIT_UNDO, CHIP_EXPLAIN,
+    CHIP_EXPLAIN_QUICK, CHIP_IMAGE, CHIP_OCR_BASE, CHIP_OPEN_LOG, CHIP_PIN, CHIP_SETTINGS,
+    CHIP_SWAP_LANG, CHIP_TR_BASE, CHIP_UIA_NODE_BASE,
 };
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK,
     DEFAULT_CHARSET, DEFAULT_PITCH, DeleteObject, DrawTextW, FONT_OUTPUT_PRECISION, FW_BOLD,
-    FW_NORMAL, GetDC, HDC, HFONT, HGDIOBJ, ReleaseDC, SelectObject,
+    FW_NORMAL, GetDC, GetMonitorInfoW, HDC, HFONT, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromPoint, ReleaseDC, SelectObject,
 };
 use windows::core::w;
 
@@ -24,6 +26,10 @@ pub const COL_TEXT: u32 = 0x00FFFFFF;
 pub const COL_STATUS: u32 = 0x0050C8FF;
 pub const COL_CHIP: u32 = 0x003F3833;
 pub const COL_CHIP_ACTIVE: u32 = 0x00D28C3C;
+/// ホバー中のチップ背景色 (COL_CHIPより明るいグレー。フォーカス可視化用)
+pub const COL_CHIP_HOVER: u32 = 0x00554C44;
+/// ホバー中のアクティブチップ背景色 (COL_CHIP_ACTIVEより明るいオレンジ)
+pub const COL_CHIP_ACTIVE_HOVER: u32 = 0x00E6A356;
 pub const COL_CHIP_TEXT: u32 = 0x00E8E4E0;
 pub const COL_CHIP_DISABLED: u32 = 0x00787068;
 pub const COL_LABEL: u32 = 0x00908A84;
@@ -664,15 +670,36 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
 
         let display_h = y.min(800);
 
-        // 画像編集パネル (SPECv0.4 §1-§4): 既存コンテンツの右側に追加表示する。
-        // ウィンドウ拡張 (§2.1) ・縮小表示 (§2.2) ・矩形/投げ輪トリミング用チップ (§3) を配置する。
+        // 画像編集パネル (SPECv0.4 §1-§4 + 追補): 既存コンテンツの右側に追加表示する。
+        // ウィンドウ拡張 (§2.1) ・縮小表示 (§2.2) ・矩形/投げ輪トリミング用チップ (§3) に加え、
+        // マウスホイールでの拡大表示に応じてウィンドウをモニタのワークエリアいっぱいまで広げる。
         let mut total_w = w;
         let mut total_h = display_h;
         let mut edit_preview: Option<(RECT, f32)> = None;
         if let Some(info) = &content.edit {
             let iw = (info.img_w.max(1)) as f32;
             let ih = (info.img_h.max(1)) as f32;
-            let scale = (EDIT_PREVIEW_MAX_W as f32 / iw).min(EDIT_PREVIEW_MAX_H as f32 / ih).min(1.0);
+
+            // アンカー位置のモニタのワークエリアから、プレビューに使える最大サイズを動的に求める
+            // (固定480x460ではなく、実際の画面サイズいっぱいまでウィンドウを拡張できるようにする)
+            let (max_pw, max_ph) = {
+                let pt = POINT { x: content.anchor.0, y: content.anchor.1 };
+                let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+                let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+                let _ = GetMonitorInfoW(hmon, &mut mi);
+                let wa = mi.rcWork;
+                let screen_w = wa.right - wa.left;
+                let screen_h = wa.bottom - wa.top;
+                let mw = screen_w - w - PANEL_MARGIN * 2 - 10 - PAD * 2;
+                let mh = screen_h - PAD * 2 - (CHIP_H + 8) - (CHIP_H + PAD) - 10;
+                (mw.max(EDIT_PREVIEW_MAX_W).min(4000), mh.max(EDIT_PREVIEW_MAX_H).min(4000))
+            };
+
+            // 基準スケール: 拡大はせず(zoom=1.0時)最大サイズに収める。ズーム倍率を掛けた上で、
+            // 最大サイズ(=モニタのワークエリアから求めた上限)を超えないようクランプする。
+            let base_fit = (max_pw as f32 / iw).min(max_ph as f32 / ih).min(1.0);
+            let hard_max = (max_pw as f32 / iw).min(max_ph as f32 / ih);
+            let scale = (base_fit * info.zoom).clamp(base_fit * 0.2, hard_max.max(base_fit));
             let pw = ((iw * scale).round() as i32).max(40);
             let ph = ((ih * scale).round() as i32).max(40);
 
@@ -680,14 +707,17 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             let mut ey = PAD;
             let mut edit_max_x = panel_left;
 
-            // ツール切替チップ (矩形/投げ輪/リセット)
+            // ツール+選択操作チップ (矩形/投げ輪/選択解除/選択範囲を残す/選択範囲を消す)
             let mut ex = panel_left;
-            let tools: [(&str, usize, bool); 3] = [
-                ("矩形", CHIP_EDIT_RECT, info.tool == EditTool::Rect),
-                ("投げ輪", CHIP_EDIT_LASSO, info.tool == EditTool::Lasso),
-                ("リセット", CHIP_EDIT_RESET, false),
+            let selection_enabled = info.has_selection && !content.busy;
+            let tools: [(&str, usize, bool, bool); 5] = [
+                ("矩形", CHIP_EDIT_RECT, info.tool == EditTool::Rect, !content.busy),
+                ("投げ輪", CHIP_EDIT_LASSO, info.tool == EditTool::Lasso, !content.busy),
+                ("選択解除", CHIP_EDIT_RESET, false, !content.busy),
+                ("選択範囲を残す", CHIP_EDIT_APPLY, false, selection_enabled),
+                ("選択範囲を消す", CHIP_EDIT_ERASE, false, selection_enabled),
             ];
-            for (lab, id, active) in tools {
+            for (lab, id, active, enabled) in tools {
                 let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                 let cwid = cw + 18;
                 items.push(Item::Chip {
@@ -695,25 +725,25 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                     label: lab.to_string(),
                     id,
                     active,
-                    enabled: !content.busy,
+                    enabled,
                 });
                 ex += cwid + 6;
             }
             edit_max_x = edit_max_x.max(ex - 6 + PAD);
             ey += CHIP_H + 8;
 
-            // 画像プレビュー (縦横比維持で縮小、拡大はしない)
+            // 画像プレビュー (縦横比維持。ズーム未操作時は拡大しない。ホイールで拡大縮小できる)
             let preview_rect = RECT { left: panel_left, top: ey, right: panel_left + pw, bottom: ey + ph };
             edit_preview = Some((preview_rect, scale));
             edit_max_x = edit_max_x.max(preview_rect.right + PAD);
             ey += ph + 10;
 
-            // 適用/戻る
-            let apply_enabled = info.has_selection && !content.busy;
+            // 元に戻す/編集終了
+            let undo_enabled = info.has_undo && !content.busy;
             let mut ax = panel_left;
             let acts: [(&str, usize, bool); 2] = [
-                ("適用", CHIP_EDIT_APPLY, apply_enabled),
-                ("戻る", CHIP_EDIT_CANCEL, !content.busy),
+                ("元に戻す", CHIP_EDIT_UNDO, undo_enabled),
+                ("編集終了", CHIP_EDIT_CANCEL, !content.busy),
             ];
             for (lab, id, enabled) in acts {
                 let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);

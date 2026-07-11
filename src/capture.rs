@@ -28,6 +28,17 @@ pub struct Captured {
     pub bgra: Vec<u8>,
 }
 
+/// 画像内容のハッシュ値 (SPECv0.4追補: 同一画像+同一エンジンでの再OCR判定に使う)。
+/// サイズ + ピクセル列をそのままSHA-256にかけるだけで、同一内容なら常に同じ値になる。
+pub fn hash_hex(img: &Captured) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(img.width.to_le_bytes());
+    hasher.update(img.height.to_le_bytes());
+    hasher.update(&img.bgra);
+    format!("{:x}", hasher.finalize())
+}
+
 /// ウィンドウの画面上の矩形(DWM拡張フレーム境界を優先)
 pub fn window_frame_rect(hwnd: HWND) -> RECT {
     unsafe {
