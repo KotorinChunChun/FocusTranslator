@@ -139,7 +139,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         unsafe {
                             let _ = PostMessageW(
                                 Some(HWND(st.main_hwnd as *mut _)),
-                                crate::WM_APP_REGION,
+                                crate::app_state::WM_APP_REGION,
                                 WPARAM(0),
                                 LPARAM(Box::into_raw(rect) as isize),
                             );

@@ -117,7 +117,7 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
                     lpfnWndProc: Some(wndproc),
                     hInstance: instance,
                     hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                    hIcon: crate::app_icon(),
+                    hIcon: crate::app_state::app_icon(),
                     hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
                         (COLOR_BTNFACE.0 + 1) as usize as *mut _,
                     ),
@@ -718,8 +718,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     // main へ設定再読込を通知
                     unsafe {
                         let _ = PostMessageW(
-                            Some(crate::main_hwnd()),
-                            crate::WM_APP_CFG,
+                            Some(crate::app_state::main_hwnd()),
+                            crate::app_state::WM_APP_CFG,
                             WPARAM(0),
                             LPARAM(0),
                         );
@@ -730,8 +730,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     // main へ設定再読込を通知
                     unsafe {
                         let _ = PostMessageW(
-                            Some(crate::main_hwnd()),
-                            crate::WM_APP_CFG,
+                            Some(crate::app_state::main_hwnd()),
+                            crate::app_state::WM_APP_CFG,
                             WPARAM(0),
                             LPARAM(0),
                         );
@@ -755,8 +755,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     cfg.save();
                     unsafe {
                         let _ = PostMessageW(
-                            Some(crate::main_hwnd()),
-                            crate::WM_APP_CFG,
+                            Some(crate::app_state::main_hwnd()),
+                            crate::app_state::WM_APP_CFG,
                             WPARAM(0),
                             LPARAM(0),
                         );

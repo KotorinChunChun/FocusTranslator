@@ -1,13 +1,14 @@
 // 認識・翻訳ワーカースレッド (SPEC §6)
 // 各サイクルは世代番号 generation を持ち、main 側で古い世代の結果は破棄される。
-use crate::capture::{self, Captured};
+use crate::capture::Captured;
+use crate::capture_plan;
 use crate::config::Config;
 use crate::{ocr, uia, util};
 use std::sync::Arc;
 use std::time::Instant;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
-use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindow, PostMessageW};
+use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 /// ワーカーから main へ送るメッセージ(LPARAM に Box して渡す)
 pub enum WorkerMsg {
@@ -53,7 +54,7 @@ fn post(main: isize, generation: u64, msg: WorkerMsg) {
     unsafe {
         let _ = PostMessageW(
             Some(HWND(main as *mut _)),
-            crate::WM_APP_WORKER,
+            crate::app_state::WM_APP_WORKER,
             WPARAM(generation as usize),
             LPARAM(ptr),
         );
@@ -66,7 +67,7 @@ fn init_com() {
     }
 }
 
-/// 翻訳対象アプリのコンテキスト (exe名 / ウィンドウタイトル / UIA要素パス; SPEC v0.2 §2.3.1)
+/// 翻訳対象アプリのコンテキスト (exe名 / ウィンドウタイトル / UIA要素パス; SPEC v0.3 §2.3.1)
 struct AppContext {
     exe: Option<String>,
     title: String,
@@ -197,122 +198,6 @@ fn effective_translator(cfg: &Config) -> String {
     if allowed { e.to_string() } else { "local".to_string() }
 }
 
-/// ホールド認識で切り出すカーソル周辺帯のサイズ (px)。領域検出モードの枠表示と共用。
-pub const BAND_W: i32 = 1200;
-pub const BAND_H: i32 = 160;
-/// UIA矩形とカーソルY座標の許容距離 (px)。これ以上離れた矩形は採用しない。
-const NEAR_Y_PX: i32 = 10;
-/// 直下要素(TextPatternなし)をそのままキャプチャする高さの上限 (px)。
-/// これより高い要素は段落帯 (要素幅 × カーソル中心 PARA_BAND_H) に切り替える。
-const HOVER_MAX_H: i32 = 320;
-/// 段落帯の高さ (px)。段落全体を拾えるよう既定帯より上下に広くとる。
-const PARA_BAND_H: i32 = 320;
-/// 採用した矩形に付ける余白 (px)。文字の欠けを防ぐ。
-const CAP_PAD: i32 = 6;
-
-/// キャプチャ矩形の由来 (plan_capture_rect の決定結果)
-#[derive(Clone, Copy, PartialEq)]
-pub enum CapKind {
-    /// UIA行矩形(黄)の統合
-    Line,
-    /// TextPattern要素(緑)
-    Element,
-    /// 直下要素(紫)
-    Hover,
-    /// 背の高い直下要素内の段落帯 (OCRは段落モード)
-    HoverBand,
-    /// 既定のカーソル中心帯(橙)
-    Band,
-}
-
-impl CapKind {
-    /// 領域検出モードのラベル表示用
-    pub fn label(&self) -> &'static str {
-        match self {
-            CapKind::Line => "UIA行",
-            CapKind::Element => "UIA要素",
-            CapKind::Hover => "直下要素",
-            CapKind::HoverBand => "段落帯",
-            CapKind::Band => "既定帯",
-        }
-    }
-}
-
-/// 矩形とY座標の垂直距離 (内側なら0)
-fn v_dist(r: &RECT, y: i32) -> i32 {
-    (r.top - y).max(y - r.bottom).max(0)
-}
-
-/// 幅・高さが最低限あるか
-fn rect_valid(r: &RECT) -> bool {
-    r.right - r.left >= 8 && r.bottom - r.top >= 4
-}
-
-/// 複数矩形を1つの外接矩形へ統合
-fn merge_rects(rects: &[RECT]) -> RECT {
-    let mut m = rects[0];
-    for r in &rects[1..] {
-        m.left = m.left.min(r.left);
-        m.top = m.top.min(r.top);
-        m.right = m.right.max(r.right);
-        m.bottom = m.bottom.max(r.bottom);
-    }
-    m
-}
-
-/// 余白を付けてウィンドウ矩形へクランプ
-fn pad_clamp(r: &RECT, win: &RECT) -> RECT {
-    RECT {
-        left: (r.left - CAP_PAD).max(win.left),
-        top: (r.top - CAP_PAD).max(win.top),
-        right: (r.right + CAP_PAD).min(win.right),
-        bottom: (r.bottom + CAP_PAD).min(win.bottom),
-    }
-}
-
-/// UIA検出結果からキャプチャすべきスクリーン矩形を決める。
-/// 優先: UIA行矩形(統合) → TextPattern要素 → 直下要素(高すぎる場合は段落帯) → 既定帯。
-/// カーソルYから NEAR_Y_PX 以上離れた矩形は誤検出とみなして採用しない。
-/// 領域検出モード(detect)の枠表示と実際のキャプチャで共用する。
-pub fn plan_capture_rect(p: &crate::uia::UiaProbe, win: &RECT, x: i32, y: i32) -> (RECT, CapKind) {
-    // 黄: 行矩形群を1つの長方形に統合
-    if !p.line_rects.is_empty() {
-        let merged = merge_rects(&p.line_rects);
-        if rect_valid(&merged) && v_dist(&merged, y) < NEAR_Y_PX {
-            return (pad_clamp(&merged, win), CapKind::Line);
-        }
-    }
-    // 緑: TextPattern が見つかった要素
-    if let Some(r) = &p.element_rect
-        && rect_valid(r) && v_dist(r, y) < NEAR_Y_PX {
-            return (pad_clamp(r, win), CapKind::Element);
-        }
-    // 紫: 直下要素。高すぎる場合はカーソル位置の段落を狙った帯へ切り替える
-    if let Some(r) = &p.hover_rect
-        && rect_valid(r) && v_dist(r, y) < NEAR_Y_PX {
-            if r.bottom - r.top > HOVER_MAX_H {
-                let band = RECT {
-                    left: r.left,
-                    top: (y - PARA_BAND_H / 2).max(r.top),
-                    right: r.right,
-                    bottom: (y + PARA_BAND_H / 2).min(r.bottom),
-                };
-                return (pad_clamp(&band, win), CapKind::HoverBand);
-            }
-            return (pad_clamp(r, win), CapKind::Hover);
-        }
-    // 橙: 既定のカーソル中心帯
-    (capture::band_screen_rect(win, x, y, BAND_W, BAND_H), CapKind::Band)
-}
-
-/// キャプチャ由来に応じたOCRの行選択モード
-fn focus_for(kind: CapKind, fy: f32) -> ocr::Focus {
-    match kind {
-        CapKind::HoverBand => ocr::Focus::Paragraph(fy),
-        _ => ocr::Focus::Line(fy),
-    }
-}
-
 /// 検索用の正規化: 空白を除去し小文字化する (OCRとUIA Nameの表記ゆれ吸収)
 fn normalize_for_match(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).flat_map(|c| c.to_lowercase()).collect()
@@ -346,49 +231,6 @@ pub fn paragraph_from_text(full: &str, ocr_line: &str) -> Option<String> {
         }
     }
     None
-}
-
-struct Band {
-    img: Captured,
-    focus_y: f32,
-}
-
-/// 対象ウィンドウをキャプチャし、スクリーン座標の矩形 sr を切り出す。
-/// focus_y は切り出し後画像内でのカーソルYを返す。
-fn capture_screen_rect(target: isize, sr: &RECT, y: i32) -> Result<Band, String> {
-    let hwnd = HWND(target as *mut _);
-    unsafe {
-        if !IsWindow(Some(hwnd)).as_bool() || IsIconic(hwnd).as_bool() {
-            return Err("このウィンドウは取得できません".into());
-        }
-    }
-    let full = capture::capture_window(hwnd)?;
-    let r = capture::window_frame_rect(hwnd);
-    let rw = (r.right - r.left).max(1);
-    let rh = (r.bottom - r.top).max(1);
-    let scale_x = full.width as f32 / rw as f32;
-    let scale_y = full.height as f32 / rh as f32;
-    let left = ((sr.left - r.left) as f32 * scale_x) as i32;
-    let top = ((sr.top - r.top) as f32 * scale_y) as i32;
-    let w = ((sr.right - sr.left) as f32 * scale_x) as i32;
-    let h = ((sr.bottom - sr.top) as f32 * scale_y) as i32;
-    let band = capture::crop(&full, left, top, w, h).ok_or("このウィンドウは取得できません")?;
-    let focus_y = ((y - sr.top.max(r.top)) as f32 * scale_y).max(0.0);
-    Ok(Band { img: band, focus_y })
-}
-
-/// ポインタ直下ウィンドウをキャプチャし、カーソル周辺の帯を切り出す (SPEC §6.3)
-fn capture_band(x: i32, y: i32, target: isize, bw: i32, bh: i32) -> Result<Band, String> {
-    let win = capture::window_frame_rect(HWND(target as *mut _));
-    let sr = capture::band_screen_rect(&win, x, y, bw, bh);
-    capture_screen_rect(target, &sr, y)
-}
-
-/// UIA検出結果に基づいてキャプチャ領域を決めて切り出す (黄/緑/紫 → 既定帯の順)
-fn capture_probe(x: i32, y: i32, target: isize, probe: &crate::uia::UiaProbe) -> Result<(Band, CapKind), String> {
-    let win = capture::window_frame_rect(HWND(target as *mut _));
-    let (rect, kind) = plan_capture_rect(probe, &win, x, y);
-    capture_screen_rect(target, &rect, y).map(|b| (b, kind))
 }
 
 /// OCR結果に統合訳文が含まれていればそのまま表示し、無ければ翻訳ワーカーへ回す
@@ -433,10 +275,10 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
 
             // OCRは行っていないが、後でOCRエンジンへ切り替えた際に再キャプチャ不要で使えるよう、
             // また認識ログにも紐づけられるよう、この時点で検出領域の画像を撮影しておく。
-            let cap = capture_probe(x, y, target, &probe).ok();
+            let cap = capture_plan::capture_probe(x, y, target, &probe).ok();
             let focus = cap
                 .as_ref()
-                .map(|(b, kind)| focus_for(*kind, b.focus_y))
+                .map(|(b, kind)| capture_plan::focus_for(*kind, b.focus_y))
                 .unwrap_or(ocr::Focus::All);
             let log_img: Option<Captured> =
                 cap.as_ref().map(|(b, _)| ocr::crop_for_focus(&b.img, focus).into_owned());
@@ -466,7 +308,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
 
         // 経路B: WGC + キャプチャOCR (直下要素 → 段落帯 → 既定帯)
         let engine = effective_ocr(&cfg);
-        let cap = match capture_probe(x, y, target, &probe) {
+        let cap = match capture_plan::capture_probe(x, y, target, &probe) {
             Ok(c) => c,
             Err(e) => {
                 log_recog(&cfg, "hold", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, &ctx);
@@ -476,11 +318,11 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         };
         let (band, kind) = cap;
         let mut used = band;
-        let mut focus = focus_for(kind, used.focus_y);
+        let mut focus = capture_plan::focus_for(kind, used.focus_y);
         let mut out = ocr::run(&engine, &cfg, &used.img, focus);
         if out.is_err() {
             // 既定の帯を拡大して再試行 (SPEC §6.3)
-            if let Ok(wide) = capture_band(x, y, target, 1800, 340) {
+            if let Ok(wide) = capture_plan::capture_band(x, y, target, 1800, 340) {
                 focus = ocr::Focus::Line(wide.focus_y);
                 out = ocr::run(&engine, &cfg, &wide.img, focus);
                 used = wide;
@@ -568,9 +410,9 @@ pub fn reocr(
             None => {
                 // 保持画像なし: 初回と同じ基準 (UIA検出領域優先) で再キャプチャする
                 let probe = uia::probe_at_point(x, y);
-                match capture_probe(x, y, target, &probe) {
+                match capture_plan::capture_probe(x, y, target, &probe) {
                     Ok((b, kind)) => {
-                        let f = focus_for(kind, b.focus_y);
+                        let f = capture_plan::focus_for(kind, b.focus_y);
                         hover_text = probe.hover_text;
                         (Arc::new(b.img), f)
                     }
@@ -656,19 +498,19 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
             });
             return;
         }
-        let full = match capture::capture_window(root) {
+        let full = match crate::capture::capture_window(root) {
             Ok(f) => f,
             Err(e) => {
                 post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: None });
                 return;
             }
         };
-        let r = capture::window_frame_rect(root);
+        let r = crate::capture::window_frame_rect(root);
         let rw = (r.right - r.left).max(1);
         let rh = (r.bottom - r.top).max(1);
         let sx = full.width as f32 / rw as f32;
         let sy = full.height as f32 / rh as f32;
-        let crop = capture::crop(
+        let crop = crate::capture::crop(
             &full,
             (((rect.left - r.left) as f32) * sx) as i32,
             (((rect.top - r.top) as f32) * sy) as i32,
@@ -734,7 +576,7 @@ pub fn build_explain_prompt(cfg: &Config, text: &str, app_title: &str, uia_path:
     Some(prompt)
 }
 
-/// 解説の取得 (SPEC v0.2 §2.2.2): 成功時はDBへ保存してオーバーレイへ通知する。
+/// 解説の取得 (SPEC v0.3 §2.2.2): 成功時はDBへ保存してオーバーレイへ通知する。
 /// profile はダイアログで選択されたAPIプロファイル名 (見つからなければアクティブを使用)。
 pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, profile: String, main: isize) {
     std::thread::spawn(move || {
@@ -764,7 +606,7 @@ pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, prof
 
 #[cfg(test)]
 mod tests {
-    use super::{build_uia_path_log, paragraph_from_text};
+    use super::paragraph_from_text;
 
     #[test]
     fn 完全一致で段落を取り出せる() {
@@ -797,35 +639,5 @@ mod tests {
     #[test]
     fn 一致しなければ_none() {
         assert_eq!(paragraph_from_text("全く別のテキスト", "hello world example"), None);
-    }
-
-    fn node(label: &str, text: &str, kind: crate::uia::NodeKind) -> crate::uia::UiaPathNode {
-        crate::uia::UiaPathNode { label: label.into(), text: text.into(), kind }
-    }
-
-    #[test]
-    fn 祖先ノードのみなら区切りで連結() {
-        use crate::uia::NodeKind::Ancestor;
-        let nodes = vec![node("Document", "", Ancestor), node("Edit", "", Ancestor), node("Pane1", "", Ancestor)];
-        assert_eq!(build_uia_path_log(&nodes), "Document > Edit > Pane1");
-    }
-
-    #[test]
-    fn 子孫連結ノードの全文を末尾に追記する() {
-        use crate::uia::NodeKind::{Ancestor, ChildrenConcat};
-        let nodes = vec![
-            node("Document", "", Ancestor),
-            node("子要素", "line1\nline2\nlong text that must not be truncated in the log", ChildrenConcat),
-        ];
-        let s = build_uia_path_log(&nodes);
-        assert!(s.starts_with("Document\n[子要素] "));
-        assert!(s.contains("long text that must not be truncated in the log"));
-    }
-
-    #[test]
-    fn 子孫連結が空なら追記しない() {
-        use crate::uia::NodeKind::{Ancestor, ChildrenConcat};
-        let nodes = vec![node("Document", "", Ancestor), node("子要素", "", ChildrenConcat)];
-        assert_eq!(build_uia_path_log(&nodes), "Document");
     }
 }

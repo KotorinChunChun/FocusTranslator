@@ -91,7 +91,7 @@ pub struct Config {
     pub deepl_key_enc: String,
     pub google_key_enc: String,
     
-    // API Profile設定 (v0.2以降)
+    // API Profile設定
     pub api_profiles: Vec<ApiProfile>,
     pub active_api_profile: String,
 

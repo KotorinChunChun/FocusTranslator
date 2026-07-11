@@ -2,9 +2,9 @@
 // またはキャプチャキー(既定 右Ctrl。実際の翻訳ホールドと兼用)を押している間、
 // プログラムが認識に使う領域 — 対象ウィンドウ / OCRキャプチャ帯 / UIA要素・行矩形 — を
 // クリック透過・最前面の全画面オーバーレイに枠表示する。
-// 実際の認識経路と同じ uia::probe_at_point / worker::plan_capture_rect を使い、
+// 実際の認識経路と同じ uia::probe_at_point / capture_plan::plan_capture_rect を使い、
 // 検出結果を忠実に可視化する。
-use crate::{capture, uia, worker};
+use crate::{capture, capture_plan, uia};
 use std::cell::RefCell;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -37,7 +37,7 @@ pub struct DetectInfo {
     pub cursor: POINT,
     /// 対象ウィンドウの矩形 (DWM拡張フレーム境界)
     pub window_rect: Option<RECT>,
-    /// 実際にキャプチャされる領域 (worker::plan_capture_rect の決定結果)
+    /// 実際にキャプチャされる領域 (capture_plan::plan_capture_rect の決定結果)
     pub band_rect: Option<RECT>,
     /// TextPattern が見つかった UIA 要素の矩形
     pub uia_element: Option<RECT>,
@@ -165,7 +165,7 @@ pub fn probe(main: isize) {
         if !root.is_invalid() {
             let wr = capture::window_frame_rect(root);
             // 橙枠 = 実際にキャプチャされる領域 (認識経路と同じ判定を共用)
-            let (rect, k) = worker::plan_capture_rect(&p, &wr, pt.x, pt.y);
+            let (rect, k) = capture_plan::plan_capture_rect(&p, &wr, pt.x, pt.y);
             info.band_rect = Some(rect);
             info.window_rect = Some(wr);
             kind = Some(k);
@@ -187,7 +187,7 @@ pub fn probe(main: isize) {
         unsafe {
             let _ = PostMessageW(
                 Some(HWND(main as *mut _)),
-                crate::WM_APP_DETECT,
+                crate::app_state::WM_APP_DETECT,
                 WPARAM(0),
                 LPARAM(ptr),
             );

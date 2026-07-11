@@ -20,10 +20,10 @@ fn make_nid(hwnd: HWND) -> NOTIFYICONDATAW {
         hWnd: hwnd,
         uID: 1,
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
-        uCallbackMessage: crate::WM_APP_TRAY,
+        uCallbackMessage: crate::app_state::WM_APP_TRAY,
         ..Default::default()
     };
-    nid.hIcon = crate::app_icon();
+    nid.hIcon = crate::app_state::app_icon();
     let tip: Vec<u16> = "Focus Translator".encode_utf16().collect();
     nid.szTip[..tip.len()].copy_from_slice(&tip);
     nid

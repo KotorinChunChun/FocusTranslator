@@ -1,4 +1,4 @@
-// LLM API (Gemini / OpenAI互換 / Claude) 共通のREST呼び出し (SPEC v0.2 §3.1)
+// LLM API (Gemini / OpenAI互換 / Claude) 共通のREST呼び出し
 // 翻訳 / OCR統合 / 解説の各機能はここを経由してプロバイダ差異を吸収する。
 use crate::config::{ApiProfile, ApiType};
 
