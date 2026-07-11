@@ -1120,6 +1120,10 @@ fn start_reocr(h: HWND) {
         let path = logdb::logs_dir().join(&rel);
         if let Some((iw, ih, rgba)) = decode_png(&path) {
             let cap = rgba_to_captured(iw, ih, &rgba);
+            let hash = crate::capture::hash_hex(&cap);
+            // ログビューアの「再OCR」は明示的な手動再実行ボタンのため、キャッシュがあっても
+            // 常に実行する(オーバーレイ側の自動再認識とは異なり、都度の確認が目的のため)。
+            // ハッシュ自体は後日オーバーレイ側の重複防止に使えるよう記録しておく。
             let t0 = std::time::Instant::now();
             pc.ocr_engine = engine.clone();
             let (text, err): (Option<String>, Option<String>) =
@@ -1129,7 +1133,7 @@ fn start_reocr(h: HWND) {
                 };
             let ms = t0.elapsed().as_millis();
             // 再OCR結果を同じ capture の認識行として追記 (SPECv0.4 §8.2.1)
-            logdb::log_recognition(capture_id, "ocr", &engine, ms, text.as_deref(), err.as_deref());
+            logdb::log_recognition(capture_id, "ocr", &engine, ms, text.as_deref(), err.as_deref(), Some(&hash));
         }
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(

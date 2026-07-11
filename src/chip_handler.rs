@@ -26,6 +26,68 @@ fn prompt_ctx_from_app(original: &str) -> crate::config::PromptContext {
     .unwrap_or_default()
 }
 
+/// 画像編集モードの「編集終了」確定処理: 編集セッション中に確定した最終画像を
+/// App/DBへ反映し、同一capture配下で再認識する (SPECv0.4 §4-3, §8.2.1)。
+/// 「選択範囲を残す/消す」「元に戻す」は編集セッション内(overlay.rs)で完結し、
+/// OCR/翻訳の再実行はここ(編集終了時)でのみ行う。
+fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
+    let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe, uia_path, uia_nodes)) =
+        with_app(|app| {
+            app.last_img = Some(new_img.clone());
+            app.generation += 1;
+            app.mode = Mode::Pinned;
+            app.status = Some("再認識中…".into());
+            app.busy = true;
+            sync_overlay(app);
+            (
+                app.capture_id,
+                app.cur_ocr.clone(),
+                app.cur_tr.clone(),
+                app.cfg.clone(),
+                app.main.0 as isize,
+                app.anchor,
+                app.app_title.clone(),
+                app.app_exe.clone(),
+                app.uia_path.clone(),
+                app.uia_nodes.clone(),
+            )
+        })
+    else {
+        return;
+    };
+    if cfg2.log_enabled && cfg2.debug_mode
+        && let Some(cid) = cap_id
+    {
+        crate::logdb::replace_capture_image(cid, &new_img);
+    }
+    let new_gen = with_app(|app| app.generation).unwrap_or(0);
+    crate::worker::reocr_edited(
+        new_gen, cap_id, new_img, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe,
+        uia_path, uia_nodes,
+    );
+}
+
+/// 画像編集のUndo履歴を1段階巻き戻す(編集セッション内で完結、OCRは再実行しない)。
+/// 「元に戻す」チップと Ctrl+Z ポーリング(app_state::tick)の両方から呼ばれる共通処理。
+pub fn perform_edit_undo() {
+    if overlay::undo_edit() {
+        with_app(sync_overlay);
+    }
+}
+
+/// 編集アクション (選択範囲を残す/消す) を実行してオーバーレイを再描画する。
+/// いずれも編集モードは終了せず作業中画像だけを差し替える (OCR/翻訳の再実行は編集終了時のみ)。
+/// 失敗時はエラー内容をバッジ表示する。
+fn run_edit_action(action: impl FnOnce() -> Result<(), String>) {
+    let badge = action().err();
+    with_app(|app| {
+        if let Some(msg) = badge {
+            app.badge = Some(msg);
+        }
+        sync_overlay(app);
+    });
+}
+
 /// チップ押下 (SPEC §8): 押下時点でピン留めし、再OCR/再翻訳を実行
 pub fn handle_chip(id: usize) {
     // フェーズ1: 状態取得(借用を解放してから同意ダイアログを出す)
@@ -41,11 +103,12 @@ pub fn handle_chip(id: usize) {
             app.anchor,
             app.cur_tr.clone(),
             app.recog_id,
+            app.capture_id,
         )
     }) else {
         return;
     };
-    let (cfg, source, last_img, last_focus, origin, target, main, anchor, cur_tr, recog_id) = info;
+    let (cfg, source, last_img, last_focus, origin, target, main, anchor, cur_tr, recog_id, capture_id) = info;
 
     match id {
         overlay::CHIP_COPY => {
@@ -137,55 +200,27 @@ pub fn handle_chip(id: usize) {
             return;
         }
         overlay::CHIP_EDIT_CANCEL => {
-            overlay::exit_edit_mode();
-            with_app(sync_overlay);
+            // 編集終了: セッション中に変更があれば最終画像を確定して再認識する。
+            // 変更が無ければ単なるキャンセルとして扱う(OCR/翻訳は再実行しない)。
+            if let Some(final_img) = overlay::finish_edit_session() {
+                commit_edited_image(final_img);
+            } else {
+                with_app(sync_overlay);
+            }
             return;
         }
         overlay::CHIP_EDIT_APPLY => {
-            let Some((img, selection)) = overlay::take_edit_selection() else { return };
-            let Some(edited) = crate::image_edit::apply(&img, &selection) else {
-                with_app(|app| {
-                    app.badge = Some("選択範囲が小さすぎます".into());
-                    sync_overlay(app);
-                });
-                return;
-            };
-            overlay::exit_edit_mode();
-            let edited = std::sync::Arc::new(edited);
-            let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe, uia_path, uia_nodes)) =
-                with_app(|app| {
-                    app.last_img = Some(edited.clone());
-                    app.generation += 1;
-                    app.mode = Mode::Pinned;
-                    app.status = Some("再認識中…".into());
-                    app.busy = true;
-                    sync_overlay(app);
-                    (
-                        app.capture_id,
-                        app.cur_ocr.clone(),
-                        app.cur_tr.clone(),
-                        app.cfg.clone(),
-                        app.main.0 as isize,
-                        app.anchor,
-                        app.app_title.clone(),
-                        app.app_exe.clone(),
-                        app.uia_path.clone(),
-                        app.uia_nodes.clone(),
-                    )
-                })
-            else {
-                return;
-            };
-            if cfg2.log_enabled && cfg2.debug_mode
-                && let Some(cid) = cap_id
-            {
-                crate::logdb::replace_capture_image(cid, &edited);
-            }
-            let new_gen = with_app(|app| app.generation).unwrap_or(0);
-            crate::worker::reocr_edited(
-                new_gen, cap_id, edited, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title,
-                app_exe, uia_path, uia_nodes,
-            );
+            // 選択範囲を残す(旧「切り抜き」): 選択範囲でクロップして作業中画像を差し替える
+            run_edit_action(overlay::apply_crop_keep_selection);
+            return;
+        }
+        overlay::CHIP_EDIT_ERASE => {
+            // 選択範囲を消す: 選択範囲の内側を隣接色で塗りつぶす(サイズは変わらない)
+            run_edit_action(overlay::erase_selection_action);
+            return;
+        }
+        overlay::CHIP_EDIT_UNDO => {
+            perform_edit_undo();
             return;
         }
         overlay::CHIP_SWAP_LANG => {
@@ -357,7 +392,8 @@ pub fn handle_chip(id: usize) {
         .unwrap_or(0);
         let cfg2 = Config::load();
         crate::worker::reocr(
-            new_gen, last_img, last_focus, origin.x, origin.y, target, key, cur_tr, cfg2, main, anchor,
+            new_gen, capture_id, last_img, last_focus, origin.x, origin.y, target, key, cur_tr, cfg2,
+            main, anchor,
         );
     } else if id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_TR_BASE + engine::TR_KEYS.len() {
         // 翻訳エンジン切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)
