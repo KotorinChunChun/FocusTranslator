@@ -140,15 +140,37 @@ pub struct Config {
     pub glossary: Vec<GlossaryEntry>,
 }
 
-/// Gemini翻訳プロンプトの既定値
+/// 翻訳プロンプトの既定値
 pub const DEFAULT_GEMINI_TRANSLATE_PROMPT: &str =
-    "Translate the following text from {{source_lang}} to {{target_lang}}. Output only the translation.\n{{glossary}}\n\n{{text}}";
-/// Gemini OCR+翻訳統合プロンプトの既定値
+    "Translate the following text from {{source_lang}} to {{target_lang}}. Output only the translation.\n{{glossary}}\n\n{{original_text}}";
+/// OCR+翻訳統合プロンプトの既定値
 pub const DEFAULT_GEMINI_OCR_PROMPT: &str =
     "Extract the text in this image and translate it from {{source_lang}} to {{target_lang}}. Respond with JSON only: {\"source\": \"<extracted text>\", \"translation\": \"<translation>\"}\n{{glossary}}";
-/// Gemini解説プロンプトの既定値
-pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str =
-    "Explain the grammar, nuances, and background of the following text in {{target_lang}}.\n{{glossary}}\n\n{{text}}";
+/// 解説プロンプトの既定値 (SPECv0.4 §7.2)
+pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、{{app_title}} というタイトルのWindowsアプリケーションの中で表示されているテキストです。\nこれが何か{{target_lang}}で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 実行ファイル名\n{{app_exe}}\n\n## UIAパス\n{{uia_path}}\n{{glossary}}\n\n## 表示テキスト\n{{original_text}}";
+/// v0.3 までの解説プロンプト既定値 (設定移行の判定用)
+const OLD_EXPLAIN_PROMPT: &str =
+    "Explain the grammar, nuances, and background of the following text in {{target_lang}}.\n{{glossary}}\n\n{{original_text}}";
+
+/// プロンプトのプレースホルダ置換に使う実行時コンテキスト (SPECv0.4 §7.1)。
+/// 該当しない項目 (UIA経路の ocr_engine、翻訳前の translated_text 等) は空文字のままにする。
+#[derive(Default, Clone)]
+pub struct PromptContext {
+    /// OCRまたはUIAで取得した翻訳前の原文
+    pub original_text: String,
+    /// 翻訳エンジンの処理を通過した後の訳文 (翻訳前は空文字)
+    pub translated_text: String,
+    /// 対象アプリケーションのウィンドウタイトル
+    pub app_title: String,
+    /// 対象アプリケーションの実行ファイル名
+    pub app_exe: String,
+    /// UIA取得時の要素のパス (画像OCR時は空文字)
+    pub uia_path: String,
+    /// 実行されたOCRエンジン名 (UIA経路は空文字)
+    pub ocr_engine: String,
+    /// 実行された翻訳エンジン名 (翻訳前は空文字)
+    pub tr_engine: String,
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -228,6 +250,24 @@ impl Config {
             });
             cfg.active_api_profile = "Gemini Default".into();
         }
+        // プレースホルダ移行 (SPECv0.4 §7.1): 旧 {{text}} を {{original_text}} へ一度きりで書き換える。
+        // 旧既定の解説プロンプトのままなら、新しい既定テンプレートへ差し替える。
+        let mut migrated = false;
+        for p in &mut cfg.api_profiles {
+            for prompt in [&mut p.ocr_prompt, &mut p.translate_prompt, &mut p.explain_prompt] {
+                if prompt.contains("{{text}}") {
+                    *prompt = prompt.replace("{{text}}", "{{original_text}}");
+                    migrated = true;
+                }
+            }
+            if p.explain_prompt == OLD_EXPLAIN_PROMPT {
+                p.explain_prompt = DEFAULT_GEMINI_EXPLAIN_PROMPT.into();
+                migrated = true;
+            }
+        }
+        if migrated {
+            cfg.save();
+        }
         cfg
     }
 
@@ -262,13 +302,18 @@ impl Config {
         format!("Glossary:\n{lines}")
     }
 
-    /// プロンプトテンプレートのプレースホルダ置換
-    /// ({{source_lang}} {{target_lang}} {{text}} {{glossary}})
-    pub fn fill_prompt(&self, tmpl: &str, text: &str) -> String {
+    /// プロンプトテンプレートのプレースホルダ置換 (SPECv0.4 §7.1 の10種)
+    pub fn fill_prompt(&self, tmpl: &str, ctx: &PromptContext) -> String {
         tmpl.replace("{{source_lang}}", &self.source_lang)
             .replace("{{target_lang}}", &self.target_lang)
-            .replace("{{text}}", text)
+            .replace("{{original_text}}", &ctx.original_text)
+            .replace("{{translated_text}}", &ctx.translated_text)
             .replace("{{glossary}}", &self.glossary_prompt())
+            .replace("{{app_title}}", &ctx.app_title)
+            .replace("{{app_exe}}", &ctx.app_exe)
+            .replace("{{uia_path}}", &ctx.uia_path)
+            .replace("{{ocr_engine}}", &ctx.ocr_engine)
+            .replace("{{tr_engine}}", &ctx.tr_engine)
     }
 
     /// キャプチャキー(ホールドキー)の仮想キーコード

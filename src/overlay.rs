@@ -3,27 +3,33 @@
 // - ピン留め時はコピー・閉じるボタンを表示
 // - 余白部分は WM_NCHITTEST で HTTRANSPARENT を返し背面へクリック透過
 // - レイアウト計算は overlay_layout モジュールに委譲
+use crate::capture::Captured;
 use crate::engine;
+use crate::image_edit;
 use crate::overlay_layout::{self, Item, Layout};
 use std::cell::RefCell;
+use std::sync::Arc;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateCompatibleBitmap, CreatePen,
-    CreateCompatibleDC, CreateSolidBrush, DT_NOPREFIX,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CreateCompatibleBitmap, CreatePen,
+    CreateCompatibleDC, CreateSolidBrush, DIB_RGB_COLORS, DT_NOPREFIX,
     DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW,
-    EndPaint, FillRect, FrameRect,
+    EndPaint, FillRect, FrameRect, HALFTONE, HDC,
     GetMonitorInfoW, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint, PAINTSTRUCT, PS_SOLID, RoundRect, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT,
+    MonitorFromPoint, PAINTSTRUCT, PS_SOLID, Polyline, RoundRect, SelectObject, SetBkMode,
+    SetStretchBltMode, SetTextColor, StretchDIBits, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
-use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowRect,
     IsWindowVisible, HTCLIENT,
     HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, KillTimer, LoadCursorW, MA_NOACTIVATE, PostMessageW,
     RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowPos,
-    ShowWindow, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_TIMER,
+    ShowWindow, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST,
+    WM_PAINT, WM_TIMER,
     WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     SendMessageW, WM_NCLBUTTONDOWN, HTCAPTION,
 };
@@ -49,6 +55,39 @@ pub const CHIP_SWAP_LANG: usize = 110;
 pub const CHIP_OPEN_LOG: usize = 111;
 /// UIAパスノードのボタンID基点(祖先ノード最大5 + 子孫連結ノード1の範囲を確保)
 pub const CHIP_UIA_NODE_BASE: usize = 200;
+/// 画像編集(SPECv0.4 §1-§4): 矩形/投げ輪/リセット/適用/戻る
+pub const CHIP_EDIT_RECT: usize = 112;
+pub const CHIP_EDIT_LASSO: usize = 113;
+pub const CHIP_EDIT_RESET: usize = 114;
+pub const CHIP_EDIT_APPLY: usize = 115;
+pub const CHIP_EDIT_CANCEL: usize = 116;
+
+/// 画像編集の選択ツール (SPECv0.4 §3)
+#[derive(Clone, Copy, PartialEq)]
+pub enum EditTool {
+    Rect,
+    Lasso,
+}
+
+/// レイアウト計算に渡す編集状態の要約 (実データ(画像バイト列・座標列)は overlay.rs 内に留める)
+#[derive(Clone, Copy)]
+pub struct EditLayoutInfo {
+    pub img_w: u32,
+    pub img_h: u32,
+    pub tool: EditTool,
+    pub has_selection: bool,
+}
+
+/// 画像編集の実データ(選択中の画像・ドラッグ中の座標)。マウス操作のたびに直接更新する。
+struct EditState {
+    img: Arc<Captured>,
+    tool: EditTool,
+    dragging: bool,
+    /// 矩形選択 (元画像ピクセル座標: x0,y0,x1,y1)
+    rect: Option<(i32, i32, i32, i32)>,
+    /// 投げ輪の軌跡 (元画像ピクセル座標)
+    lasso: Vec<(i32, i32)>,
+}
 
 #[derive(Default, Clone)]
 pub struct OverlayContent {
@@ -83,6 +122,9 @@ pub struct OverlayContent {
     pub has_image: bool,
     /// 時間のかかる処理(再認識・再翻訳・解説取得)の実行中。
     pub busy: bool,
+    /// 画像編集モードの要約 (overlay::update 内で EDIT の内容から自動的に設定される。
+    /// 呼び出し側 (chip_handler/app_state) が明示的に設定する必要はない)
+    pub edit: Option<EditLayoutInfo>,
 }
 
 const TIMER_AUTOHIDE: usize = 7;
@@ -90,11 +132,80 @@ const TIMER_ANIMATION: usize = 8;
 
 thread_local! {
     static CONTENT: RefCell<OverlayContent> = RefCell::new(OverlayContent::default());
-    static LAYOUT: RefCell<Layout> = const { RefCell::new(Layout { w: 0, h: 0, content_h: 0, items: Vec::new(), panels: Vec::new() }) };
+    static LAYOUT: RefCell<Layout> = const { RefCell::new(Layout { w: 0, h: 0, content_h: 0, items: Vec::new(), panels: Vec::new(), edit_preview: None }) };
     /// マウスカーソルが乗っているチップID (✕ボタンのホバー強調に使用)
     static HOVER_ID: RefCell<Option<usize>> = const { RefCell::new(None) };
     /// 直近に表示したアンカー。同一アンカーでの再描画では実際のウィンドウ位置を維持する。
     static LAST_ANCHOR: RefCell<Option<(i32, i32)>> = const { RefCell::new(None) };
+    /// 画像編集モードの実データ (SPECv0.4 §1-§4)。None のとき編集モード無効。
+    static EDIT: RefCell<Option<EditState>> = const { RefCell::new(None) };
+}
+
+/// 画像編集モードを開始する
+pub fn enter_edit_mode(img: Arc<Captured>) {
+    EDIT.with(|e| {
+        *e.borrow_mut() = Some(EditState { img, tool: EditTool::Rect, dragging: false, rect: None, lasso: Vec::new() });
+    });
+}
+
+/// 画像編集モードを終了する
+pub fn exit_edit_mode() {
+    EDIT.with(|e| *e.borrow_mut() = None);
+}
+
+pub fn is_editing_image() -> bool {
+    EDIT.with(|e| e.borrow().is_some())
+}
+
+/// 選択ツールを切り替える。切り替え時は選択中の形状を破棄する。
+pub fn set_edit_tool(tool: EditTool) {
+    EDIT.with(|e| {
+        if let Some(st) = e.borrow_mut().as_mut() {
+            st.tool = tool;
+            st.rect = None;
+            st.lasso.clear();
+            st.dragging = false;
+        }
+    });
+}
+
+/// 選択中の形状をリセットする(ツールは維持)
+pub fn reset_edit_selection() {
+    EDIT.with(|e| {
+        if let Some(st) = e.borrow_mut().as_mut() {
+            st.rect = None;
+            st.lasso.clear();
+            st.dragging = false;
+        }
+    });
+}
+
+/// 確定した選択を取り出す(適用時に使用)。選択が無効なら None。
+pub fn take_edit_selection() -> Option<(Arc<Captured>, image_edit::Selection)> {
+    EDIT.with(|e| {
+        let g = e.borrow();
+        let st = g.as_ref()?;
+        match st.tool {
+            EditTool::Rect => {
+                let (x0, y0, x1, y1) = st.rect?;
+                Some((st.img.clone(), image_edit::Selection::Rect { x0, y0, x1, y1 }))
+            }
+            EditTool::Lasso => {
+                if st.lasso.len() < 3 {
+                    None
+                } else {
+                    Some((st.img.clone(), image_edit::Selection::Lasso(st.lasso.clone())))
+                }
+            }
+        }
+    })
+}
+
+/// 直近の CONTENT で再度 update() を呼び、レイアウトと表示を更新する
+/// (chip_handler を介さずに overlay.rs 内のマウス操作から直接呼べる軽量な再描画)
+pub fn refresh(hwnd: HWND) {
+    let content = CONTENT.with(|c| c.borrow().clone());
+    update(hwnd, content);
 }
 
 pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
@@ -128,7 +239,20 @@ pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
 }
 
 /// 内容を更新し、アンカー位置に合わせて表示する
-pub fn update(hwnd: HWND, content: OverlayContent) {
+pub fn update(hwnd: HWND, mut content: OverlayContent) {
+    // 画像編集モードの実データは EDIT (overlay.rs内) が唯一の情報源。
+    // 呼び出し側が古いスナップショットで content.edit を上書きしないよう、ここで都度差し替える。
+    content.edit = EDIT.with(|e| {
+        e.borrow().as_ref().map(|st| EditLayoutInfo {
+            img_w: st.img.width,
+            img_h: st.img.height,
+            tool: st.tool,
+            has_selection: match st.tool {
+                EditTool::Rect => st.rect.is_some(),
+                EditTool::Lasso => st.lasso.len() >= 3,
+            },
+        })
+    });
     let error_only = content.error_only;
     let pinned = content.pinned;
     let anchor = content.anchor;
@@ -214,6 +338,15 @@ fn place(anchor: (i32, i32), w: i32, h: i32, kept: Option<(i32, i32)>) -> (i32, 
     }
 }
 
+/// スクロールオフセットの影響を受けない固定チップ (右上の✕/📌、および編集パネルのチップ)
+fn is_fixed_chip(id: usize) -> bool {
+    matches!(
+        id,
+        CHIP_CLOSE | CHIP_PIN | CHIP_EDIT_RECT | CHIP_EDIT_LASSO | CHIP_EDIT_RESET
+            | CHIP_EDIT_APPLY | CHIP_EDIT_CANCEL
+    )
+}
+
 /// チップのヒットテスト (WM_MOUSEMOVE / WM_LBUTTONDOWN で共用)
 fn hit_test_chip(x: i32, y: i32) -> Option<usize> {
     LAYOUT.with(|l| {
@@ -221,7 +354,7 @@ fn hit_test_chip(x: i32, y: i32) -> Option<usize> {
         l.borrow().items.iter().find_map(|it| match it {
             Item::Chip { rect, id, enabled, .. } => {
                 let mut r = *rect;
-                let off = if *id == CHIP_CLOSE || *id == CHIP_PIN { 0 } else { sy };
+                let off = if is_fixed_chip(*id) { 0 } else { sy };
                 r.top -= off;
                 r.bottom -= off;
                 if *enabled && x >= r.left && x < r.right && y >= r.top && y < r.bottom {
@@ -232,6 +365,26 @@ fn hit_test_chip(x: i32, y: i32) -> Option<usize> {
             }
             _ => None,
         })
+    })
+}
+
+/// クリック開始位置が編集プレビュー矩形内かどうかを判定し、元画像ピクセル座標を返す
+fn edit_preview_hit(x: i32, y: i32) -> Option<(i32, i32)> {
+    let (rect, scale) = LAYOUT.with(|l| l.borrow().edit_preview)?;
+    if x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom {
+        return None;
+    }
+    edit_preview_map_clamped(x, y, rect, scale)
+}
+
+/// 画面座標を元画像ピクセル座標へ逆変換する(ドラッグ継続中はプレビュー外に出ても画像端にクランプする)
+fn edit_preview_map_clamped(x: i32, y: i32, rect: RECT, scale: f32) -> Option<(i32, i32)> {
+    let ix = ((x - rect.left) as f32 / scale).round() as i32;
+    let iy = ((y - rect.top) as f32 / scale).round() as i32;
+    EDIT.with(|e| {
+        let g = e.borrow();
+        let st = g.as_ref()?;
+        Some((ix.clamp(0, st.img.width as i32), iy.clamp(0, st.img.height as i32)))
     })
 }
 
@@ -272,7 +425,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     false
                 }
             });
-            if changed {
+            // 画像編集: ドラッグ中は矩形の終点更新/投げ輪の軌跡追加のみ行う(レイアウト再計算はしない)
+            let dragged = EDIT.with(|e| {
+                let mut g = e.borrow_mut();
+                let Some(st) = g.as_mut() else { return false };
+                if !st.dragging {
+                    return false;
+                }
+                let Some((rect, scale)) = LAYOUT.with(|l| l.borrow().edit_preview) else { return false };
+                let ix = ((x - rect.left) as f32 / scale).round() as i32;
+                let iy = ((y - rect.top) as f32 / scale).round() as i32;
+                let ix = ix.clamp(0, st.img.width as i32);
+                let iy = iy.clamp(0, st.img.height as i32);
+                match st.tool {
+                    EditTool::Rect => {
+                        if let Some(r) = &mut st.rect {
+                            r.2 = ix;
+                            r.3 = iy;
+                        }
+                    }
+                    EditTool::Lasso => st.lasso.push((ix, iy)),
+                }
+                true
+            });
+            if changed || dragged {
                 unsafe {
                     let _ = InvalidateRect(Some(hwnd), None, true);
                 }
@@ -333,6 +509,26 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         LPARAM(0),
                     );
                 }
+            } else if is_editing_image() {
+                // 画像編集中: プレビュー内クリックでドラッグ選択を開始する(ウィンドウ移動は行わない)
+                if let Some((ix, iy)) = edit_preview_hit(x, y) {
+                    EDIT.with(|e| {
+                        if let Some(st) = e.borrow_mut().as_mut() {
+                            st.dragging = true;
+                            match st.tool {
+                                EditTool::Rect => st.rect = Some((ix, iy, ix, iy)),
+                                EditTool::Lasso => {
+                                    st.lasso.clear();
+                                    st.lasso.push((ix, iy));
+                                }
+                            }
+                        }
+                    });
+                    unsafe {
+                        SetCapture(hwnd);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
             } else {
                 let pinned = CONTENT.with(|c| c.borrow().pinned);
                 if pinned {
@@ -346,6 +542,36 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         );
                     }
                 }
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            let ended = EDIT.with(|e| {
+                let mut g = e.borrow_mut();
+                let Some(st) = g.as_mut() else { return false };
+                if !st.dragging {
+                    return false;
+                }
+                st.dragging = false;
+                // 誤操作防止: 極小の矩形/点未満の投げ輪は選択なし扱いにする
+                if let EditTool::Rect = st.tool
+                    && let Some((x0, y0, x1, y1)) = st.rect
+                    && (x1 - x0).abs() < 4 && (y1 - y0).abs() < 4
+                {
+                    st.rect = None;
+                }
+                if let EditTool::Lasso = st.tool
+                    && st.lasso.len() < 3
+                {
+                    st.lasso.clear();
+                }
+                true
+            });
+            if ended {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                refresh(hwnd);
             }
             LRESULT(0)
         }
@@ -436,7 +662,7 @@ fn paint(hwnd: HWND) {
                     }
                     Item::Chip { rect, label, active, enabled, id } => {
                         let mut r = *rect;
-                        let off = if *id == CHIP_CLOSE || *id == CHIP_PIN { 0 } else { sy };
+                        let off = if is_fixed_chip(*id) { 0 } else { sy };
                         r.top -= off;
                         r.bottom -= off;
                         let hovered = HOVER_ID.with(|h| *h.borrow() == Some(*id));
@@ -485,6 +711,12 @@ fn paint(hwnd: HWND) {
             }
         });
 
+        LAYOUT.with(|l| {
+            if let Some((rect, scale)) = l.borrow().edit_preview {
+                draw_edit_preview(mem, rect, scale);
+            }
+        });
+
         windows::Win32::Graphics::Gdi::BitBlt(
             hdc,
             0,
@@ -505,6 +737,74 @@ fn paint(hwnd: HWND) {
         let _ = DeleteObject(HGDIOBJ(border.0));
         let _ = EndPaint(hwnd, &ps);
     }
+}
+
+/// 編集中の画像プレビューと選択中の矩形/投げ輪の枠線・軌跡を描画する (SPECv0.4 §2.2, §3.3)
+fn draw_edit_preview(mem: HDC, preview: RECT, scale: f32) {
+    EDIT.with(|e| {
+        let g = e.borrow();
+        let Some(st) = g.as_ref() else { return };
+        unsafe {
+            let iw = st.img.width;
+            let ih = st.img.height;
+            let bmi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: iw as i32,
+                    biHeight: -(ih as i32), // トップダウン
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            SetStretchBltMode(mem, HALFTONE);
+            StretchDIBits(
+                mem,
+                preview.left,
+                preview.top,
+                preview.right - preview.left,
+                preview.bottom - preview.top,
+                0,
+                0,
+                iw as i32,
+                ih as i32,
+                Some(st.img.bgra.as_ptr() as *const _),
+                &bmi,
+                DIB_RGB_COLORS,
+                windows::Win32::Graphics::Gdi::SRCCOPY,
+            );
+
+            let to_screen = |p: (i32, i32)| POINT {
+                x: preview.left + (p.0 as f32 * scale).round() as i32,
+                y: preview.top + (p.1 as f32 * scale).round() as i32,
+            };
+
+            let pen = CreatePen(PS_SOLID, 2, COLORREF(0x0050C8FF));
+            let old_pen = SelectObject(mem, HGDIOBJ(pen.0));
+            match st.tool {
+                EditTool::Rect => {
+                    if let Some((x0, y0, x1, y1)) = st.rect {
+                        let pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+                            .map(to_screen);
+                        let _ = Polyline(mem, &pts);
+                    }
+                }
+                EditTool::Lasso => {
+                    if st.lasso.len() >= 2 {
+                        let mut pts: Vec<POINT> = st.lasso.iter().map(|&p| to_screen(p)).collect();
+                        if !st.dragging && pts.len() >= 3 {
+                            pts.push(pts[0]); // 確定後は閉じた多角形として描画
+                        }
+                        let _ = Polyline(mem, &pts);
+                    }
+                }
+            }
+            SelectObject(mem, old_pen);
+            let _ = DeleteObject(HGDIOBJ(pen.0));
+        }
+    });
 }
 
 /// 現在のコンテンツを取得(コピー操作用)

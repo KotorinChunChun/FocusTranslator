@@ -3,9 +3,10 @@
 // overlay.rs の描画 (paint) とウィンドウ管理から分離して可読性を高める。
 use crate::engine;
 use crate::overlay::{
-    OverlayContent, CHIP_CLOSE, CHIP_COPY, CHIP_COPY_INFO, CHIP_COPY_SRC, CHIP_COPY_TR,
-    CHIP_EXPLAIN, CHIP_EXPLAIN_QUICK, CHIP_IMAGE, CHIP_OCR_BASE, CHIP_OPEN_LOG, CHIP_PIN,
-    CHIP_SETTINGS, CHIP_SWAP_LANG, CHIP_TR_BASE, CHIP_UIA_NODE_BASE,
+    EditTool, OverlayContent, CHIP_CLOSE, CHIP_COPY, CHIP_COPY_INFO,
+    CHIP_COPY_SRC, CHIP_COPY_TR, CHIP_EDIT_APPLY, CHIP_EDIT_CANCEL, CHIP_EDIT_LASSO,
+    CHIP_EDIT_RECT, CHIP_EDIT_RESET, CHIP_EXPLAIN, CHIP_EXPLAIN_QUICK, CHIP_IMAGE, CHIP_OCR_BASE,
+    CHIP_OPEN_LOG, CHIP_PIN, CHIP_SETTINGS, CHIP_SWAP_LANG, CHIP_TR_BASE, CHIP_UIA_NODE_BASE,
 };
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -18,7 +19,8 @@ use windows::core::w;
 // 配色定数
 pub const COL_BG: u32 = 0x00221E1C;
 pub const COL_BORDER: u32 = 0x00524A46;
-pub const COL_TEXT: u32 = 0x00F0EEEC;
+// 本文テキスト (アプリ名行・UIA/OCR結果・訳文) は視認性のため純白 (SPECv0.4 §6)
+pub const COL_TEXT: u32 = 0x00FFFFFF;
 pub const COL_STATUS: u32 = 0x0050C8FF;
 pub const COL_CHIP: u32 = 0x003F3833;
 pub const COL_CHIP_ACTIVE: u32 = 0x00D28C3C;
@@ -66,7 +68,13 @@ pub struct Layout {
     pub content_h: i32,
     pub items: Vec<Item>,
     pub panels: Vec<Panel>,
+    /// 画像編集モードのプレビュー描画矩形とスケール (元画像ピクセル→画面座標の倍率)
+    pub edit_preview: Option<(RECT, f32)>,
 }
+
+/// 編集プレビューの最大表示サイズ (縦横比維持で収める。拡大はしない。SPECv0.4 §2.2)
+const EDIT_PREVIEW_MAX_W: i32 = 480;
+const EDIT_PREVIEW_MAX_H: i32 = 460;
 
 pub fn make_font(size: i32, bold: bool) -> HFONT {
     unsafe {
@@ -132,7 +140,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             y += th + PAD;
             need_w = need_w.max(tw + PAD * 2 + 4);
             let _ = ReleaseDC(Some(hwnd), hdc);
-            return Layout { w: need_w.min(MAXW + PAD * 2), h: y, content_h: y, items, panels: Vec::new() };
+            return Layout { w: need_w.min(MAXW + PAD * 2), h: y, content_h: y, items, panels: Vec::new(), edit_preview: None };
         }
 
         // 見出し行を配置する。chips_left=true のときはチップを見出し文字の手前(左端)に、
@@ -558,7 +566,6 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         panel_spans.push((block_start, y, COL_ACCENT_EXPLAIN));
         y += 6;
 
-        let _ = ReleaseDC(Some(hwnd), hdc);
         let w = need_w.min(MAXW + PAD * 2);
 
         // 処理中は閉じる以外の全チップを無効化 (ウィンドウ全体のロック)
@@ -656,6 +663,78 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             .collect();
 
         let display_h = y.min(800);
-        Layout { w, h: display_h, content_h: y, items, panels }
+
+        // 画像編集パネル (SPECv0.4 §1-§4): 既存コンテンツの右側に追加表示する。
+        // ウィンドウ拡張 (§2.1) ・縮小表示 (§2.2) ・矩形/投げ輪トリミング用チップ (§3) を配置する。
+        let mut total_w = w;
+        let mut total_h = display_h;
+        let mut edit_preview: Option<(RECT, f32)> = None;
+        if let Some(info) = &content.edit {
+            let iw = (info.img_w.max(1)) as f32;
+            let ih = (info.img_h.max(1)) as f32;
+            let scale = (EDIT_PREVIEW_MAX_W as f32 / iw).min(EDIT_PREVIEW_MAX_H as f32 / ih).min(1.0);
+            let pw = ((iw * scale).round() as i32).max(40);
+            let ph = ((ih * scale).round() as i32).max(40);
+
+            let panel_left = w + PANEL_MARGIN * 2 + 10;
+            let mut ey = PAD;
+            let mut edit_max_x = panel_left;
+
+            // ツール切替チップ (矩形/投げ輪/リセット)
+            let mut ex = panel_left;
+            let tools: [(&str, usize, bool); 3] = [
+                ("矩形", CHIP_EDIT_RECT, info.tool == EditTool::Rect),
+                ("投げ輪", CHIP_EDIT_LASSO, info.tool == EditTool::Lasso),
+                ("リセット", CHIP_EDIT_RESET, false),
+            ];
+            for (lab, id, active) in tools {
+                let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
+                let cwid = cw + 18;
+                items.push(Item::Chip {
+                    rect: RECT { left: ex, top: ey, right: ex + cwid, bottom: ey + CHIP_H },
+                    label: lab.to_string(),
+                    id,
+                    active,
+                    enabled: !content.busy,
+                });
+                ex += cwid + 6;
+            }
+            edit_max_x = edit_max_x.max(ex - 6 + PAD);
+            ey += CHIP_H + 8;
+
+            // 画像プレビュー (縦横比維持で縮小、拡大はしない)
+            let preview_rect = RECT { left: panel_left, top: ey, right: panel_left + pw, bottom: ey + ph };
+            edit_preview = Some((preview_rect, scale));
+            edit_max_x = edit_max_x.max(preview_rect.right + PAD);
+            ey += ph + 10;
+
+            // 適用/戻る
+            let apply_enabled = info.has_selection && !content.busy;
+            let mut ax = panel_left;
+            let acts: [(&str, usize, bool); 2] = [
+                ("適用", CHIP_EDIT_APPLY, apply_enabled),
+                ("戻る", CHIP_EDIT_CANCEL, !content.busy),
+            ];
+            for (lab, id, enabled) in acts {
+                let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
+                let cwid = cw + 18;
+                items.push(Item::Chip {
+                    rect: RECT { left: ax, top: ey, right: ax + cwid, bottom: ey + CHIP_H },
+                    label: lab.to_string(),
+                    id,
+                    active: false,
+                    enabled,
+                });
+                ax += cwid + 6;
+            }
+            edit_max_x = edit_max_x.max(ax - 6 + PAD);
+            ey += CHIP_H + PAD;
+
+            total_w = edit_max_x;
+            total_h = total_h.max(ey);
+        }
+
+        let _ = ReleaseDC(Some(hwnd), hdc);
+        Layout { w: total_w, h: total_h, content_h: y, items, panels, edit_preview }
     }
 }

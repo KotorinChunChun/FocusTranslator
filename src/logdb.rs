@@ -1,13 +1,14 @@
-// 実行ログのSQLite記録 (FocusTranslator_LOG_SPECv0.1.md)
-// %APPDATA%\FocusTranslator\logs\focustranslator.db に認識ログ・翻訳ログを記録する。
-// デバッグモード時はキャプチャ画像を logs\images\{recognition_id}.png に保存しパスを記録する。
+// 実行ログのSQLite記録 (FocusTranslator_LOG_SPECv0.1.md / SPECv0.4 §8 スキーマv3)
+// %APPDATA%\FocusTranslator\logs\focustranslator.db に4工程ツリー
+// captures(入力) 1-N recognitions(認識) 1-N translations(翻訳) / explanations(解説) を記録する。
+// デバッグモード時はキャプチャ画像を logs\images\{capture_id}.png に保存しパスを記録する。
 // ログ既定OFF。ONのときのみ本モジュールが呼ばれる。
 use crate::util;
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
@@ -42,36 +43,72 @@ fn conn() -> Option<&'static Mutex<Connection>> {
     }
 }
 
+/// 旧スキーマ(v3未満)のDBを検出したら、DBファイルとimages配下PNGを破棄する (SPECv0.4 §8.4)。
+fn discard_old_db_if_needed() -> Result<(), String> {
+    let path = db_path();
+    if !path.exists() {
+        return Ok(());
+    }
+    let version: i64 = {
+        let c = Connection::open(&path).map_err(|e| e.to_string())?;
+        c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0)
+    };
+    if version >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    util::app_log(&format!("logdb: old schema v{version} detected, recreating"));
+    for suffix in ["", "-wal", "-shm"] {
+        let mut p = path.clone().into_os_string();
+        p.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(p));
+    }
+    if let Ok(entries) = std::fs::read_dir(images_dir()) {
+        for e in entries.flatten() {
+            if e.path().extension().and_then(|x| x.to_str()) == Some("png") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn init_db() -> Result<Connection, String> {
+    discard_old_db_if_needed()?;
     let conn = Connection::open(db_path()).map_err(|e| e.to_string())?;
-    
-    let current_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
 
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
-         CREATE TABLE IF NOT EXISTS recognition_logs (
+         PRAGMA foreign_keys=ON;
+         CREATE TABLE IF NOT EXISTS captures (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts_ms INTEGER NOT NULL,
             mode TEXT NOT NULL,
+            app_exe TEXT,
+            app_title TEXT,
+            uia_path TEXT,
+            image_path TEXT,
+            image_w INTEGER,
+            image_h INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS recognitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            capture_id INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
+            ts_ms INTEGER NOT NULL,
             method TEXT NOT NULL,
             engine TEXT NOT NULL,
             duration_ms INTEGER NOT NULL,
             source_text TEXT,
             success INTEGER NOT NULL,
             error TEXT,
-            image_path TEXT,
-            image_w INTEGER,
-            image_h INTEGER,
-            app_exe TEXT,
-            app_title TEXT,
-            uia_path TEXT
+            tags TEXT
          );
-         CREATE TABLE IF NOT EXISTS translation_logs (
+         CREATE TABLE IF NOT EXISTS translations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recognition_id INTEGER NOT NULL REFERENCES recognitions(id) ON DELETE CASCADE,
             ts_ms INTEGER NOT NULL,
-            recognition_id INTEGER,
             engine TEXT NOT NULL,
+            llm_profile TEXT,
             source_lang TEXT,
             target_lang TEXT,
             duration_ms INTEGER NOT NULL,
@@ -86,24 +123,22 @@ fn init_db() -> Result<Connection, String> {
          );
          CREATE TABLE IF NOT EXISTS explanations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            recognition_id INTEGER NOT NULL,
-            explanation_text TEXT NOT NULL,
-            tags TEXT,
-            FOREIGN KEY (recognition_id) REFERENCES recognition_logs(id) ON DELETE CASCADE
+            recognition_id INTEGER NOT NULL REFERENCES recognitions(id) ON DELETE CASCADE,
+            ts_ms INTEGER NOT NULL,
+            llm_profile TEXT NOT NULL,
+            duration_ms INTEGER NOT NULL,
+            input_text TEXT NOT NULL,
+            explanation_text TEXT,
+            success INTEGER NOT NULL,
+            error TEXT,
+            tokens_in INTEGER,
+            tokens_out INTEGER
          );
-         CREATE INDEX IF NOT EXISTS idx_tr_recog ON translation_logs(recognition_id);
+         CREATE INDEX IF NOT EXISTS idx_recog_capture ON recognitions(capture_id);
+         CREATE INDEX IF NOT EXISTS idx_tr_recog ON translations(recognition_id);
          CREATE INDEX IF NOT EXISTS idx_ex_recog ON explanations(recognition_id);",
     )
     .map_err(|e| e.to_string())?;
-
-    if current_version == 1 {
-        // v1 から v2 へのマイグレーション
-        let _ = conn.execute_batch(
-            "ALTER TABLE recognition_logs ADD COLUMN app_exe TEXT;
-             ALTER TABLE recognition_logs ADD COLUMN app_title TEXT;
-             ALTER TABLE recognition_logs ADD COLUMN uia_path TEXT;"
-        );
-    }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|e| e.to_string())?;
@@ -117,59 +152,85 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// 認識ログを記録し recognition_id を返す。画像は image(BGRA) が Some かつ debug 時のみPNG保存。
-#[allow(clippy::too_many_arguments)]
-pub fn log_recognition(
+/// 画像PNGを書き出して captures の image_path/image_w/image_h を更新する。
+fn store_capture_image(guard: &Connection, capture_id: i64, img: &crate::capture::Captured) {
+    let png = crate::capture::to_png(img);
+    let rel = format!("images/{capture_id}.png");
+    let path = images_dir().join(format!("{capture_id}.png")); // ディレクトリ作成込み
+    if std::fs::write(&path, &png).is_ok() {
+        let _ = guard.execute(
+            "UPDATE captures SET image_path=?1, image_w=?2, image_h=?3 WHERE id=?4",
+            rusqlite::params![rel, img.width as i64, img.height as i64, capture_id],
+        );
+    }
+}
+
+/// 入力(キャプチャ)ログを記録し capture_id を返す。画像は image が Some かつ debug 時のみPNG保存。
+pub fn log_capture(
     mode: &str,
+    app_exe: Option<&str>,
+    app_title: Option<&str>,
+    uia_path: Option<&str>,
+    image: Option<&crate::capture::Captured>,
+    debug: bool,
+) -> Option<i64> {
+    let m = conn()?;
+    let guard = m.lock().ok()?;
+    if let Err(e) = guard.execute(
+        "INSERT INTO captures (ts_ms, mode, app_exe, app_title, uia_path, image_path, image_w, image_h)
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)",
+        rusqlite::params![now_ms(), mode, app_exe, app_title, uia_path],
+    ) {
+        util::app_log(&format!("log_capture failed: {e}"));
+        return None;
+    }
+    let id = guard.last_insert_rowid();
+    if debug && let Some(img) = image {
+        store_capture_image(&guard, id, img);
+    }
+    Some(id)
+}
+
+/// キャプチャ画像を編集後の画像で上書き差し替える (SPECv0.4 §4-4 トリミング適用時)。
+pub fn replace_capture_image(capture_id: i64, image: &crate::capture::Captured) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    store_capture_image(&guard, capture_id, image);
+}
+
+/// 認識ログを記録し recognition_id を返す。
+pub fn log_recognition(
+    capture_id: i64,
     method: &str,
     engine: &str,
     duration_ms: u128,
     source_text: Option<&str>,
     error: Option<&str>,
-    image: Option<&crate::capture::Captured>,
-    debug: bool,
-    app_exe: Option<&str>,
-    app_title: Option<&str>,
-    uia_path: Option<&str>,
 ) -> Option<i64> {
     let m = conn()?;
     let guard = m.lock().ok()?;
     let success = error.is_none();
     if let Err(e) = guard.execute(
-        "INSERT INTO recognition_logs
-            (ts_ms, mode, method, engine, duration_ms, source_text, success, error, image_path, image_w, image_h, app_exe, app_title, uia_path)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL, ?9, ?10, ?11)",
+        "INSERT INTO recognitions
+            (capture_id, ts_ms, method, engine, duration_ms, source_text, success, error, tags)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
         rusqlite::params![
-            now_ms(), mode, method, engine, duration_ms as i64,
-            source_text, success as i64, error, app_exe, app_title, uia_path
+            capture_id, now_ms(), method, engine, duration_ms as i64,
+            source_text, success as i64, error
         ],
     ) {
         util::app_log(&format!("log_recognition failed: {e}"));
         return None;
     }
-    let id = guard.last_insert_rowid();
-
-    // デバッグモード時のみ画像を保存
-    if debug
-        && let Some(img) = image {
-            let png = crate::capture::to_png(img);
-            let rel = format!("images/{id}.png");
-            let path = images_dir().join(format!("{id}.png")); // ディレクトリ作成込み
-            if std::fs::write(&path, &png).is_ok() {
-                let _ = guard.execute(
-                    "UPDATE recognition_logs SET image_path=?1, image_w=?2, image_h=?3 WHERE id=?4",
-                    rusqlite::params![rel, img.width as i64, img.height as i64, id],
-                );
-            }
-        }
-    Some(id)
+    Some(guard.last_insert_rowid())
 }
 
 /// 翻訳ログを記録する。
 #[allow(clippy::too_many_arguments)]
 pub fn log_translation(
-    recognition_id: Option<i64>,
+    recognition_id: i64,
     engine: &str,
+    llm_profile: Option<&str>,
     source_lang: &str,
     target_lang: &str,
     duration_ms: u128,
@@ -185,12 +246,12 @@ pub fn log_translation(
     let Ok(guard) = m.lock() else { return };
     let success = error.is_none();
     if let Err(e) = guard.execute(
-        "INSERT INTO translation_logs
-            (ts_ms, recognition_id, engine, source_lang, target_lang, duration_ms, cache_hit,
-             translated_text, success, error, request_json, response_json, tokens_in, tokens_out)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO translations
+            (recognition_id, ts_ms, engine, llm_profile, source_lang, target_lang, duration_ms,
+             cache_hit, translated_text, success, error, request_json, response_json, tokens_in, tokens_out)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
-            now_ms(), recognition_id, engine, source_lang, target_lang,
+            recognition_id, now_ms(), engine, llm_profile, source_lang, target_lang,
             duration_ms as i64, cache_hit as i64, translated_text, success as i64,
             error, request_json, response_json, tokens_in, tokens_out
         ],
@@ -199,13 +260,40 @@ pub fn log_translation(
     }
 }
 
-/// 保持上限を超えた古い認識ログ(と紐づく翻訳ログ・画像)を削除する。
+/// 解説ログを追記する (成功/失敗とも記録、置換はしない; SPECv0.4 §8.2.4)。
+#[allow(clippy::too_many_arguments)]
+pub fn log_explanation(
+    recognition_id: i64,
+    llm_profile: &str,
+    duration_ms: u128,
+    input_text: &str,
+    explanation_text: Option<&str>,
+    error: Option<&str>,
+    tokens_in: Option<i64>,
+    tokens_out: Option<i64>,
+) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    let success = error.is_none();
+    if let Err(e) = guard.execute(
+        "INSERT INTO explanations
+            (recognition_id, ts_ms, llm_profile, duration_ms, input_text, explanation_text,
+             success, error, tokens_in, tokens_out)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            recognition_id, now_ms(), llm_profile, duration_ms as i64, input_text,
+            explanation_text, success as i64, error, tokens_in, tokens_out
+        ],
+    ) {
+        util::app_log(&format!("log_explanation failed: {e}"));
+    }
+}
+
+/// 保持上限を超えた古い capture を削除する (配下の認識・翻訳・解説はCASCADE、PNGはファイル削除)。
 pub fn rotate(max_records: u32) {
     let Some(m) = conn() else { return };
     let Ok(guard) = m.lock() else { return };
-    // 上限を超える古いレコードのidと画像パスを取得
-    let sql = "SELECT id, image_path FROM recognition_logs
-               ORDER BY id DESC LIMIT -1 OFFSET ?1";
+    let sql = "SELECT id, image_path FROM captures ORDER BY id DESC LIMIT -1 OFFSET ?1";
     let mut stmt = match guard.prepare(sql) {
         Ok(s) => s,
         Err(_) => return,
@@ -218,52 +306,50 @@ pub fn rotate(max_records: u32) {
         Err(_) => Vec::new(),
     };
     drop(stmt);
-    let mut old_ids: Vec<i64> = Vec::new();
     for (id, image_path) in collected {
-        old_ids.push(id);
         if let Some(rel) = image_path {
             let _ = std::fs::remove_file(logs_dir().join(rel));
         }
+        let _ = guard.execute("DELETE FROM captures WHERE id=?1", rusqlite::params![id]);
     }
-    for id in old_ids {
-        delete_recog_children(&guard, id);
-        let _ = guard.execute("DELETE FROM recognition_logs WHERE id=?1", rusqlite::params![id]);
-    }
-}
-
-/// 認識ログに紐づく子レコード(翻訳・解説)を削除する。
-/// FK の ON DELETE CASCADE は PRAGMA foreign_keys が既定OFFのため明示削除する。
-fn delete_recog_children(guard: &Connection, id: i64) {
-    let _ = guard.execute("DELETE FROM translation_logs WHERE recognition_id=?1", rusqlite::params![id]);
-    let _ = guard.execute("DELETE FROM explanations WHERE recognition_id=?1", rusqlite::params![id]);
 }
 
 // ---- ビューア用の読み出し ----
 
 #[derive(Clone)]
-#[allow(dead_code)] // method はビューアで現状未表示だが将来の列追加・エクスポート用に保持
-pub struct RecogRow {
+pub struct CaptureRow {
     pub id: i64,
     pub ts_ms: i64,
     pub mode: String,
+    pub app_exe: Option<String>,
+    pub app_title: Option<String>,
+    pub uia_path: Option<String>,
+    pub image_path: Option<String>,
+    pub image_w: Option<i64>,
+    pub image_h: Option<i64>,
+}
+
+#[derive(Clone)]
+pub struct RecogRow {
+    pub id: i64,
+    pub capture_id: i64,
+    pub ts_ms: i64,
     pub method: String,
     pub engine: String,
     pub duration_ms: i64,
     pub source_text: String,
     pub success: bool,
     pub error: String,
-    pub image_path: Option<String>,
-    pub app_exe: Option<String>,
-    pub app_title: Option<String>,
-    pub uia_path: Option<String>,
+    pub tags: String,
 }
 
 #[derive(Clone)]
-#[allow(dead_code)] // id はビューアで現状未表示だが将来の個別削除・参照用に保持
 pub struct TransRow {
     pub id: i64,
+    pub recognition_id: i64,
     pub ts_ms: i64,
     pub engine: String,
+    pub llm_profile: Option<String>,
     pub source_lang: String,
     pub target_lang: String,
     pub duration_ms: i64,
@@ -277,39 +363,52 @@ pub struct TransRow {
     pub tokens_out: Option<i64>,
 }
 
-/// recognition_logs のSELECT列 (map_recog_row と対で管理)
-const RECOG_COLS: &str =
-    "id, ts_ms, mode, method, engine, duration_ms, source_text, success, error, image_path, app_exe, app_title, uia_path";
+#[derive(Clone)]
+pub struct ExplainRow {
+    pub id: i64,
+    pub recognition_id: i64,
+    pub ts_ms: i64,
+    pub llm_profile: String,
+    pub duration_ms: i64,
+    pub input_text: String,
+    pub explanation_text: String,
+    pub success: bool,
+    pub error: String,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+}
 
-fn map_recog_row(r: &rusqlite::Row) -> rusqlite::Result<RecogRow> {
-    Ok(RecogRow {
+fn map_capture_row(r: &rusqlite::Row) -> rusqlite::Result<CaptureRow> {
+    Ok(CaptureRow {
         id: r.get(0)?,
         ts_ms: r.get(1)?,
         mode: r.get(2)?,
-        method: r.get(3)?,
-        engine: r.get(4)?,
-        duration_ms: r.get(5)?,
-        source_text: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
-        success: r.get::<_, i64>(7)? != 0,
-        error: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
-        image_path: r.get(9)?,
-        app_exe: r.get(10)?,
-        app_title: r.get(11)?,
-        uia_path: r.get(12)?,
+        app_exe: r.get(3)?,
+        app_title: r.get(4)?,
+        uia_path: r.get(5)?,
+        image_path: r.get(6)?,
+        image_w: r.get(7)?,
+        image_h: r.get(8)?,
     })
 }
 
-/// 認識ログを新しい順に検索取得。query は原文/訳文の部分一致、app_exe は完全一致。
+const CAPTURE_COLS: &str = "id, ts_ms, mode, app_exe, app_title, uia_path, image_path, image_w, image_h";
+
+/// 入力履歴を新しい順に検索取得。query は配下の原文/訳文の部分一致、app_exe は完全一致。
 /// 両方空文字なら全件 (最大 limit 件)。
-pub fn search_recognitions(query: &str, app_exe: &str, limit: usize) -> Vec<RecogRow> {
+pub fn search_captures(query: &str, app_exe: &str, limit: usize) -> Vec<CaptureRow> {
     let Some(m) = conn() else { return Vec::new() };
     let Ok(guard) = m.lock() else { return Vec::new() };
-    let mut sql = format!("SELECT {RECOG_COLS} FROM recognition_logs WHERE 1=1");
+    let mut sql = format!("SELECT {CAPTURE_COLS} FROM captures WHERE 1=1");
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     let mut p_idx = 1;
 
     if !query.is_empty() {
-        sql.push_str(&format!(" AND (source_text LIKE ?{p_idx} OR id IN (SELECT recognition_id FROM translation_logs WHERE translated_text LIKE ?{p_idx}))"));
+        sql.push_str(&format!(
+            " AND (EXISTS (SELECT 1 FROM recognitions r WHERE r.capture_id = captures.id AND r.source_text LIKE ?{p_idx})
+               OR EXISTS (SELECT 1 FROM recognitions r JOIN translations t ON t.recognition_id = r.id
+                          WHERE r.capture_id = captures.id AND t.translated_text LIKE ?{p_idx}))"
+        ));
         params.push(Box::new(format!("%{query}%")));
         p_idx += 1;
     }
@@ -323,16 +422,30 @@ pub fn search_recognitions(query: &str, app_exe: &str, limit: usize) -> Vec<Reco
 
     let p_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| &**b).collect();
     let Ok(mut stmt) = guard.prepare(&sql) else { return Vec::new() };
-    match stmt.query_map(p_refs.as_slice(), |r| map_recog_row(r)) {
+    match stmt.query_map(p_refs.as_slice(), map_capture_row) {
         Ok(iter) => iter.flatten().collect(),
         Err(_) => Vec::new(),
     }
 }
 
+pub fn get_capture(id: i64) -> Option<CaptureRow> {
+    let m = conn()?;
+    let guard = m.lock().ok()?;
+    guard
+        .query_row(
+            &format!("SELECT {CAPTURE_COLS} FROM captures WHERE id=?1"),
+            rusqlite::params![id],
+            |r| map_capture_row(r),
+        )
+        .ok()
+}
+
 pub fn get_unique_app_exes() -> Vec<String> {
     let Some(m) = conn() else { return Vec::new() };
     let Ok(guard) = m.lock() else { return Vec::new() };
-    let mut stmt = match guard.prepare("SELECT DISTINCT app_exe FROM recognition_logs WHERE app_exe IS NOT NULL AND app_exe != '' ORDER BY app_exe") {
+    let mut stmt = match guard.prepare(
+        "SELECT DISTINCT app_exe FROM captures WHERE app_exe IS NOT NULL AND app_exe != '' ORDER BY app_exe",
+    ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -344,14 +457,42 @@ pub fn get_unique_app_exes() -> Vec<String> {
     }
 }
 
+/// 指定 capture に紐づく認識ログを時系列(古い順)取得
+pub fn recognitions_for(capture_id: i64) -> Vec<RecogRow> {
+    let Some(m) = conn() else { return Vec::new() };
+    let Ok(guard) = m.lock() else { return Vec::new() };
+    let mut stmt = match guard.prepare(
+        "SELECT id, capture_id, ts_ms, method, engine, duration_ms, source_text, success, error, tags
+         FROM recognitions WHERE capture_id=?1 ORDER BY id ASC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map(rusqlite::params![capture_id], |r| {
+        Ok(RecogRow {
+            id: r.get(0)?,
+            capture_id: r.get(1)?,
+            ts_ms: r.get(2)?,
+            method: r.get(3)?,
+            engine: r.get(4)?,
+            duration_ms: r.get(5)?,
+            source_text: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+            success: r.get::<_, i64>(7)? != 0,
+            error: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            tags: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+        })
+    });
+    rows.map(|r| r.flatten().collect()).unwrap_or_default()
+}
+
 /// 指定認識に紐づく翻訳ログを時系列(古い順)取得
 pub fn translations_for(recognition_id: i64) -> Vec<TransRow> {
     let Some(m) = conn() else { return Vec::new() };
     let Ok(guard) = m.lock() else { return Vec::new() };
     let mut stmt = match guard.prepare(
-        "SELECT id, ts_ms, engine, source_lang, target_lang, duration_ms, cache_hit,
-                translated_text, success, error, request_json, response_json, tokens_in, tokens_out
-         FROM translation_logs WHERE recognition_id=?1 ORDER BY id ASC",
+        "SELECT id, recognition_id, ts_ms, engine, llm_profile, source_lang, target_lang, duration_ms,
+                cache_hit, translated_text, success, error, request_json, response_json, tokens_in, tokens_out
+         FROM translations WHERE recognition_id=?1 ORDER BY id ASC",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -359,31 +500,101 @@ pub fn translations_for(recognition_id: i64) -> Vec<TransRow> {
     let rows = stmt.query_map(rusqlite::params![recognition_id], |r| {
         Ok(TransRow {
             id: r.get(0)?,
-            ts_ms: r.get(1)?,
-            engine: r.get(2)?,
-            source_lang: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            target_lang: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            duration_ms: r.get(5)?,
-            cache_hit: r.get::<_, i64>(6)? != 0,
-            translated_text: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
-            success: r.get::<_, i64>(8)? != 0,
-            error: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
-            request_json: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
-            response_json: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
-            tokens_in: r.get(12)?,
-            tokens_out: r.get(13)?,
+            recognition_id: r.get(1)?,
+            ts_ms: r.get(2)?,
+            engine: r.get(3)?,
+            llm_profile: r.get(4)?,
+            source_lang: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            target_lang: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+            duration_ms: r.get(7)?,
+            cache_hit: r.get::<_, i64>(8)? != 0,
+            translated_text: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
+            success: r.get::<_, i64>(10)? != 0,
+            error: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
+            request_json: r.get::<_, Option<String>>(12)?.unwrap_or_default(),
+            response_json: r.get::<_, Option<String>>(13)?.unwrap_or_default(),
+            tokens_in: r.get(14)?,
+            tokens_out: r.get(15)?,
         })
     });
     rows.map(|r| r.flatten().collect()).unwrap_or_default()
+}
+
+/// 指定認識に紐づく解説ログを時系列(古い順)取得
+pub fn explanations_for(recognition_id: i64) -> Vec<ExplainRow> {
+    let Some(m) = conn() else { return Vec::new() };
+    let Ok(guard) = m.lock() else { return Vec::new() };
+    let mut stmt = match guard.prepare(
+        "SELECT id, recognition_id, ts_ms, llm_profile, duration_ms, input_text, explanation_text,
+                success, error, tokens_in, tokens_out
+         FROM explanations WHERE recognition_id=?1 ORDER BY id ASC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map(rusqlite::params![recognition_id], |r| {
+        Ok(ExplainRow {
+            id: r.get(0)?,
+            recognition_id: r.get(1)?,
+            ts_ms: r.get(2)?,
+            llm_profile: r.get(3)?,
+            duration_ms: r.get(4)?,
+            input_text: r.get(5)?,
+            explanation_text: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+            success: r.get::<_, i64>(7)? != 0,
+            error: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
+            tokens_in: r.get(9)?,
+            tokens_out: r.get(10)?,
+        })
+    });
+    rows.map(|r| r.flatten().collect()).unwrap_or_default()
+}
+
+/// 「現在の解説」= 最新の成功した解説文を取得 (SPECv0.4 §8.2.4)。
+pub fn latest_explanation(recognition_id: i64) -> Option<String> {
+    let m = conn()?;
+    let guard = m.lock().ok()?;
+    guard
+        .query_row(
+            "SELECT explanation_text FROM explanations
+             WHERE recognition_id=?1 AND success=1 AND explanation_text IS NOT NULL
+             ORDER BY id DESC LIMIT 1",
+            rusqlite::params![recognition_id],
+            |r| r.get(0),
+        )
+        .ok()
+}
+
+/// 認識へのユーザー付与タグを取得
+pub fn get_tags(recognition_id: i64) -> String {
+    let Some(m) = conn() else { return String::new() };
+    let Ok(guard) = m.lock() else { return String::new() };
+    guard
+        .query_row(
+            "SELECT tags FROM recognitions WHERE id=?1",
+            rusqlite::params![recognition_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// 認識へのユーザー付与タグを保存
+pub fn set_tags(recognition_id: i64, tags: &str) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    let _ = guard.execute(
+        "UPDATE recognitions SET tags=?1 WHERE id=?2",
+        rusqlite::params![tags, recognition_id],
+    );
 }
 
 /// 全ログを削除 (テーブルDELETE + 画像全削除 + VACUUM)
 pub fn clear_all() {
     let Some(m) = conn() else { return };
     if let Ok(guard) = m.lock() {
-        let _ = guard.execute_batch(
-            "DELETE FROM translation_logs; DELETE FROM explanations; DELETE FROM recognition_logs; VACUUM;",
-        );
+        let _ = guard.execute_batch("DELETE FROM captures; VACUUM;");
     }
     // images ディレクトリのPNGを削除
     if let Ok(entries) = std::fs::read_dir(images_dir()) {
@@ -395,14 +606,13 @@ pub fn clear_all() {
     }
 }
 
-/// 認識ログ1件を削除(紐づく翻訳ログと画像も削除)。
-pub fn delete_recognition(id: i64) {
+/// capture 1件を削除 (配下の認識・翻訳・解説はCASCADE、画像もファイル削除)。
+pub fn delete_capture(id: i64) {
     let Some(m) = conn() else { return };
     let Ok(guard) = m.lock() else { return };
-    // 画像パスを取得して削除
     let img: Option<String> = guard
         .query_row(
-            "SELECT image_path FROM recognition_logs WHERE id=?1",
+            "SELECT image_path FROM captures WHERE id=?1",
             rusqlite::params![id],
             |r| r.get(0),
         )
@@ -411,51 +621,21 @@ pub fn delete_recognition(id: i64) {
     if let Some(rel) = img {
         let _ = std::fs::remove_file(logs_dir().join(rel));
     }
-    delete_recog_children(&guard, id);
-    let _ = guard.execute("DELETE FROM recognition_logs WHERE id=?1", rusqlite::params![id]);
+    let _ = guard.execute("DELETE FROM captures WHERE id=?1", rusqlite::params![id]);
 }
 
-/// 翻訳ログ1件を削除。
+/// 認識1件を削除 (配下の翻訳・解説はCASCADE)。
+pub fn delete_recognition(id: i64) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    let _ = guard.execute("DELETE FROM recognitions WHERE id=?1", rusqlite::params![id]);
+}
+
+/// 翻訳1件を削除。
 pub fn delete_translation(id: i64) {
     let Some(m) = conn() else { return };
     let Ok(guard) = m.lock() else { return };
-    let _ = guard.execute("DELETE FROM translation_logs WHERE id=?1", rusqlite::params![id]);
-}
-
-/// 解説文のみ取得
-pub fn get_explanation(recog_id: i64) -> Option<String> {
-    get_explanation_and_tags(recog_id).map(|(e, _)| e)
-}
-
-/// 解説文とタグを取得。未保存なら None。
-pub fn get_explanation_and_tags(recog_id: i64) -> Option<(String, String)> {
-    let m = conn()?;
-    let guard = m.lock().ok()?;
-    let mut stmt = guard
-        .prepare("SELECT explanation_text, tags FROM explanations WHERE recognition_id = ?")
-        .ok()?;
-    let mut rows = stmt.query(rusqlite::params![recog_id]).ok()?;
-    let row = rows.next().ok().flatten()?;
-    let text: String = row.get(0).unwrap_or_default();
-    let tags: String = row.get::<_, Option<String>>(1).unwrap_or_default().unwrap_or_default();
-    Some((text, tags))
-}
-
-/// 解説文を保存 (既存のタグは維持)
-pub fn save_explanation(recog_id: i64, text: &str) {
-    let tags = get_explanation_and_tags(recog_id).map(|(_, t)| t).unwrap_or_default();
-    save_explanation_and_tags(recog_id, text, &tags);
-}
-
-/// 解説文とタグを保存 (認識IDごとに1件へ置換)
-pub fn save_explanation_and_tags(recog_id: i64, text: &str, tags: &str) {
-    let Some(m) = conn() else { return };
-    let Ok(guard) = m.lock() else { return };
-    let _ = guard.execute("DELETE FROM explanations WHERE recognition_id = ?", rusqlite::params![recog_id]);
-    let _ = guard.execute(
-        "INSERT INTO explanations (recognition_id, explanation_text, tags) VALUES (?1, ?2, ?3)",
-        rusqlite::params![recog_id, text, tags],
-    );
+    let _ = guard.execute("DELETE FROM translations WHERE id=?1", rusqlite::params![id]);
 }
 
 #[cfg(test)]
@@ -464,56 +644,90 @@ mod tests {
 
     // FOCUSTRANSLATOR_DATA_DIR で隔離した環境でのみ動く。1プロセス1DBのため単一テストに集約。
     #[test]
-    fn record_read_rotate_clear() {
+    fn tree_record_cascade_rotate_clear() {
+        // 環境変数切替中に onnx テスト等が config_dir() を参照しないよう直列化する
+        let _guard = crate::util::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("ft_logdb_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe {
             std::env::set_var("FOCUSTRANSLATOR_DATA_DIR", &tmp);
         }
 
-        // 認識ログ + 翻訳ログ
-        let rid = log_recognition(
-            "hold", "ocr", "win", 200, Some("hello"), None, None, false,
-            Some("game.exe"), Some("Game Window"), Some("Root > Panel"),
+        // 4工程ツリー: capture → recognition → translation / explanation
+        let cid = log_capture(
+            "hold", Some("game.exe"), Some("Game Window"), Some("Root > Panel"), None, false,
         )
-        .expect("recognition id");
+        .expect("capture id");
+        let rid = log_recognition(cid, "ocr", "win", 200, Some("hello"), None).expect("recognition id");
         log_translation(
-            Some(rid), "llm", "en", "ja", 300, false, Some("こんにちは"), None,
+            rid, "llm", Some("prof1"), "en", "ja", 300, false, Some("こんにちは"), None,
             Some("{\"req\":1}"), Some("{\"res\":2}"), Some(10), Some(5),
         );
+        log_explanation(rid, "prof1", 400, "prompt text", Some("解説文"), None, Some(20), Some(15));
+        log_explanation(rid, "prof1", 400, "prompt text", None, Some("timeout"), None, None);
 
-        let recs = search_recognitions("", "", 10);
+        let caps = search_captures("", "", 10);
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].app_exe.as_deref(), Some("game.exe"));
+        let recs = recognitions_for(cid);
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].source_text, "hello");
-        assert_eq!(recs[0].app_exe.as_deref(), Some("game.exe"));
         let trs = translations_for(rid);
         assert_eq!(trs.len(), 1);
         assert_eq!(trs[0].translated_text, "こんにちは");
+        assert_eq!(trs[0].llm_profile.as_deref(), Some("prof1"));
         assert_eq!(trs[0].tokens_in, Some(10));
+        let exps = explanations_for(rid);
+        assert_eq!(exps.len(), 2, "解説は追記式で失敗も記録される");
+        assert!(!exps[1].success);
+        assert_eq!(latest_explanation(rid).as_deref(), Some("解説文"));
 
-        // 検索: 原文の部分一致とexe名フィルタ
-        assert_eq!(search_recognitions("hell", "", 10).len(), 1);
-        assert_eq!(search_recognitions("no-match", "", 10).len(), 0);
-        assert_eq!(search_recognitions("", "game.exe", 10).len(), 1);
-        assert_eq!(search_recognitions("", "other.exe", 10).len(), 0);
+        // 検索: 原文/訳文の部分一致とexe名フィルタ
+        assert_eq!(search_captures("hell", "", 10).len(), 1);
+        assert_eq!(search_captures("こんにち", "", 10).len(), 1);
+        assert_eq!(search_captures("no-match", "", 10).len(), 0);
+        assert_eq!(search_captures("", "game.exe", 10).len(), 1);
+        assert_eq!(search_captures("", "other.exe", 10).len(), 0);
 
-        // 解説の保存・タグ維持
-        save_explanation_and_tags(rid, "解説文", "重要");
-        assert_eq!(get_explanation_and_tags(rid), Some(("解説文".into(), "重要".into())));
-        save_explanation(rid, "改訂版");
-        assert_eq!(get_explanation_and_tags(rid), Some(("改訂版".into(), "重要".into())));
+        // タグ (recognitions 側)
+        set_tags(rid, "重要");
+        assert_eq!(get_tags(rid), "重要");
+        assert_eq!(recognitions_for(cid)[0].tags, "重要");
 
-        // ローテーション: さらに数件足して上限2に絞る
-        for i in 0..3 {
-            log_recognition("hold", "ocr", "win", 100, Some(&format!("line{i}")), None, None, false, None, None, None);
+        // 再OCR相当: 同じ capture に認識行を追加
+        let rid2 = log_recognition(cid, "ocr", "paddle", 100, Some("hello2"), None).unwrap();
+        assert_eq!(recognitions_for(cid).len(), 2);
+
+        // CASCADE削除: recognition を消すと配下の翻訳・解説も消える
+        delete_recognition(rid);
+        assert_eq!(translations_for(rid).len(), 0);
+        assert_eq!(explanations_for(rid).len(), 0);
+        assert_eq!(recognitions_for(cid).len(), 1);
+
+        // CASCADE削除: capture を消すと配下の認識も消える
+        delete_capture(cid);
+        assert_eq!(recognitions_for(cid).len(), 0);
+        assert_eq!(translations_for(rid2).len(), 0);
+
+        // ローテーション: captures 件数で絞り、配下はCASCADE
+        let mut last_rid = 0;
+        for i in 0..4 {
+            let c = log_capture("hold", None, None, None, None, false).unwrap();
+            last_rid = log_recognition(c, "ocr", "win", 100, Some(&format!("line{i}")), None).unwrap();
         }
         rotate(2);
-        assert!(search_recognitions("", "", 100).len() <= 2, "rotate should cap records");
+        assert_eq!(search_captures("", "", 100).len(), 2, "rotate should cap captures");
+        // 最新の capture の認識は残っている
+        assert_eq!(recognitions_for(search_captures("", "", 1)[0].id).last().map(|r| r.id), Some(last_rid));
 
         // 全削除
         clear_all();
-        assert_eq!(search_recognitions("", "", 100).len(), 0);
+        assert_eq!(search_captures("", "", 100).len(), 0);
 
+        // 他テスト(onnx等)が実データディレクトリを参照できるよう環境変数を戻す
+        unsafe {
+            std::env::remove_var("FOCUSTRANSLATOR_DATA_DIR");
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

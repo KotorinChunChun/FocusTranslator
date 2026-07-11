@@ -71,6 +71,10 @@ const IDC_PROF_PROMPT_EXP: i32 = 144;
 const IDC_DETECT_MODE: i32 = 145;
 const IDC_DETECT_KEY: i32 = 146;
 const IDC_PREVIEW_DETECT_MODE: i32 = 147;
+/// プロンプトの [?] 使える変数 ヘルプボタン (SPECv0.4 §7.3)
+const IDC_HELP_PROMPT_TR: i32 = 148;
+const IDC_HELP_PROMPT_OCR: i32 = 149;
+const IDC_HELP_PROMPT_EXP: i32 = 150;
 
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
@@ -128,10 +132,10 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
                 *r.borrow_mut() = true;
             }
         });
-        // 全項目の高さ(1150px)が画面に収まらない環境で「ログビューアを開く」等の
-        // 下部ボタンが画面外に隠れないよう、画面の高さに収まる位置・高さへ調整する。
+        // 3列レイアウト (SPECv0.4 §5): 幅1280px以下・高さ660px以下で
+        // HD (1280x720) のワークエリアに収まるサイズとする。
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let (win_y, win_h) = (10, 1150.min(screen_h - 40));
+        let (win_y, win_h) = (10, 656.min(screen_h - 40));
         if let Ok(h) = CreateWindowExW(
             WS_EX_TOPMOST,
             class,
@@ -139,7 +143,7 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
             WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT,
             win_y,
-            640,
+            1280,
             win_h,
             None,
             None,
@@ -155,125 +159,169 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
     }
 }
 
+/// BS_GROUPBOX でカテゴリ枠を作る (SPECv0.4 §5.1)
+fn group(h: HWND, inst: HINSTANCE, text: &str, x: i32, y: i32, w: i32, ht: i32) {
+    const BS_GROUPBOX: u32 = 0x0000_0007;
+    ctl(h, inst, w!("BUTTON"), text, WINDOW_STYLE(BS_GROUPBOX), x, y, w, ht, 0);
+}
+
 fn build_controls(h: HWND, inst: HINSTANCE) {
-    let lx = 16;
-    let cx = 180;
-    let cw = 250;
-    let mut y = 14;
-    let step = 32;
+    // 3列レイアウト (SPECv0.4 §5.1): 左=操作/OCR、中=翻訳/その他、右=LLMプロファイル
+    const PAD: i32 = 10;
+    const COL_W: i32 = 408;
+    const STEP: i32 = 30;
+    const GTOP: i32 = 22; // グループ枠タイトル分のオフセット
+    let col_x = [PAD, PAD * 2 + COL_W, PAD * 3 + COL_W * 2];
+    let inner = |cx: i32| cx + 12; // グループ内の左端
+    let key_w = 160;
 
-    // キャプチャキー(実際の翻訳ホールドキー): キー選択 + 領域表示(デバッグ用枠表示)の有効化 + 監視周期
-    label(h, inst, "キャプチャキー", lx, y + 2, 100);
-    combo(h, inst, cx, y, 90, IDC_HOLDKEY);
-    checkbox(h, inst, "領域表示", cx + 98, y + 2, 88, IDC_DETECT_MODE);
-    label(h, inst, "監視周期", cx + 192, y + 2, 62);
-    edit(h, inst, cx + 254, y, 56, IDC_POLL);
-    y += step;
-    // プレビューキー: 実際の翻訳は行わず、検出範囲の枠表示だけを確認できるキー (既定 LCtrl)
-    label(h, inst, "プレビューキー", lx, y + 2, 100);
-    combo(h, inst, cx, y, 90, IDC_DETECT_KEY);
-    checkbox(h, inst, "領域表示", cx + 98, y + 2, 88, IDC_PREVIEW_DETECT_MODE);
-    y += step;
-    label(h, inst, "範囲指定ホットキー", lx, y + 2, 160);
-    edit(h, inst, cx, y, 120, IDC_HOTKEY);
-    y += step;
-    label(h, inst, "既定OCRエンジン", lx, y + 2, 150);
-    combo(h, inst, cx, y, 150, IDC_OCR);
-    y += step;
-    // PaddleOCR 導入状況 + ワンクリックインストール (SPEC §7.1, §13)
-    label(h, inst, "PaddleOCR", lx, y + 2, 150);
-    ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 140, 20, IDC_PADDLE_STATUS);
-    button(h, inst, "インストール", cx + 146, y - 2, 104, IDC_PADDLE_INSTALL);
-    y += step;
-    label(h, inst, "YomiToku サーバーURL", lx, y + 2, 160);
-    edit(h, inst, cx, y, 190, IDC_YOMI);
-    button(h, inst, "テスト", cx + 196, y - 2, 54, IDC_TEST_YOMI);
-    y += step;
-    label(h, inst, "NDL-OCR サーバーURL", lx, y + 2, 160);
-    edit(h, inst, cx, y, 190, IDC_NDL);
-    button(h, inst, "テスト", cx + 196, y - 2, 54, IDC_TEST_NDL);
-    y += step;
-    label(h, inst, "既定翻訳エンジン", lx, y + 2, 150);
-    combo(h, inst, cx, y, 150, IDC_TR);
-    y += step;
-    // ローカルONNX翻訳 モデル選択 + 導入状況 + ワンクリックインストール (SPEC §7.2, §13)
-    label(h, inst, "ローカルONNX翻訳モデル", lx, y + 2, 150);
-    combo(h, inst, cx, y, 250, IDC_ONNX_VARIANT);
-    y += step;
-    ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 140, 20, IDC_ONNX_STATUS);
-    button(h, inst, "インストール", cx + 146, y - 2, 104, IDC_ONNX_INSTALL);
-    y += step;
-    label(h, inst, "翻訳元言語 / 訳先言語", lx, y + 2, 160);
-    combo(h, inst, cx, y, 80, IDC_SRCLANG);
-    label(h, inst, "→", cx + 86, y + 2, 16);
-    combo(h, inst, cx + 104, y, 80, IDC_LANG);
-    y += step;
-    // APIキー入力欄の右に、発行ページを開くボタンを配置
-    let key_w = 190;
-    label(h, inst, "DeepL APIキー", lx, y + 2, 150);
-    password_edit(h, inst, cx, y, key_w, IDC_DEEPL);
-    button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 108, IDC_DEEPL_URL);
-    y += step;
-    label(h, inst, "Google Trans APIキー", lx, y + 2, 160);
-    password_edit(h, inst, cx, y, key_w, IDC_GOOGLE);
-    button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 108, IDC_GOOGLE_URL);
-    y += step;
-    // LLM APIプロファイル設定領域
-    y += step;
-    label(h, inst, "【LLM APIプロファイル】", lx, y, 180);
-    combo(h, inst, cx, y, 140, IDC_PROF_LIST);
-    button(h, inst, "新規", cx + 150, y, 50, IDC_PROF_NEW);
-    button(h, inst, "保存", cx + 205, y, 50, IDC_PROF_SAVE);
-    button(h, inst, "別名保存", cx + 260, y, 60, IDC_PROF_SAVEAS);
-    button(h, inst, "削除", cx + 325, y, 50, IDC_PROF_DEL);
-    y += step;
+    // ---- 左列 グループ1: 操作 ----
+    {
+        let gx = col_x[0];
+        let lx = inner(gx);
+        let cx = gx + 152;
+        group(h, inst, "1. 操作", gx, 8, COL_W, 146);
+        let mut y = 8 + GTOP;
+        label(h, inst, "キャプチャキー", lx, y + 2, 130);
+        combo(h, inst, cx, y, 90, IDC_HOLDKEY);
+        checkbox(h, inst, "領域表示", cx + 98, y + 2, 88, IDC_DETECT_MODE);
+        y += STEP;
+        label(h, inst, "プレビューキー", lx, y + 2, 130);
+        combo(h, inst, cx, y, 90, IDC_DETECT_KEY);
+        checkbox(h, inst, "領域表示", cx + 98, y + 2, 88, IDC_PREVIEW_DETECT_MODE);
+        y += STEP;
+        label(h, inst, "範囲指定ホットキー", lx, y + 2, 130);
+        edit(h, inst, cx, y, 120, IDC_HOTKEY);
+        y += STEP;
+        label(h, inst, "監視周期 (ms)", lx, y + 2, 130);
+        edit(h, inst, cx, y, 60, IDC_POLL);
+    }
 
-    label(h, inst, "API登録名", lx, y + 2, 150);
-    edit(h, inst, cx, y, 150, IDC_PROF_NAME);
-    label(h, inst, "種別", cx + 160, y + 2, 40);
-    combo(h, inst, cx + 200, y, 100, IDC_PROF_TYPE);
-    y += step;
-    
-    label(h, inst, "API URL", lx, y + 2, 150);
-    edit(h, inst, cx, y, cw + 50, IDC_PROF_URL);
-    y += step;
+    // ---- 左列 グループ2: OCR設定 ----
+    {
+        let gx = col_x[0];
+        let lx = inner(gx);
+        let cx = gx + 152;
+        group(h, inst, "2. OCR設定", gx, 162, COL_W, 176);
+        let mut y = 162 + GTOP;
+        label(h, inst, "既定OCRエンジン", lx, y + 2, 130);
+        combo(h, inst, cx, y, 170, IDC_OCR);
+        y += STEP;
+        label(h, inst, "PaddleOCR", lx, y + 2, 130);
+        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 100, 20, IDC_PADDLE_STATUS);
+        button(h, inst, "インストール", cx + 106, y - 2, 104, IDC_PADDLE_INSTALL);
+        y += STEP;
+        label(h, inst, "YomiToku サーバーURL", lx, y + 2, 140);
+        edit(h, inst, cx, y, 176, IDC_YOMI);
+        button(h, inst, "テスト", cx + 182, y - 2, 54, IDC_TEST_YOMI);
+        y += STEP;
+        label(h, inst, "NDL-OCR サーバーURL", lx, y + 2, 140);
+        edit(h, inst, cx, y, 176, IDC_NDL);
+        button(h, inst, "テスト", cx + 182, y - 2, 54, IDC_TEST_NDL);
+    }
 
-    label(h, inst, "APIキー", lx, y + 2, 150);
-    password_edit(h, inst, cx, y, key_w, IDC_PROF_KEY);
-    y += step;
+    // ---- 中列 グループ3: 翻訳設定 ----
+    {
+        let gx = col_x[1];
+        let lx = inner(gx);
+        let cx = gx + 152;
+        group(h, inst, "3. 翻訳設定", gx, 8, COL_W, 330);
+        let mut y = 8 + GTOP;
+        label(h, inst, "既定翻訳エンジン", lx, y + 2, 130);
+        combo(h, inst, cx, y, 170, IDC_TR);
+        y += STEP;
+        label(h, inst, "ローカルONNXモデル", lx, y + 2, 130);
+        combo(h, inst, cx, y, 226, IDC_ONNX_VARIANT);
+        y += STEP;
+        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 100, 20, IDC_ONNX_STATUS);
+        button(h, inst, "インストール", cx + 106, y - 2, 104, IDC_ONNX_INSTALL);
+        y += STEP;
+        label(h, inst, "翻訳元言語 / 訳先言語", lx, y + 2, 140);
+        combo(h, inst, cx, y, 70, IDC_SRCLANG);
+        label(h, inst, "→", cx + 76, y + 2, 16);
+        combo(h, inst, cx + 94, y, 70, IDC_LANG);
+        y += STEP;
+        label(h, inst, "DeepL APIキー", lx, y + 2, 130);
+        password_edit(h, inst, cx, y, key_w, IDC_DEEPL);
+        button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 76, IDC_DEEPL_URL);
+        y += STEP;
+        label(h, inst, "Google Trans APIキー", lx, y + 2, 140);
+        password_edit(h, inst, cx, y, key_w, IDC_GOOGLE);
+        button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 76, IDC_GOOGLE_URL);
+        y += STEP;
+        label(h, inst, "用語集 (1行に 原文=訳文)", lx, y + 2, 170);
+        multiline(h, inst, cx, y, 226, 108, IDC_GLOSSARY);
+    }
 
-    label(h, inst, "モデル名", lx, y + 2, 150);
-    edit(h, inst, cx, y, 150, IDC_PROF_MODEL);
-    y += step;
+    // ---- 中列 グループ5: その他の設定 ----
+    {
+        let gx = col_x[1];
+        let lx = inner(gx);
+        group(h, inst, "5. その他の設定", gx, 346, COL_W, 186);
+        let mut y = 346 + GTOP;
+        checkbox(h, inst, "起動時に常駐する", lx, y, 170, IDC_AUTOSTART);
+        checkbox(h, inst, "計測ログを有効化", lx + 180, y, 160, IDC_PERFLOG);
+        y += STEP;
+        checkbox(h, inst, "実行ログを記録 (原文/訳文を平文保存)", lx, y, 300, IDC_LOG_ENABLED);
+        y += STEP;
+        checkbox(h, inst, "デバッグモード (OCR画像をPNG保存)", lx, y, 280, IDC_DEBUG_MODE);
+        y += STEP;
+        label(h, inst, "保持上限", lx, y + 2, 60);
+        edit(h, inst, lx + 66, y, 70, IDC_LOG_MAX);
+        button(h, inst, "ログビューアを開く", lx + 150, y - 2, 130, IDC_OPEN_LOG);
+        y += STEP;
+        button(h, inst, "外部送信の同意状態をリセット", lx, y, 220, IDC_CONSENT_RESET);
+    }
 
-    label(h, inst, "翻訳プロンプト", lx, y + 2, 160);
-    multiline(h, inst, cx, y, cw + 50, 44, IDC_PROF_PROMPT_TR);
-    y += 50;
-    label(h, inst, "OCRプロンプト", lx, y + 2, 160);
-    multiline(h, inst, cx, y, cw + 50, 44, IDC_PROF_PROMPT_OCR);
-    y += 50;
-    label(h, inst, "解説プロンプト", lx, y + 2, 160);
-    multiline(h, inst, cx, y, cw + 50, 44, IDC_PROF_PROMPT_EXP);
-    y += 50;
-    checkbox(h, inst, "起動時に常駐する", lx, y, 200, IDC_AUTOSTART);
-    checkbox(h, inst, "計測ログを有効化", cx + 40, y, 200, IDC_PERFLOG);
-    y += step;
-    // 実行ログ (SQLite) 設定
-    checkbox(h, inst, "実行ログを記録 (原文/訳文を平文保存)", lx, y, 280, IDC_LOG_ENABLED);
-    y += 26;
-    checkbox(h, inst, "デバッグモード (OCR画像をPNG保存)", lx, y, 280, IDC_DEBUG_MODE);
-    label(h, inst, "保持上限", cx + 130, y + 2, 60);
-    edit(h, inst, cx + 190, y, 60, IDC_LOG_MAX);
-    button(h, inst, "ログビューアを開く", cx + 256, y - 2, 110, IDC_OPEN_LOG);
-    y += step;
-    button(h, inst, "外部送信の同意状態をリセット", lx, y, 220, IDC_CONSENT_RESET);
-    y += step;
-    label(h, inst, "用語集 (1行に 原文=訳文)", lx, y + 2, 180);
-    multiline(h, inst, cx, y, cw, 60, IDC_GLOSSARY);
-    y += 66;
-    button(h, inst, "適用", cx + 60, y, 80, IDC_APPLY);
-    button(h, inst, "保存", cx + 146, y, 80, IDC_SAVE);
-    button(h, inst, "閉じる", cx + 232, y, 80, IDC_CLOSE);
+    // ---- 右列 グループ4: LLMプロファイル設定 ----
+    {
+        let gx = col_x[2];
+        let lx = inner(gx);
+        let cx = gx + 100;
+        group(h, inst, "4. LLMプロファイル設定", gx, 8, COL_W, 556);
+        let mut y = 8 + GTOP;
+        combo(h, inst, lx, y, 150, IDC_PROF_LIST);
+        button(h, inst, "新規", lx + 156, y, 46, IDC_PROF_NEW);
+        button(h, inst, "保存", lx + 206, y, 46, IDC_PROF_SAVE);
+        button(h, inst, "別名保存", lx + 256, y, 66, IDC_PROF_SAVEAS);
+        button(h, inst, "削除", lx + 326, y, 46, IDC_PROF_DEL);
+        y += STEP;
+        label(h, inst, "API登録名", lx, y + 2, 84);
+        edit(h, inst, cx, y, 140, IDC_PROF_NAME);
+        label(h, inst, "種別", cx + 150, y + 2, 36);
+        combo(h, inst, cx + 188, y, 100, IDC_PROF_TYPE);
+        y += STEP;
+        label(h, inst, "API URL", lx, y + 2, 84);
+        edit(h, inst, cx, y, 288, IDC_PROF_URL);
+        y += STEP;
+        label(h, inst, "APIキー", lx, y + 2, 84);
+        password_edit(h, inst, cx, y, key_w, IDC_PROF_KEY);
+        y += STEP;
+        label(h, inst, "モデル名", lx, y + 2, 84);
+        edit(h, inst, cx, y, 180, IDC_PROF_MODEL);
+        y += STEP;
+        // 各プロンプトは文章全体を見渡せる縦幅を確保する (SPECv0.4 §5.1)
+        // 見出し右の [?] で使えるプレースホルダ一覧を表示 (§7.3)
+        const PROMPT_H: i32 = 96;
+        for (lab, edit_id, help_id) in [
+            ("翻訳プロンプト", IDC_PROF_PROMPT_TR, IDC_HELP_PROMPT_TR),
+            ("OCRプロンプト", IDC_PROF_PROMPT_OCR, IDC_HELP_PROMPT_OCR),
+            ("解説プロンプト", IDC_PROF_PROMPT_EXP, IDC_HELP_PROMPT_EXP),
+        ] {
+            label(h, inst, lab, lx, y + 2, 110);
+            button(h, inst, "[?] 使える変数", lx + 116, y, 100, help_id);
+            y += 26;
+            multiline(h, inst, lx, y, COL_W - 24, PROMPT_H, edit_id);
+            y += PROMPT_H + 6;
+        }
+    }
+
+    // ---- 下部ボタン領域 (右下; SPECv0.4 §5.2) ----
+    let btn_y = 570;
+    let right = PAD * 3 + COL_W * 3;
+    button(h, inst, "適用", right - 258, btn_y, 80, IDC_APPLY);
+    button(h, inst, "保存", right - 172, btn_y, 80, IDC_SAVE);
+    button(h, inst, "閉じる", right - 86, btn_y, 80, IDC_CLOSE);
 
     // フォント設定
     unsafe {
@@ -570,6 +618,30 @@ fn handle_install_done(h: HWND, wparam: WPARAM, lparam: LPARAM, refresh: fn(HWND
     }
 }
 
+/// プロンプトで使えるプレースホルダ一覧をポップアップ表示する (SPECv0.4 §7.3)
+fn show_placeholder_help(h: HWND) {
+    let msg = "プロンプトで使えるプレースホルダ:\n\n\
+{{source_lang}} … 翻訳元言語 (例: en)\n\
+{{target_lang}} … 翻訳先言語 (例: ja)\n\
+{{original_text}} … OCRまたはUIAで取得した翻訳前の原文\n\
+{{translated_text}} … 翻訳後の訳文 (翻訳前は空文字)\n\
+{{glossary}} … 用語集のテキスト\n\
+{{app_title}} … 対象アプリケーションのウィンドウタイトル\n\
+{{app_exe}} … 対象アプリケーションの実行ファイル名\n\
+{{uia_path}} … UIA取得時の要素のパス (画像OCR時は空文字)\n\
+{{ocr_engine}} … 実行されたOCRエンジン名\n\
+{{tr_engine}} … 実行された翻訳エンジン名 (翻訳前は空文字)";
+    unsafe {
+        let wide = to_wide(msg);
+        MessageBoxW(
+            Some(h),
+            PCWSTR(wide.as_ptr()),
+            w!("使える変数"),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
 /// 既定ブラウザで指定URLを開く
 fn open_url(h: HWND, url: &str) {
     unsafe {
@@ -795,6 +867,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 }
                 IDC_DEEPL_URL => open_url(h, DEEPL_KEY_URL),
                 IDC_GOOGLE_URL => open_url(h, GOOGLE_KEY_URL),
+                IDC_HELP_PROMPT_TR | IDC_HELP_PROMPT_OCR | IDC_HELP_PROMPT_EXP => {
+                    show_placeholder_help(h);
+                }
                 IDC_PROF_LIST | IDC_PROF_TYPE => {
                     let notif = ((wparam.0 >> 16) & 0xFFFF) as u32;
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE {

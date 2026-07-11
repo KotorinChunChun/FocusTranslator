@@ -10,6 +10,7 @@ mod chip_handler;
 mod config;
 mod detect;
 mod engine;
+mod image_edit;
 mod llm_api;
 mod logdb;
 mod logviewer;
