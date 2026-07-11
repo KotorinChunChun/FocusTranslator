@@ -23,8 +23,10 @@ pub enum WorkerMsg {
         /// 保持画像の行選択モード (再OCR時に同じモードで認識する)
         focus: ocr::Focus,
         ms: u128,
+        capture_id: Option<i64>,
         recog_id: Option<i64>,
         app_title: String,
+        app_exe: String,
         uia_path: String,
         /// UIAパスの各ノード (ボタン化してオーバーレイに表示。クリックでOCRの代わりに採用)
         uia_nodes: Vec<uia::UiaPathNode>,
@@ -91,6 +93,18 @@ impl AppContext {
     }
 }
 
+/// AppContext からプロンプト置換用コンテキストを組み立てる (SPECv0.4 §7.1)。
+/// ocr_engine はUIA経路なら空文字を渡す。原文・訳文は呼び出し側/下位層で補われる。
+fn prompt_ctx(ctx: &AppContext, ocr_engine: &str) -> crate::config::PromptContext {
+    crate::config::PromptContext {
+        app_title: ctx.title.clone(),
+        app_exe: ctx.exe.clone().unwrap_or_default(),
+        uia_path: ctx.uia_path.clone(),
+        ocr_engine: ocr_engine.to_string(),
+        ..Default::default()
+    }
+}
+
 /// ログ・コピー用のパス文字列を組み立てる。祖先ノードのラベルを " > " で連結し、
 /// 子孫連結ノードがあれば末尾に全文(未省略)を追記する。
 fn build_uia_path_log(nodes: &[uia::UiaPathNode]) -> String {
@@ -111,38 +125,50 @@ fn build_uia_path_log(nodes: &[uia::UiaPathNode]) -> String {
     s
 }
 
-/// 認識ログを記録し recognition_id を返す(ログOFF時は None)。
-#[allow(clippy::too_many_arguments)]
-fn log_recog(
-    cfg: &Config,
-    mode: &str,
-    method: &str,
-    engine: &str,
-    ms: u128,
-    text: Option<&str>,
-    error: Option<&str>,
-    image: Option<&Captured>,
-    ctx: &AppContext,
-) -> Option<i64> {
+/// 入力(キャプチャ)ログを記録し capture_id を返す(ログOFF時は None)。
+/// 画像はデバッグモード時のみPNG保存される。ローテーションもここで行う。
+fn log_cap(cfg: &Config, mode: &str, ctx: &AppContext, image: Option<&Captured>) -> Option<i64> {
     if !cfg.log_enabled {
         return None;
     }
-    let id = crate::logdb::log_recognition(
-        mode, method, engine, ms, text, error, image, cfg.debug_mode,
-        ctx.exe.as_deref(), Some(&ctx.title), Some(&ctx.uia_path),
+    let id = crate::logdb::log_capture(
+        mode, ctx.exe.as_deref(), Some(&ctx.title), Some(&ctx.uia_path), image, cfg.debug_mode,
     );
     crate::logdb::rotate(cfg.log_max_records);
     id
 }
 
+/// 認識ログを記録し recognition_id を返す(ログOFF時・capture未記録時は None)。
+fn log_recog(
+    cfg: &Config,
+    capture_id: Option<i64>,
+    method: &str,
+    engine: &str,
+    ms: u128,
+    text: Option<&str>,
+    error: Option<&str>,
+) -> Option<i64> {
+    if !cfg.log_enabled {
+        return None;
+    }
+    crate::logdb::log_recognition(capture_id?, method, engine, ms, text, error)
+}
+
+/// engine=llm のときだけアクティブプロファイル名を返す (translations.llm_profile 用)
+fn llm_profile_of(cfg: &Config, engine: &str) -> Option<String> {
+    (engine == "llm").then(|| cfg.active_api_profile.clone())
+}
+
 /// 翻訳成功ログを記録する(ログOFF時は何もしない)。
 fn log_trans_ok(cfg: &Config, recog_id: Option<i64>, ms: u128, t: &crate::translate::Translated) {
+    let Some(rid) = recog_id else { return };
     if !cfg.log_enabled {
         return;
     }
     crate::logdb::log_translation(
-        recog_id,
+        rid,
         &t.engine,
+        llm_profile_of(cfg, &t.engine).as_deref(),
         &t.source_lang,
         &t.target_lang,
         ms,
@@ -158,22 +184,24 @@ fn log_trans_ok(cfg: &Config, recog_id: Option<i64>, ms: u128, t: &crate::transl
 
 /// 翻訳失敗ログを記録する。
 fn log_trans_err(cfg: &Config, recog_id: Option<i64>, engine: &str, ms: u128, err: &str) {
+    let Some(rid) = recog_id else { return };
     if !cfg.log_enabled {
         return;
     }
     crate::logdb::log_translation(
-        recog_id, engine, &cfg.source_lang, &cfg.target_lang, ms, false, None, Some(err),
-        None, None, None, None,
+        rid, engine, llm_profile_of(cfg, engine).as_deref(), &cfg.source_lang, &cfg.target_lang,
+        ms, false, None, Some(err), None, None, None, None,
     );
 }
 
 /// LLM統合モードの翻訳ログを記録する(OCR側で取得した生応答・トークンを使う)。
 fn log_trans_llm(cfg: &Config, recog_id: Option<i64>, ms: u128, tr: &str, o: &ocr::OcrOutput) {
+    let Some(rid) = recog_id else { return };
     if !cfg.log_enabled {
         return;
     }
     crate::logdb::log_translation(
-        recog_id, "llm", &cfg.source_lang, &cfg.target_lang, ms, false,
+        rid, "llm", Some(&cfg.active_api_profile), &cfg.source_lang, &cfg.target_lang, ms, false,
         Some(tr), None, None, o.raw_response.as_deref(), o.tokens_in, o.tokens_out,
     );
 }
@@ -234,6 +262,7 @@ pub fn paragraph_from_text(full: &str, ocr_line: &str) -> Option<String> {
 }
 
 /// OCR結果に統合訳文が含まれていればそのまま表示し、無ければ翻訳ワーカーへ回す
+#[allow(clippy::too_many_arguments)]
 fn dispatch_translation(
     generation: u64,
     cfg: Config,
@@ -241,6 +270,7 @@ fn dispatch_translation(
     tr_engine: String,
     main: isize,
     recog_id: Option<i64>,
+    pc: crate::config::PromptContext,
     t0: &Instant,
 ) {
     if let Some(tr) = &o.translation {
@@ -254,7 +284,7 @@ fn dispatch_translation(
             recog_id,
         });
     } else {
-        translate(generation, cfg, o.text, tr_engine, main, recog_id);
+        translate(generation, cfg, o.text, tr_engine, main, recog_id, pc);
     }
 }
 
@@ -284,10 +314,8 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 cap.as_ref().map(|(b, _)| ocr::crop_for_focus(&b.img, focus).into_owned());
             let img = cap.map(|(b, _)| Arc::new(b.img));
 
-            let recog_id = log_recog(
-                &cfg, "hold", "uia", "uia", ms, Some(&text), None,
-                log_img.as_ref(), &ctx,
-            );
+            let capture_id = log_cap(&cfg, "hold", &ctx, log_img.as_ref());
+            let recog_id = log_recog(&cfg, capture_id, "uia", "uia", ms, Some(&text), None);
             post(main, generation, WorkerMsg::Source {
                 text: text.clone(),
                 method: "UIA",
@@ -297,12 +325,16 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 anchor: (x, y),
                 focus,
                 ms,
+                capture_id,
                 recog_id,
-                app_title: ctx.title,
-                uia_path: ctx.uia_path,
-                uia_nodes: ctx.uia_nodes,
+                app_title: ctx.title.clone(),
+                app_exe: ctx.exe.clone().unwrap_or_default(),
+                uia_path: ctx.uia_path.clone(),
+                uia_nodes: ctx.uia_nodes.clone(),
             });
-            translate(generation, cfg, text, tr_engine, main, recog_id);
+            // UIA経路なので ocr_engine は空文字 (SPECv0.4 §7.1)
+            let pc = prompt_ctx(&ctx, "");
+            translate(generation, cfg, text, tr_engine, main, recog_id, pc);
             return;
         }
 
@@ -311,7 +343,8 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         let cap = match capture_plan::capture_probe(x, y, target, &probe) {
             Ok(c) => c,
             Err(e) => {
-                log_recog(&cfg, "hold", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, &ctx);
+                let capture_id = log_cap(&cfg, "hold", &ctx, None);
+                log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e));
                 post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), engine: None });
                 return;
             }
@@ -319,12 +352,13 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         let (band, kind) = cap;
         let mut used = band;
         let mut focus = capture_plan::focus_for(kind, used.focus_y);
-        let mut out = ocr::run(&engine, &cfg, &used.img, focus);
+        let pc = prompt_ctx(&ctx, &engine);
+        let mut out = ocr::run(&engine, &cfg, &used.img, focus, &pc);
         if out.is_err() {
             // 既定の帯を拡大して再試行 (SPEC §6.3)
             if let Ok(wide) = capture_plan::capture_band(x, y, target, 1800, 340) {
                 focus = ocr::Focus::Line(wide.focus_y);
-                out = ocr::run(&engine, &cfg, &wide.img, focus);
+                out = ocr::run(&engine, &cfg, &wide.img, focus, &pc);
                 used = wide;
             }
         }
@@ -342,8 +376,8 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 util::perf_log(cfg.perf_log, &format!("source OCR({engine}) {ms}ms"));
                 // ログにはOCR対象領域だけを保存する (全体は保持画像=再OCR用)
                 let log_img = ocr::crop_for_focus(&used.img, focus);
-                let recog_id =
-                    log_recog(&cfg, "hold", "ocr", &engine, ms, Some(&o.text), None, Some(&log_img), &ctx);
+                let capture_id = log_cap(&cfg, "hold", &ctx, Some(&log_img));
+                let recog_id = log_recog(&cfg, capture_id, "ocr", &engine, ms, Some(&o.text), None);
                 post(main, generation, WorkerMsg::Source {
                     text: o.text.clone(),
                     method: "OCR",
@@ -353,25 +387,36 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                     anchor: (x, y),
                     focus,
                     ms,
+                    capture_id,
                     recog_id,
-                    app_title: ctx.title,
-                    uia_path: ctx.uia_path,
-                    uia_nodes: ctx.uia_nodes,
+                    app_title: ctx.title.clone(),
+                    app_exe: ctx.exe.clone().unwrap_or_default(),
+                    uia_path: ctx.uia_path.clone(),
+                    uia_nodes: ctx.uia_nodes.clone(),
                 });
-                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, &t0);
+                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
-                log_recog(&cfg, "hold", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, &ctx);
+                let capture_id = log_cap(&cfg, "hold", &ctx, None);
+                log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e));
                 post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), engine: Some(engine) });
             }
         }
     });
 }
 
-fn translate(generation: u64, cfg: Config, text: String, engine: String, main: isize, recog_id: Option<i64>) {
+fn translate(
+    generation: u64,
+    cfg: Config,
+    text: String,
+    engine: String,
+    main: isize,
+    recog_id: Option<i64>,
+    pc: crate::config::PromptContext,
+) {
     std::thread::spawn(move || {
         let t0 = Instant::now();
-        match crate::translate::translate(&engine, &cfg, &text) {
+        match crate::translate::translate(&engine, &cfg, &text, &pc) {
             Ok(t) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("translate {engine} {ms}ms"));
@@ -424,7 +469,8 @@ pub fn reocr(
             }
         };
         let ctx = AppContext::capture(x, y, HWND(target as *mut _));
-        let mut result = ocr::run(&ocr_engine, &cfg, &image, focus);
+        let pc = prompt_ctx(&ctx, &ocr_engine);
+        let mut result = ocr::run(&ocr_engine, &cfg, &image, focus, &pc);
         // 段落帯の再キャプチャ時も、直下要素の全テキストから段落を復元する
         if let Ok(o) = &mut result
             && let Some(full) = &hover_text
@@ -438,8 +484,8 @@ pub fn reocr(
                 util::perf_log(cfg.perf_log, &format!("reocr {ocr_engine} {ms}ms"));
                 // ログにはOCR対象領域だけを保存する
                 let log_img = ocr::crop_for_focus(&image, focus);
-                let recog_id =
-                    log_recog(&cfg, "chip", "ocr", &ocr_engine, ms, Some(&o.text), None, Some(&log_img), &ctx);
+                let capture_id = log_cap(&cfg, "chip", &ctx, Some(&log_img));
+                let recog_id = log_recog(&cfg, capture_id, "ocr", &ocr_engine, ms, Some(&o.text), None);
                 post(main, generation, WorkerMsg::Source {
                     text: o.text.clone(),
                     method: "OCR",
@@ -449,15 +495,78 @@ pub fn reocr(
                     anchor,
                     focus,
                     ms,
+                    capture_id,
                     recog_id,
-                    app_title: ctx.title,
-                    uia_path: ctx.uia_path,
-                    uia_nodes: ctx.uia_nodes,
+                    app_title: ctx.title.clone(),
+                    app_exe: ctx.exe.clone().unwrap_or_default(),
+                    uia_path: ctx.uia_path.clone(),
+                    uia_nodes: ctx.uia_nodes.clone(),
                 });
-                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, &t0);
+                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
-                log_recog(&cfg, "chip", "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e), None, &ctx);
+                let capture_id = log_cap(&cfg, "chip", &ctx, None);
+                log_recog(&cfg, capture_id, "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e));
+                post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: Some(ocr_engine) });
+            }
+        }
+    });
+}
+
+/// 画像編集(トリミング)適用後の再認識 (SPECv0.4 §4-3, §8.2.1):
+/// 新しい capture は作らず、同じ capture の下に認識行を追加する。
+#[allow(clippy::too_many_arguments)]
+pub fn reocr_edited(
+    generation: u64,
+    capture_id: Option<i64>,
+    image: Arc<Captured>,
+    ocr_engine: String,
+    tr_engine: String,
+    cfg: Config,
+    main: isize,
+    anchor: (i32, i32),
+    app_title: String,
+    app_exe: String,
+    uia_path: String,
+    uia_nodes: Vec<uia::UiaPathNode>,
+) {
+    std::thread::spawn(move || {
+        init_com();
+        let t0 = Instant::now();
+        let ctx = AppContext {
+            exe: if app_exe.is_empty() { None } else { Some(app_exe) },
+            title: app_title,
+            uia_path,
+            uia_nodes,
+        };
+        let pc = prompt_ctx(&ctx, &ocr_engine);
+        // クロップ済みの新しい画像を対象とするため、行/段落の絞り込みは行わず全体をOCRする
+        let result = ocr::run(&ocr_engine, &cfg, &image, ocr::Focus::All, &pc);
+        match result {
+            Ok(o) => {
+                let ms = t0.elapsed().as_millis();
+                util::perf_log(cfg.perf_log, &format!("reocr_edited {ocr_engine} {ms}ms"));
+                let recog_id = log_recog(&cfg, capture_id, "ocr", &ocr_engine, ms, Some(&o.text), None);
+                post(main, generation, WorkerMsg::Source {
+                    text: o.text.clone(),
+                    method: "OCR",
+                    engine: Some(ocr_engine.clone()),
+                    img: Some(image),
+                    pin: true,
+                    anchor,
+                    focus: ocr::Focus::All,
+                    ms,
+                    capture_id,
+                    recog_id,
+                    app_title: ctx.title.clone(),
+                    app_exe: ctx.exe.clone().unwrap_or_default(),
+                    uia_path: ctx.uia_path.clone(),
+                    uia_nodes: ctx.uia_nodes.clone(),
+                });
+                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
+            }
+            Err(e) => {
+                log_recog(&cfg, capture_id, "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e));
                 post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: Some(ocr_engine) });
             }
         }
@@ -465,8 +574,16 @@ pub fn reocr(
 }
 
 /// 翻訳チップ切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)。
-pub fn retranslate(generation: u64, engine: String, cfg: Config, text: String, main: isize, recog_id: Option<i64>) {
-    translate(generation, cfg, text, engine, main, recog_id);
+pub fn retranslate(
+    generation: u64,
+    engine: String,
+    cfg: Config,
+    text: String,
+    main: isize,
+    recog_id: Option<i64>,
+    pc: crate::config::PromptContext,
+) {
+    translate(generation, cfg, text, engine, main, recog_id, pc);
 }
 
 /// 範囲指定モード: 選択矩形をOCRして段落結合→翻訳、最初からピン留め (SPEC §3.2)
@@ -529,12 +646,13 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
         let engine = effective_ocr(&cfg);
         // Focus::All → 全行を段落結合
         let ctx = AppContext::capture(cx, cy, root);
-        match ocr::run(&engine, &cfg, &img, ocr::Focus::All) {
+        let pc = prompt_ctx(&ctx, &engine);
+        match ocr::run(&engine, &cfg, &img, ocr::Focus::All, &pc) {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("region OCR({engine}) {ms}ms"));
-                let recog_id =
-                    log_recog(&cfg, "region", "ocr", &engine, ms, Some(&o.text), None, Some(&img), &ctx);
+                let capture_id = log_cap(&cfg, "region", &ctx, Some(&img));
+                let recog_id = log_recog(&cfg, capture_id, "ocr", &engine, ms, Some(&o.text), None);
                 post(main, generation, WorkerMsg::Source {
                     text: o.text.clone(),
                     method: "OCR",
@@ -544,15 +662,18 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
                     anchor,
                     focus: ocr::Focus::All,
                     ms,
+                    capture_id,
                     recog_id,
-                    app_title: ctx.title,
-                    uia_path: ctx.uia_path,
-                    uia_nodes: ctx.uia_nodes,
+                    app_title: ctx.title.clone(),
+                    app_exe: ctx.exe.clone().unwrap_or_default(),
+                    uia_path: ctx.uia_path.clone(),
+                    uia_nodes: ctx.uia_nodes.clone(),
                 });
-                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, &t0);
+                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
-                log_recog(&cfg, "region", "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None, &ctx);
+                let capture_id = log_cap(&cfg, "region", &ctx, None);
+                log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e));
                 post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: Some(engine) });
             }
         }
@@ -560,37 +681,46 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
 }
 
 /// 解説プロンプトを組み立てる (LLMプロファイル未設定時は None)。
-/// アプリ名・UIAパスがあれば前提情報としてコンテキストブロックを付与する。
-pub fn build_explain_prompt(cfg: &Config, text: &str, app_title: &str, uia_path: &str) -> Option<String> {
+/// アプリ名・UIAパス等のコンテキストはテンプレートのプレースホルダで埋め込む (SPECv0.4 §7.2)。
+pub fn build_explain_prompt(cfg: &Config, ctx: &crate::config::PromptContext) -> Option<String> {
     let prof = cfg.active_profile()?;
-    let mut prompt = cfg.fill_prompt(&prof.explain_prompt, text);
-    if !app_title.is_empty() || !uia_path.is_empty() {
-        prompt.push_str("\n\n[Context]");
-        if !app_title.is_empty() {
-            prompt.push_str(&format!("\nApplication: {app_title}"));
-        }
-        if !uia_path.is_empty() {
-            prompt.push_str(&format!("\nUI Path: {uia_path}"));
-        }
-    }
-    Some(prompt)
+    Some(cfg.fill_prompt(&prof.explain_prompt, ctx))
 }
 
-/// 解説の取得 (SPEC v0.3 §2.2.2): 成功時はDBへ保存してオーバーレイへ通知する。
+/// 解説の取得 (SPEC v0.3 §2.2.2 / v0.4 §8.2.4): 成功・失敗ともログへ追記してオーバーレイへ通知する。
 /// profile はダイアログで選択されたAPIプロファイル名 (見つからなければアクティブを使用)。
 pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, profile: String, main: isize) {
     std::thread::spawn(move || {
         init_com();
-        let result = cfg
+        let t0 = Instant::now();
+        let Some(prof) = cfg
             .api_profiles
             .iter()
             .find(|p| p.name == profile)
             .or_else(|| cfg.active_profile())
-            .ok_or_else(|| "LLM APIプロファイルが設定されていません".to_string())
-            .and_then(|prof| crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt)));
+        else {
+            post(main, generation, WorkerMsg::Error {
+                msg: "解説の取得に失敗しました: LLM APIプロファイルが設定されていません".into(),
+                anchor: (0, 0),
+                engine: None,
+            });
+            return;
+        };
+        let result = crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt));
+        let ms = t0.elapsed().as_millis();
+        if cfg.log_enabled {
+            match &result {
+                Ok(res) => crate::logdb::log_explanation(
+                    recog_id, &prof.name, ms, &prompt, Some(&res.text), None,
+                    res.tokens_in, res.tokens_out,
+                ),
+                Err(e) => crate::logdb::log_explanation(
+                    recog_id, &prof.name, ms, &prompt, None, Some(e), None, None,
+                ),
+            }
+        }
         match result {
             Ok(res) => {
-                crate::logdb::save_explanation(recog_id, &res.text);
                 post(main, generation, WorkerMsg::Explanation { text: res.text });
             }
             Err(e) => {

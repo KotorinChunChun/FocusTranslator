@@ -53,7 +53,19 @@ pub(crate) fn mask_keys(cfg: &Config, s: &str) -> String {
 }
 
 /// 指定エンジンで翻訳。クラウド失敗時は local へフォールバック (SPEC §11)。
-pub fn translate(engine: &str, cfg: &Config, text: &str) -> Result<Translated, String> {
+/// ctx はLLM翻訳プロンプトのプレースホルダ置換に使う (SPECv0.4 §7.1)。
+/// 翻訳プロンプト実行時点では translated_text / tr_engine は常に空文字とする。
+pub fn translate(
+    engine: &str,
+    cfg: &Config,
+    text: &str,
+    ctx: &crate::config::PromptContext,
+) -> Result<Translated, String> {
+    let mut ctx = ctx.clone();
+    ctx.original_text = text.to_string();
+    ctx.translated_text.clear();
+    ctx.tr_engine.clear();
+    let ctx = &ctx;
     let (source, target) = (cfg.source_lang.clone(), cfg.target_lang.clone());
     let key = (engine.to_string(), target.clone(), text.to_string());
 
@@ -75,7 +87,7 @@ pub fn translate(engine: &str, cfg: &Config, text: &str) -> Result<Translated, S
         }
     }
 
-    let result = translate_once(engine, cfg, text, &target);
+    let result = translate_once(engine, cfg, text, &target, ctx);
     match result {
         Ok((t, detail)) => {
             let mut guard = CACHE.lock().unwrap();
@@ -96,7 +108,7 @@ pub fn translate(engine: &str, cfg: &Config, text: &str) -> Result<Translated, S
         }
         Err(e) if engine != "local" => {
             // クラウド翻訳失敗 → ローカルへフォールバックし local バッジ表示
-            match translate_once("local", cfg, text, &target) {
+            match translate_once("local", cfg, text, &target, ctx) {
                 Ok((t, detail)) => Ok(Translated {
                     text: t,
                     badge: Some("local".into()),
@@ -118,13 +130,14 @@ fn translate_once(
     cfg: &Config,
     text: &str,
     target: &str,
+    ctx: &crate::config::PromptContext,
 ) -> Result<(String, TransDetail), String> {
     match engine {
         "local" => translate_local(cfg, text, target).map(|t| (t, TransDetail::default())),
         "deepl" => translate_deepl(cfg, text, target),
         "google" => translate_google(cfg, text, target),
         // LLMの翻訳方向はプロンプトテンプレート側で cfg から埋める
-        "llm" => translate_llm(cfg, text),
+        "llm" => translate_llm(cfg, ctx),
         other => Err(format!("不明な翻訳エンジン: {other}")),
     }
 }
@@ -192,9 +205,12 @@ fn translate_google(cfg: &Config, text: &str, target: &str) -> Result<(String, T
 }
 
 /// アクティブなLLMプロファイルで翻訳 (プロバイダ差異は llm_api が吸収)
-fn translate_llm(cfg: &Config, text: &str) -> Result<(String, TransDetail), String> {
+fn translate_llm(
+    cfg: &Config,
+    ctx: &crate::config::PromptContext,
+) -> Result<(String, TransDetail), String> {
     let prof = cfg.active_profile().ok_or("LLM APIプロファイルが設定されていません")?;
-    let prompt = cfg.fill_prompt(&prof.translate_prompt, text);
+    let prompt = cfg.fill_prompt(&prof.translate_prompt, ctx);
     let res = crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt))?;
     let detail = TransDetail {
         request_json: Some(mask_keys(cfg, &res.request_json)),

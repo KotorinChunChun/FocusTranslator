@@ -54,7 +54,14 @@ impl Focus {
 }
 
 /// 指定エンジンでOCRを実行する。
-pub fn run(engine: &str, cfg: &Config, img: &Captured, focus: Focus) -> Result<OcrOutput, String> {
+/// ctx はLLM統合OCRプロンプトのプレースホルダ置換に使う (SPECv0.4 §7.1)。
+pub fn run(
+    engine: &str,
+    cfg: &Config,
+    img: &Captured,
+    focus: Focus,
+    ctx: &crate::config::PromptContext,
+) -> Result<OcrOutput, String> {
     match engine {
         "win" => ocr_windows(img, focus).map(|(text, focus_line)| OcrOutput {
             text,
@@ -71,7 +78,7 @@ pub fn run(engine: &str, cfg: &Config, img: &Captured, focus: Focus) -> Result<O
         }
         "yomitoku" => ocr_http(&cfg.yomitoku_url, img, focus).map(OcrOutput::text_only),
         "ndl" => ocr_http(&cfg.ndl_url, img, focus).map(OcrOutput::text_only),
-        "llm" => llm_ocr_translate(cfg, img, focus),
+        "llm" => llm_ocr_translate(cfg, img, focus, ctx),
         other => Err(format!("不明なOCRエンジン: {other}")),
     }
 }
@@ -303,12 +310,23 @@ pub fn health_check(base_url: &str) -> bool {
 }
 
 /// LLM OCR+翻訳統合モード: 画像から原文と訳文を一括取得 (SPEC §8)
-pub fn llm_ocr_translate(cfg: &Config, img: &Captured, focus: Focus) -> Result<OcrOutput, String> {
+pub fn llm_ocr_translate(
+    cfg: &Config,
+    img: &Captured,
+    focus: Focus,
+    ctx: &crate::config::PromptContext,
+) -> Result<OcrOutput, String> {
     let prof = cfg.active_profile().ok_or("LLM APIプロファイルが設定されていません")?;
     let target_img = crop_for_focus(img, focus);
     let png = crate::capture::to_png(&target_img);
     let b64 = B64.encode(&png);
-    let prompt = cfg.fill_prompt(&prof.ocr_prompt, "");
+    // OCRプロンプト実行時点では原文・訳文は未取得のため空文字。実行エンジン名だけ補う。
+    let mut ctx = ctx.clone();
+    ctx.original_text.clear();
+    ctx.translated_text.clear();
+    ctx.tr_engine.clear();
+    ctx.ocr_engine = "llm".into();
+    let prompt = cfg.fill_prompt(&prof.ocr_prompt, &ctx);
 
     let res = crate::llm_api::call(prof, &crate::llm_api::LlmRequest {
         prompt: &prompt,

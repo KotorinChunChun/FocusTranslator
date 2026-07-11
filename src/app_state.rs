@@ -82,6 +82,7 @@ pub struct App {
     pub error_only: bool,
     pub failed_ocr: HashSet<String>,
     pub failed_tr: HashSet<String>,
+    pub capture_id: Option<i64>,
     pub recog_id: Option<i64>,
     pub explanation: Option<String>,
     /// 解説をLLMへ問い合わせ中
@@ -89,6 +90,7 @@ pub struct App {
     /// 時間のかかる処理の実行中。オーバーレイの操作をロックする。
     pub busy: bool,
     pub app_title: String,
+    pub app_exe: String,
     pub uia_path: String,
     /// UIAパスの各ノード
     pub uia_nodes: Vec<crate::uia::UiaPathNode>,
@@ -146,11 +148,13 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             error_only: false,
             failed_ocr: HashSet::new(),
             failed_tr: HashSet::new(),
+            capture_id: None,
             recog_id: None,
             explanation: None,
             explaining: false,
             busy: false,
             app_title: String::new(),
+            app_exe: String::new(),
             uia_path: String::new(),
             uia_nodes: Vec::new(),
             via_uia: false,
@@ -367,6 +371,7 @@ pub fn close_overlay(app: &mut App) {
     app.error_only = false;
     app.last_img = None;
     app.last_focus = crate::ocr::Focus::All;
+    app.capture_id = None;
     app.recog_id = None;
     app.explanation = None;
     app.explaining = false;
@@ -383,7 +388,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
         }
         app.busy = false;
         match msg {
-            worker::WorkerMsg::Source { text, method, engine, img, pin, anchor, focus, ms, recog_id, app_title, uia_path, uia_nodes } => {
+            worker::WorkerMsg::Source { text, method, engine, img, pin, anchor, focus, ms, capture_id, recog_id, app_title, app_exe, uia_path, uia_nodes } => {
                 if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
                     return;
                 }
@@ -404,8 +409,10 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.anchor = anchor;
                 app.failed_ocr.clear();
                 app.failed_tr.clear();
+                app.capture_id = capture_id;
                 app.recog_id = recog_id;
                 app.app_title = app_title;
+                app.app_exe = app_exe;
                 app.uia_path = uia_path;
                 app.uia_nodes = uia_nodes;
                 app.scroll_y = 0;
@@ -546,6 +553,8 @@ pub fn sync_overlay(app: &mut App) {
         scroll_y: app.scroll_y,
         has_image: app.last_img.is_some(),
         busy: app.busy,
+        // overlay::update 内で EDIT (overlay.rs内) の実データから都度上書きされる
+        edit: None,
     };
     overlay::update(app.overlay, content);
 }

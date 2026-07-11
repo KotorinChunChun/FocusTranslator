@@ -299,8 +299,14 @@ fn run(eng: &Engine, cfg: &DirCfg, text: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    /// FOCUSTRANSLATOR_DATA_DIR を切り替えるテスト(logdb)との干渉を防ぐ
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::util::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn ja_to_en_smoke() {
+        let _guard = env_lock();
         if !crate::onnx_translate_install::installed(Variant::OpusMt) {
             eprintln!("モデル未導入のためスキップ");
             return;
@@ -312,6 +318,7 @@ mod tests {
 
     #[test]
     fn en_to_ja_smoke() {
+        let _guard = env_lock();
         if !crate::onnx_translate_install::installed(Variant::OpusMt) {
             eprintln!("モデル未導入のためスキップ");
             return;
@@ -323,6 +330,7 @@ mod tests {
 
     #[test]
     fn fugu_mt_smoke() {
+        let _guard = env_lock();
         if !crate::onnx_translate_install::installed(Variant::FuguMt) {
             eprintln!("モデル未導入のためスキップ");
             return;
@@ -337,6 +345,7 @@ mod tests {
 
     #[test]
     fn nllb200_smoke() {
+        let _guard = env_lock();
         if !crate::onnx_translate_install::installed(Variant::Nllb200) {
             eprintln!("モデル未導入のためスキップ");
             return;

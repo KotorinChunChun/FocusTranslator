@@ -11,6 +11,21 @@ use crate::util;
 use windows::Win32::Foundation::RECT;
 use windows::core::w;
 
+/// 現在のアプリ状態からプロンプト置換用コンテキストを組み立てる (SPECv0.4 §7.1)。
+/// translated_text / tr_engine は最新の翻訳結果があるときのみ値を持つ。
+fn prompt_ctx_from_app(original: &str) -> crate::config::PromptContext {
+    with_app(|app| crate::config::PromptContext {
+        original_text: original.to_string(),
+        translated_text: app.translation.clone().unwrap_or_default(),
+        app_title: app.app_title.clone(),
+        app_exe: app.app_exe.clone(),
+        uia_path: app.uia_path.clone(),
+        ocr_engine: if app.via_uia { String::new() } else { app.cur_ocr.clone() },
+        tr_engine: if app.translation.is_some() { app.cur_tr.clone() } else { String::new() },
+    })
+    .unwrap_or_default()
+}
+
 /// チップ押下 (SPEC §8): 押下時点でピン留めし、再OCR/再翻訳を実行
 pub fn handle_chip(id: usize) {
     // フェーズ1: 状態取得(借用を解放してから同意ダイアログを出す)
@@ -98,24 +113,79 @@ pub fn handle_chip(id: usize) {
             return;
         }
         overlay::CHIP_IMAGE => {
+            // キャプチャ画像のインライン編集モードを開始する (SPECv0.4 §1-§2)
             let img = with_app(|app| app.last_img.clone()).flatten();
             if let Some(i) = img {
-                let png = crate::capture::to_png(&i);
-                let path = crate::logdb::logs_dir().join("preview.png");
-                if std::fs::write(&path, &png).is_ok() {
-                    unsafe {
-                        let wide = util::to_wide(&path.to_string_lossy());
-                        let _ = windows::Win32::UI::Shell::ShellExecuteW(
-                            None,
-                            windows::core::w!("open"),
-                            windows::core::PCWSTR(wide.as_ptr()),
-                            windows::core::PCWSTR::null(),
-                            windows::core::PCWSTR::null(),
-                            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-                        );
-                    }
-                }
+                overlay::enter_edit_mode(i);
+                with_app(sync_overlay);
             }
+            return;
+        }
+        overlay::CHIP_EDIT_RECT => {
+            overlay::set_edit_tool(overlay::EditTool::Rect);
+            with_app(sync_overlay);
+            return;
+        }
+        overlay::CHIP_EDIT_LASSO => {
+            overlay::set_edit_tool(overlay::EditTool::Lasso);
+            with_app(sync_overlay);
+            return;
+        }
+        overlay::CHIP_EDIT_RESET => {
+            overlay::reset_edit_selection();
+            with_app(sync_overlay);
+            return;
+        }
+        overlay::CHIP_EDIT_CANCEL => {
+            overlay::exit_edit_mode();
+            with_app(sync_overlay);
+            return;
+        }
+        overlay::CHIP_EDIT_APPLY => {
+            let Some((img, selection)) = overlay::take_edit_selection() else { return };
+            let Some(edited) = crate::image_edit::apply(&img, &selection) else {
+                with_app(|app| {
+                    app.badge = Some("選択範囲が小さすぎます".into());
+                    sync_overlay(app);
+                });
+                return;
+            };
+            overlay::exit_edit_mode();
+            let edited = std::sync::Arc::new(edited);
+            let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe, uia_path, uia_nodes)) =
+                with_app(|app| {
+                    app.last_img = Some(edited.clone());
+                    app.generation += 1;
+                    app.mode = Mode::Pinned;
+                    app.status = Some("再認識中…".into());
+                    app.busy = true;
+                    sync_overlay(app);
+                    (
+                        app.capture_id,
+                        app.cur_ocr.clone(),
+                        app.cur_tr.clone(),
+                        app.cfg.clone(),
+                        app.main.0 as isize,
+                        app.anchor,
+                        app.app_title.clone(),
+                        app.app_exe.clone(),
+                        app.uia_path.clone(),
+                        app.uia_nodes.clone(),
+                    )
+                })
+            else {
+                return;
+            };
+            if cfg2.log_enabled && cfg2.debug_mode
+                && let Some(cid) = cap_id
+            {
+                crate::logdb::replace_capture_image(cid, &edited);
+            }
+            let new_gen = with_app(|app| app.generation).unwrap_or(0);
+            crate::worker::reocr_edited(
+                new_gen, cap_id, edited, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title,
+                app_exe, uia_path, uia_nodes,
+            );
             return;
         }
         overlay::CHIP_SWAP_LANG => {
@@ -137,7 +207,8 @@ pub fn handle_chip(id: usize) {
             })
             .unwrap_or(0);
             let cfg2 = Config::load();
-            crate::worker::retranslate(new_gen, cur_tr, cfg2, source, main, recog_id);
+            let pc = prompt_ctx_from_app(&source);
+            crate::worker::retranslate(new_gen, cur_tr, cfg2, source, main, recog_id, pc);
             return;
         }
         overlay::CHIP_EXPLAIN_QUICK => {
@@ -147,12 +218,11 @@ pub fn handle_chip(id: usize) {
                 sync_overlay(app);
             });
             let Some(r_id) = recog_id else { return };
-            let text = overlay::current_text().1.unwrap_or(source.clone());
-            if text.is_empty() {
+            if source.is_empty() {
                 return;
             }
             // キャッシュ済みの解説があれば即表示する
-            if let Some(expl) = crate::logdb::get_explanation(r_id) {
+            if let Some(expl) = crate::logdb::latest_explanation(r_id) {
                 with_app(|app| {
                     app.mode = Mode::Pinned;
                     app.status = None;
@@ -162,10 +232,8 @@ pub fn handle_chip(id: usize) {
                 });
                 return;
             }
-            let (app_title, uia_path) =
-                with_app(|app| (app.app_title.clone(), app.uia_path.clone())).unwrap_or_default();
-            let prompt =
-                crate::worker::build_explain_prompt(&cfg, &text, &app_title, &uia_path).unwrap_or_default();
+            let pc = prompt_ctx_from_app(&source);
+            let prompt = crate::worker::build_explain_prompt(&cfg, &pc).unwrap_or_default();
             if prompt.is_empty() {
                 with_app(|app| {
                     app.badge = Some("LLM APIが設定されていません".into());
@@ -195,19 +263,18 @@ pub fn handle_chip(id: usize) {
                 sync_overlay(app);
             });
             if let Some(r_id) = recog_id {
-                let text = overlay::current_text().1.unwrap_or(source.clone());
-                if !text.is_empty() {
-                    let (app_title, uia_path, dialog_pos) = with_app(|app| {
+                if !source.is_empty() {
+                    let dialog_pos = with_app(|app| {
                         let mut r = RECT::default();
                         unsafe {
                             let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(app.overlay, &mut r);
                         }
-                        (app.app_title.clone(), app.uia_path.clone(), (r.left + 24, r.top + 24))
+                        (r.left + 24, r.top + 24)
                     })
                     .unwrap_or_default();
 
-                    let initial_prompt =
-                        crate::worker::build_explain_prompt(&cfg, &text, &app_title, &uia_path).unwrap_or_default();
+                    let pc = prompt_ctx_from_app(&source);
+                    let initial_prompt = crate::worker::build_explain_prompt(&cfg, &pc).unwrap_or_default();
                     if initial_prompt.is_empty() {
                         with_app(|app| {
                             app.badge = Some("LLM APIが設定されていません".into());
@@ -322,7 +389,8 @@ pub fn handle_chip(id: usize) {
         })
         .unwrap_or(0);
         let cfg2 = Config::load();
-        crate::worker::retranslate(new_gen, key, cfg2, source, main, recog_id);
+        let pc = prompt_ctx_from_app(&source);
+        crate::worker::retranslate(new_gen, key, cfg2, source, main, recog_id, pc);
     } else if id >= overlay::CHIP_UIA_NODE_BASE {
         // UIAパスノード選択: そのノードのテキストを原文として採用し再翻訳
         let idx = id - overlay::CHIP_UIA_NODE_BASE;
@@ -346,7 +414,8 @@ pub fn handle_chip(id: usize) {
         })
         .unwrap_or(0);
         let cfg2 = Config::load();
-        crate::worker::retranslate(new_gen, cur_tr, cfg2, text, main, recog_id);
+        let pc = prompt_ctx_from_app(&text);
+        crate::worker::retranslate(new_gen, cur_tr, cfg2, text, main, recog_id, pc);
     }
 }
 

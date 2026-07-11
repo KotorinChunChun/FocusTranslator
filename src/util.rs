@@ -18,6 +18,12 @@ pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// テスト用の直列化ロック。FOCUSTRANSLATOR_DATA_DIR を切り替えるテスト(logdb)と、
+/// 実データディレクトリのモデルを参照するテスト(onnx_translate)がプロセス内で
+/// 並行実行されると config_dir() の解決先が途中で変わるため、両者はこのロックを取る。
+#[cfg(test)]
+pub static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 設定・モデルの保存先。`FOCUSTRANSLATOR_DATA_DIR` が設定されていればそちらを使う
 /// (動作確認・自動テスト用に実際のユーザー設定と分離するため)。通常は `%APPDATA%\FocusTranslator`。
 pub fn config_dir() -> PathBuf {
