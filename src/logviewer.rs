@@ -331,11 +331,11 @@ fn build(h: HWND, inst: HINSTANCE) {
     label(h, inst, "全文検索", IDC_LBL_SEARCH);
     ctl(h, inst, w!("EDIT"), "", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP, 0, 0, 0, 0, IDC_SEARCH_EDIT);
     let exe_combo = combo(h, inst, IDC_EXE_COMBO);
-    combo_add(exe_combo, "全アプリ");
+    crate::ui_helpers::combo_add_item(exe_combo, "全アプリ");
     for exe in logdb::get_unique_app_exes() {
-        combo_add(exe_combo, &exe);
+        crate::ui_helpers::combo_add_item(exe_combo, &exe);
     }
-    combo_set(exe_combo, 0);
+    crate::ui_helpers::combo_set_sel(exe_combo, 0);
     btn(h, inst, "CSV出力", IDC_BTN_EXPORT);
     btn(h, inst, "最新に更新", IDC_BTN_REFRESH);
     btn(h, inst, "ログを全削除", IDC_BTN_CLEAR);
@@ -365,9 +365,9 @@ fn build(h: HWND, inst: HINSTANCE) {
     detail_edit(h, inst, IDC_RECOG_DETAIL);
     let ocr_combo = combo(h, inst, IDC_OCR_COMBO);
     for (_, disp) in OCR_ENGINES {
-        combo_add(ocr_combo, disp);
+        crate::ui_helpers::combo_add_item(ocr_combo, disp);
     }
-    combo_set(ocr_combo, 0);
+    crate::ui_helpers::combo_set_sel(ocr_combo, 0);
     btn(h, inst, "再OCR", IDC_BTN_REOCR);
     btn(h, inst, "削除", IDC_BTN_DEL_RECOG);
     ctl(h, inst, w!("EDIT"), "", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP, 0, 0, 0, 0, IDC_TAG_EDIT);
@@ -386,9 +386,9 @@ fn build(h: HWND, inst: HINSTANCE) {
     detail_edit(h, inst, IDC_TRANS_DETAIL);
     let tr_combo = combo(h, inst, IDC_TR_COMBO);
     for (_, disp) in TR_ENGINES {
-        combo_add(tr_combo, disp);
+        crate::ui_helpers::combo_add_item(tr_combo, disp);
     }
-    combo_set(tr_combo, 0);
+    crate::ui_helpers::combo_set_sel(tr_combo, 0);
     btn(h, inst, "再翻訳", IDC_BTN_RETRANS);
     btn(h, inst, "削除", IDC_BTN_DEL_TRANS);
 
@@ -407,13 +407,13 @@ fn build(h: HWND, inst: HINSTANCE) {
     let cfg = crate::config::Config::load();
     let mut active_idx = 0usize;
     for (i, p) in cfg.api_profiles.iter().enumerate() {
-        combo_add(exp_combo, &p.name);
+        crate::ui_helpers::combo_add_item(exp_combo, &p.name);
         if p.name == cfg.active_api_profile {
             active_idx = i;
         }
     }
     if !cfg.api_profiles.is_empty() {
-        combo_set(exp_combo, active_idx);
+        crate::ui_helpers::combo_set_sel(exp_combo, active_idx);
     }
     btn(h, inst, "再解説", IDC_BTN_REEXPLAIN);
     btn(h, inst, "選択削除", IDC_BTN_DEL_EXP);
@@ -487,71 +487,13 @@ fn btn(parent: HWND, inst: HINSTANCE, text: &str, id: i32) -> HWND {
     ctl(parent, inst, w!("BUTTON"), text, WS_TABSTOP, 0, 0, 0, 0, id)
 }
 
-fn dlg_item(h: HWND, id: i32) -> HWND {
-    unsafe { GetDlgItem(Some(h), id).unwrap_or_default() }
-}
+
 
 fn combo(parent: HWND, inst: HINSTANCE, id: i32) -> HWND {
     ctl(parent, inst, w!("COMBOBOX"), "", WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST as u32), 0, 0, 0, 0, id)
 }
 
-fn combo_add(cb: HWND, text: &str) {
-    unsafe {
-        let wide = to_wide(text);
-        SendMessageW(cb, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide.as_ptr() as isize)));
-    }
-}
 
-fn combo_set(cb: HWND, idx: usize) {
-    unsafe {
-        SendMessageW(cb, CB_SETCURSEL, Some(WPARAM(idx)), Some(LPARAM(0)));
-    }
-}
-
-fn combo_sel(h: HWND, id: i32) -> usize {
-    unsafe {
-        let r = SendMessageW(dlg_item(h, id), CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
-        if r.0 < 0 { 0 } else { r.0 as usize }
-    }
-}
-
-/// コンボの指定indexの項目文字列を取得
-fn combo_item_text(h: HWND, id: i32, idx: usize) -> String {
-    use windows::Win32::UI::WindowsAndMessaging::{CB_GETLBTEXT, CB_GETLBTEXTLEN};
-    unsafe {
-        let cb = dlg_item(h, id);
-        let len = SendMessageW(cb, CB_GETLBTEXTLEN, Some(WPARAM(idx)), None).0;
-        if len <= 0 {
-            return String::new();
-        }
-        let mut buf = vec![0u16; len as usize + 1];
-        SendMessageW(cb, CB_GETLBTEXT, Some(WPARAM(idx)), Some(LPARAM(buf.as_mut_ptr() as isize)));
-        String::from_utf16_lossy(&buf[..len as usize])
-    }
-}
-
-/// EDITコントロールの内容を取得 (最大1023文字)
-fn edit_text(h: HWND, id: i32) -> String {
-    unsafe {
-        let mut buf = [0u16; 1024];
-        let len = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(dlg_item(h, id), &mut buf);
-        String::from_utf16_lossy(&buf[..len as usize])
-    }
-}
-
-/// EDITコントロールの内容を長さ制限なしで取得する(貼り付けた長文もそのまま読める)。
-fn edit_text_long(h: HWND, id: i32) -> String {
-    unsafe {
-        let e = dlg_item(h, id);
-        let len = GetWindowTextLengthW(e);
-        if len <= 0 {
-            return String::new();
-        }
-        let mut buf = vec![0u16; len as usize + 1];
-        let n = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(e, &mut buf);
-        String::from_utf16_lossy(&buf[..n as usize])
-    }
-}
 
 const PAD: i32 = 8;
 const BTN_H: i32 = 28;
@@ -714,7 +656,7 @@ fn layout(h: HWND) {
         let g = geometry(h);
         let mv = |id: i32, x: i32, y: i32, cw: i32, ch: i32| {
             let _ = SetWindowPos(
-                dlg_item(h, id),
+                crate::ui_helpers::get_dlg_item(h, id),
                 None,
                 x,
                 y,
@@ -812,47 +754,35 @@ fn layout(h: HWND) {
 }
 
 fn fmt_ts(ts_ms: i64) -> String {
-    // 日本時間 (JST = UTC + 9時間) に補正
-    let jst_ms = ts_ms.max(0) + 9 * 3600 * 1000;
-    let secs = jst_ms / 1000;
-
-    // エポック (1970-01-01) からの経過日数と、その日の時分秒
-    let mut days = secs / 86400;
-    let tod = secs % 86400;
-    let (h, m, s) = (tod / 3600, (tod % 3600) / 60, tod % 60);
-
-    // 1970年からの年月日計算 (うるう年を考慮)
-    let mut year = 1970;
-    loop {
-        let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-        let year_days = if leap { 366 } else { 365 };
-        if days >= year_days {
-            days -= year_days;
-            year += 1;
-        } else {
-            break;
-        }
+    if ts_ms <= 0 {
+        return String::new();
     }
-
-    let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-    let month_days = if leap {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    
+    // ts_ms: UNIXエポック(1970-01-01)からのミリ秒
+    // FILETIME: 1601-01-01からの100ナノ秒単位
+    // 差分は 11644473600 秒
+    let ft_val = (ts_ms as u64 * 10_000) + 116444736000000000;
+    let ft = FILETIME {
+        dwLowDateTime: (ft_val & 0xFFFFFFFF) as u32,
+        dwHighDateTime: (ft_val >> 32) as u32,
     };
-
-    let mut month = 1;
-    for &md in &month_days {
-        if days >= md {
-            days -= md;
-            month += 1;
-        } else {
-            break;
-        }
+    
+    let mut st_utc = SYSTEMTIME::default();
+    let mut st_local = SYSTEMTIME::default();
+    
+    unsafe {
+        let _ = FileTimeToSystemTime(&ft, &mut st_utc);
+        // ローカルタイムゾーンに変換
+        let _ = SystemTimeToTzSpecificLocalTime(None, &st_utc, &mut st_local);
     }
-    let day = days + 1;
-
-    format!("{year:04}/{month:02}/{day:02} {h:02}:{m:02}:{s:02}")
+    
+    format!(
+        "{:04}/{:02}/{:02} {:02}:{:02}:{:02}",
+        st_local.wYear, st_local.wMonth, st_local.wDay,
+        st_local.wHour, st_local.wMinute, st_local.wSecond
+    )
 }
 
 fn lv_clear(lvh: HWND) {
@@ -936,7 +866,7 @@ fn set_edit(id: i32, text: &str) {
         // EDIT は \n だけだと改行されないため \r\n に正規化
         let normalized = text.replace("\r\n", "\n").replace('\n', "\r\n");
         let wide = to_wide(&normalized);
-        let _ = SetWindowTextW(dlg_item(hwnd(), id), PCWSTR(wide.as_ptr()));
+        let _ = SetWindowTextW(crate::ui_helpers::get_dlg_item(hwnd(), id), PCWSTR(wide.as_ptr()));
     }
 }
 
@@ -952,13 +882,13 @@ fn pretty_json(s: &str) -> String {
 /// DBから再読込して入力(captures)一覧を更新 (検索欄・exeフィルタを適用)
 fn reload() {
     let h = hwnd();
-    let query = edit_text(h, IDC_SEARCH_EDIT);
-    let exe_idx = combo_sel(h, IDC_EXE_COMBO);
+    let query = crate::ui_helpers::get_ctl_text(h, IDC_SEARCH_EDIT);
+    let exe_idx = crate::ui_helpers::combo_get_sel(crate::ui_helpers::get_dlg_item(h, IDC_EXE_COMBO));
     // index 0 は「全アプリ」
-    let app_exe = if exe_idx == 0 { String::new() } else { combo_item_text(h, IDC_EXE_COMBO, exe_idx) };
+    let app_exe = if exe_idx == 0 { String::new() } else { crate::ui_helpers::combo_get_item_text(crate::ui_helpers::get_dlg_item(h, IDC_EXE_COMBO), exe_idx) };
 
     let caps = logdb::search_captures(&query, &app_exe, 1000);
-    let cap_lv = dlg_item(h, IDC_CAP_LV);
+    let cap_lv = crate::ui_helpers::get_dlg_item(h, IDC_CAP_LV);
     lv_clear(cap_lv);
     for (i, c) in caps.iter().enumerate() {
         let img = if c.image_path.is_some() { "✓" } else { "" };
@@ -981,9 +911,9 @@ fn reload() {
         st.sel_exp = None;
         st.image = None;
     });
-    lv_clear(dlg_item(h, IDC_RECOG_LV));
-    lv_clear(dlg_item(h, IDC_TRANS_LV));
-    lv_clear(dlg_item(h, IDC_EXP_LV));
+    lv_clear(crate::ui_helpers::get_dlg_item(h, IDC_RECOG_LV));
+    lv_clear(crate::ui_helpers::get_dlg_item(h, IDC_TRANS_LV));
+    lv_clear(crate::ui_helpers::get_dlg_item(h, IDC_EXP_LV));
     set_edit(IDC_CAP_DETAIL, "");
     set_edit(IDC_RECOG_DETAIL, "");
     set_edit(IDC_TRANS_PROMPT, "");
@@ -1027,7 +957,7 @@ fn on_cap_selected(idx: usize) {
 
     // 読み取り結果一覧
     let recogs = logdb::recognitions_for(cap.id);
-    let recog_lv = dlg_item(h, IDC_RECOG_LV);
+    let recog_lv = crate::ui_helpers::get_dlg_item(h, IDC_RECOG_LV);
     lv_clear(recog_lv);
     for (i, r) in recogs.iter().enumerate() {
         let text = if r.success { r.source_text.clone() } else { format!("[エラー] {}", r.error) };
@@ -1050,8 +980,8 @@ fn on_cap_selected(idx: usize) {
         st.sel_exp = None;
         st.image = image;
     });
-    lv_clear(dlg_item(h, IDC_TRANS_LV));
-    lv_clear(dlg_item(h, IDC_EXP_LV));
+    lv_clear(crate::ui_helpers::get_dlg_item(h, IDC_TRANS_LV));
+    lv_clear(crate::ui_helpers::get_dlg_item(h, IDC_EXP_LV));
     set_edit(IDC_RECOG_DETAIL, "");
     set_edit(IDC_TRANS_PROMPT, "");
     set_edit(IDC_TRANS_DETAIL, "");
@@ -1090,12 +1020,12 @@ fn on_recog_selected(idx: usize) {
     // タグ入力欄
     unsafe {
         let wide = to_wide(&recog.tags);
-        let _ = SetWindowTextW(dlg_item(h, IDC_TAG_EDIT), PCWSTR(wide.as_ptr()));
+        let _ = SetWindowTextW(crate::ui_helpers::get_dlg_item(h, IDC_TAG_EDIT), PCWSTR(wide.as_ptr()));
     }
 
     // 翻訳結果一覧
     let trans = logdb::translations_for(recog.id);
-    let trans_lv = dlg_item(h, IDC_TRANS_LV);
+    let trans_lv = crate::ui_helpers::get_dlg_item(h, IDC_TRANS_LV);
     lv_clear(trans_lv);
     for (i, t) in trans.iter().enumerate() {
         let dir = format!("{}→{}", t.source_lang, t.target_lang);
@@ -1116,7 +1046,7 @@ fn on_recog_selected(idx: usize) {
 
     // 解説結果一覧
     let exps = logdb::explanations_for(recog.id);
-    let exp_lv = dlg_item(h, IDC_EXP_LV);
+    let exp_lv = crate::ui_helpers::get_dlg_item(h, IDC_EXP_LV);
     lv_clear(exp_lv);
     for (i, e) in exps.iter().enumerate() {
         let tok = match (e.tokens_in, e.tokens_out) {
@@ -1317,7 +1247,7 @@ fn start_reocr(h: HWND) {
         unsafe { MessageBoxW(Some(h), w!("この入力には画像がありません(デバッグモードで記録した画像のみ再OCRできます)。"), w!("再OCR"), MB_OK); }
         return;
     };
-    let engine = OCR_ENGINES[combo_sel(h, IDC_OCR_COMBO).min(OCR_ENGINES.len() - 1)].0.to_string();
+    let engine = OCR_ENGINES[crate::ui_helpers::combo_get_sel(crate::ui_helpers::get_dlg_item(h, IDC_OCR_COMBO)).min(OCR_ENGINES.len() - 1)].0.to_string();
     let hwnd_isize = h.0 as isize;
     RELOAD_FOCUS.with(|f| *f.borrow_mut() = ReloadFocus::NewestRecog);
     std::thread::spawn(move || {
@@ -1382,7 +1312,7 @@ fn start_retranslate(h: HWND) {
         unsafe { MessageBoxW(Some(h), w!("原文が空のため再翻訳できません。"), w!("再翻訳"), MB_OK); }
         return;
     }
-    let engine = TR_ENGINES[combo_sel(h, IDC_TR_COMBO).min(TR_ENGINES.len() - 1)].0.to_string();
+    let engine = TR_ENGINES[crate::ui_helpers::combo_get_sel(crate::ui_helpers::get_dlg_item(h, IDC_TR_COMBO)).min(TR_ENGINES.len() - 1)].0.to_string();
     let hwnd_isize = h.0 as isize;
     RELOAD_FOCUS.with(|f| *f.borrow_mut() = ReloadFocus::NewestTrans(recog_id));
     std::thread::spawn(move || {
@@ -1444,7 +1374,7 @@ fn start_reexplain(h: HWND) {
         unsafe { MessageBoxW(Some(h), w!("原文が空のため解説できません。"), w!("再解説"), MB_OK); }
         return;
     }
-    let profile_name = combo_item_text(h, IDC_EXP_COMBO, combo_sel(h, IDC_EXP_COMBO));
+    let profile_name = crate::ui_helpers::combo_get_item_text(crate::ui_helpers::get_dlg_item(h, IDC_EXP_COMBO), crate::ui_helpers::combo_get_sel(crate::ui_helpers::get_dlg_item(h, IDC_EXP_COMBO)));
     if profile_name.is_empty() {
         unsafe {
             MessageBoxW(
@@ -1687,7 +1617,7 @@ unsafe extern "system" fn img_wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam:
 /// リロード後、以前選択していた入力行を復元する
 fn restore_cap_selection(h: HWND, old_idx: Option<usize>) {
     if let Some(old_idx) = old_idx {
-        let cap_lv = dlg_item(h, IDC_CAP_LV);
+        let cap_lv = crate::ui_helpers::get_dlg_item(h, IDC_CAP_LV);
         let count = lv_count(cap_lv);
         if count > 0 {
             let new_idx = if (old_idx as i32) < count { old_idx } else { (count - 1) as usize };
@@ -1716,25 +1646,25 @@ fn restore_full_selection(h: HWND, saved: (Option<i64>, Option<i64>, Option<i64>
     let (cap_id, recog_id, trans_id, exp_id) = saved;
     let Some(cap_id) = cap_id else { return };
     let Some(idx) = STATE.with(|s| s.borrow().caps.iter().position(|c| c.id == cap_id)) else { return };
-    lv_select(dlg_item(h, IDC_CAP_LV), idx as i32);
+    lv_select(crate::ui_helpers::get_dlg_item(h, IDC_CAP_LV), idx as i32);
     on_cap_selected(idx);
 
     if let Some(rid) = recog_id
         && let Some(ridx) = STATE.with(|s| s.borrow().recogs.iter().position(|r| r.id == rid))
     {
-        lv_select(dlg_item(h, IDC_RECOG_LV), ridx as i32);
+        lv_select(crate::ui_helpers::get_dlg_item(h, IDC_RECOG_LV), ridx as i32);
         on_recog_selected(ridx);
     }
     if let Some(tid) = trans_id
         && let Some(tidx) = STATE.with(|s| s.borrow().trans.iter().position(|t| t.id == tid))
     {
-        lv_select(dlg_item(h, IDC_TRANS_LV), tidx as i32);
+        lv_select(crate::ui_helpers::get_dlg_item(h, IDC_TRANS_LV), tidx as i32);
         on_trans_selected(tidx);
     }
     if let Some(eid) = exp_id
         && let Some(eidx) = STATE.with(|s| s.borrow().exps.iter().position(|e| e.id == eid))
     {
-        lv_select(dlg_item(h, IDC_EXP_LV), eidx as i32);
+        lv_select(crate::ui_helpers::get_dlg_item(h, IDC_EXP_LV), eidx as i32);
         on_exp_selected(eidx);
     }
 }
@@ -1844,7 +1774,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             restore_cap_selection(h, sel_before);
             match focus {
                 ReloadFocus::NewestRecog => {
-                    let recog_lv = dlg_item(h, IDC_RECOG_LV);
+                    let recog_lv = crate::ui_helpers::get_dlg_item(h, IDC_RECOG_LV);
                     let n = lv_count(recog_lv);
                     if n > 0 {
                         lv_select(recog_lv, n - 1);
@@ -1853,10 +1783,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 }
                 ReloadFocus::NewestTrans(recog_id) => {
                     if let Some(ridx) = STATE.with(|s| s.borrow().recogs.iter().position(|r| r.id == recog_id)) {
-                        lv_select(dlg_item(h, IDC_RECOG_LV), ridx as i32);
+                        lv_select(crate::ui_helpers::get_dlg_item(h, IDC_RECOG_LV), ridx as i32);
                         on_recog_selected(ridx);
                     }
-                    let trans_lv = dlg_item(h, IDC_TRANS_LV);
+                    let trans_lv = crate::ui_helpers::get_dlg_item(h, IDC_TRANS_LV);
                     let n = lv_count(trans_lv);
                     if n > 0 {
                         lv_select(trans_lv, n - 1);
@@ -1873,7 +1803,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 let id = nmhdr.idFrom as i32;
                 match id {
                     IDC_CAP_LV => {
-                        if let Some(sel) = lv_selected(dlg_item(h, IDC_CAP_LV)) {
+                        if let Some(sel) = lv_selected(crate::ui_helpers::get_dlg_item(h, IDC_CAP_LV)) {
                             let cur = STATE.with(|s| s.borrow().sel_cap);
                             if cur != Some(sel) {
                                 on_cap_selected(sel);
@@ -1881,7 +1811,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         }
                     }
                     IDC_RECOG_LV => {
-                        if let Some(sel) = lv_selected(dlg_item(h, IDC_RECOG_LV)) {
+                        if let Some(sel) = lv_selected(crate::ui_helpers::get_dlg_item(h, IDC_RECOG_LV)) {
                             let cur = STATE.with(|s| s.borrow().sel_recog);
                             if cur != Some(sel) {
                                 on_recog_selected(sel);
@@ -1889,12 +1819,12 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         }
                     }
                     IDC_TRANS_LV => {
-                        if let Some(sel) = lv_selected(dlg_item(h, IDC_TRANS_LV)) {
+                        if let Some(sel) = lv_selected(crate::ui_helpers::get_dlg_item(h, IDC_TRANS_LV)) {
                             on_trans_selected(sel);
                         }
                     }
                     IDC_EXP_LV => {
-                        if let Some(sel) = lv_selected(dlg_item(h, IDC_EXP_LV)) {
+                        if let Some(sel) = lv_selected(crate::ui_helpers::get_dlg_item(h, IDC_EXP_LV)) {
                             on_exp_selected(sel);
                         }
                     }
@@ -2002,10 +1932,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     }
                 }
                 IDC_BTN_ADD_CANCEL => unsafe {
-                    let _ = SetWindowTextW(dlg_item(h, IDC_ADD_TEXT_EDIT), w!(""));
+                    let _ = SetWindowTextW(crate::ui_helpers::get_dlg_item(h, IDC_ADD_TEXT_EDIT), w!(""));
                 },
                 IDC_BTN_ADD_SAVE => {
-                    let text = edit_text_long(h, IDC_ADD_TEXT_EDIT);
+                    let text = crate::ui_helpers::get_multiline_text(h, IDC_ADD_TEXT_EDIT);
                     if text.trim().is_empty() {
                         unsafe {
                             MessageBoxW(Some(h), w!("テキストを入力してください。"), w!("テキスト追加"), MB_OK);
@@ -2019,11 +1949,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             logdb::log_recognition(cid, "manual", "manual", 0, Some(&text), None, None);
                         }
                         unsafe {
-                            let _ = SetWindowTextW(dlg_item(h, IDC_ADD_TEXT_EDIT), w!(""));
+                            let _ = SetWindowTextW(crate::ui_helpers::get_dlg_item(h, IDC_ADD_TEXT_EDIT), w!(""));
                         }
                         reload();
                         // 追加したアイテムにフォーカスを当てる (captures は id DESC なので先頭が最新)
-                        let cap_lv = dlg_item(h, IDC_CAP_LV);
+                        let cap_lv = crate::ui_helpers::get_dlg_item(h, IDC_CAP_LV);
                         if lv_count(cap_lv) > 0 {
                             lv_select(cap_lv, 0);
                             on_cap_selected(0);
@@ -2036,7 +1966,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         st.sel_recog.and_then(|idx| st.recogs.get(idx).map(|r| r.id))
                     });
                     if let Some(rid) = recog_id {
-                        let tags = edit_text(h, IDC_TAG_EDIT);
+                        let tags = crate::ui_helpers::get_ctl_text(h, IDC_TAG_EDIT);
                         logdb::set_tags(rid, &tags);
                         // STATE側にも反映 (再選択なしで詳細を一致させる)
                         STATE.with(|s| {
