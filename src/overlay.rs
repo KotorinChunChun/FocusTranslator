@@ -77,6 +77,7 @@ pub const CHIP_EDIT_TR: usize = 121;
 pub const CHIP_SAVE_TR: usize = 122;
 pub const CHIP_EDIT_EXP: usize = 123;
 pub const CHIP_SAVE_EXP: usize = 124;
+pub const CHIP_FORCE_PIN: usize = 125;
 
 /// テキストのインライン編集対象ブロック
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -796,12 +797,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     begin_window_drag(hwnd);
                 }
             } else {
+                // ウィンドウの移動を開始した時点でピン留めする
                 let main = CONTENT.with(|c| c.borrow().main_hwnd);
                 unsafe {
                     let _ = PostMessageW(
                         Some(HWND(main as *mut _)),
                         crate::app_state::WM_APP_CHIP,
-                        WPARAM(CHIP_PIN),
+                        WPARAM(CHIP_FORCE_PIN),
                         LPARAM(0),
                     );
                 }

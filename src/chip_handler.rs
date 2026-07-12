@@ -175,12 +175,25 @@ pub fn handle_chip(id: usize) {
             });
             return;
         }
+        overlay::CHIP_FORCE_PIN => {
+            with_app(|app| {
+                if app.mode != Mode::Pinned {
+                    app.mode = Mode::Pinned;
+                    sync_overlay(app);
+                }
+            });
+            return;
+        }
         overlay::CHIP_IMAGE => {
             // キャプチャ画像のインライン編集モードを開始する (SPECv0.4 §1-§2)
+            // 編集中はホールドキーを離してもオーバーレイが閉じないよう、ピン留め状態へ移行する。
             let img = with_app(|app| app.last_img.clone()).flatten();
             if let Some(i) = img {
                 overlay::enter_edit_mode(i);
-                with_app(sync_overlay);
+                with_app(|app| {
+                    app.mode = Mode::Pinned;
+                    sync_overlay(app);
+                });
             }
             return;
         }
