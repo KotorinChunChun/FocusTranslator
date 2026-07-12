@@ -259,6 +259,9 @@ pub fn handle_chip(id: usize) {
                 let new_gen = with_app(|app| {
                     app.source = new_text.clone();
                     app.translation = None;
+                    // 読み取り結果(原文)が変わったので解説も破棄する (再度開けば同一なら復元される)
+                    app.explanation = None;
+                    app.explaining = false;
                     app.mode = Mode::Pinned;
                     app.status = Some("修正された原文で再翻訳中…".into());
                     app.busy = true;

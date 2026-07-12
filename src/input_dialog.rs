@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     COLOR_BTNFACE, CreateFontW, DEFAULT_CHARSET, FW_NORMAL, OUT_DEFAULT_PRECIS,
     CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH,
@@ -8,10 +8,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    GetWindowTextLengthW, GetWindowTextW, LoadCursorW, RegisterClassW, SetForegroundWindow,
-    SetWindowTextW, ShowWindow, TranslateMessage, MSG, WINDOW_STYLE, WM_CLOSE, WM_COMMAND,
-    WM_DESTROY, WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST,
-    WS_POPUPWINDOW, WS_SYSMENU, WS_VISIBLE, WS_BORDER, WS_VSCROLL, CW_USEDEFAULT, IDC_ARROW,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsWindow, LoadCursorW, RegisterClassW,
+    SetForegroundWindow, SetWindowTextW, ShowWindow, TranslateMessage, MSG, WINDOW_STYLE,
+    WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST,
+    WS_POPUPWINDOW, WS_SYSMENU, WS_VISIBLE, WS_BORDER, WS_VSCROLL, IDC_ARROW,
     SW_SHOW, ES_MULTILINE, ES_AUTOVSCROLL, GetDlgItem, HMENU, SendMessageW, WM_KEYDOWN
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_RETURN, VK_ESCAPE};
@@ -21,10 +21,23 @@ use crate::util::to_wide;
 const IDC_EDIT: i32 = 101;
 const IDC_SAVE: i32 = 102;
 const IDC_CANCEL: i32 = 103;
+const DLG_W: i32 = 600;
+const DLG_H: i32 = 400;
 
 thread_local! {
     static DIALOG_RESULT: RefCell<Option<String>> = RefCell::new(None);
     static HAS_RESULT: RefCell<bool> = RefCell::new(false);
+    static WND: RefCell<isize> = const { RefCell::new(0) };
+}
+
+/// このダイアログが開いているか (オーバーレイの再TOPMOST化を避けるため参照される)
+pub fn is_open() -> bool {
+    let h = hwnd();
+    !h.is_invalid() && unsafe { IsWindow(Some(h)).as_bool() }
+}
+
+pub fn hwnd() -> HWND {
+    HWND(WND.with(|w| *w.borrow()) as *mut _)
 }
 
 pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
@@ -47,16 +60,29 @@ pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
         let _ = RegisterClassW(&wc);
 
         let wide_title = to_wide(title);
-        
+
+        // 親ウィンドウ(オーバーレイ)の中央に表示する
+        let (x, y) = {
+            let mut r = RECT::default();
+            if GetWindowRect(parent, &mut r).is_ok() {
+                (
+                    r.left + (r.right - r.left - DLG_W) / 2,
+                    r.top + (r.bottom - r.top - DLG_H) / 2,
+                )
+            } else {
+                (100, 100)
+            }
+        };
+
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST,
             class_name,
             PCWSTR(wide_title.as_ptr()),
             WS_POPUPWINDOW | WS_CAPTION | WS_SYSMENU,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            600,
-            400,
+            x,
+            y,
+            DLG_W,
+            DLG_H,
             Some(parent),
             None,
             Some(instance.into()),
@@ -65,6 +91,7 @@ pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
 
         if hwnd.is_ok() {
             let hwnd = hwnd.unwrap();
+            WND.with(|w| *w.borrow_mut() = hwnd.0 as isize);
             let _ = EnableWindow(parent, false);
 
             let font = CreateFontW(
@@ -147,6 +174,7 @@ pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
 
             let _ = EnableWindow(parent, true);
             let _ = SetForegroundWindow(parent);
+            WND.with(|w| *w.borrow_mut() = 0);
         }
     }
     DIALOG_RESULT.with(|r| r.borrow_mut().take())
