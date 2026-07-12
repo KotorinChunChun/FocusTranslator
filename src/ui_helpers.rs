@@ -13,6 +13,7 @@ const ES_AUTOHSCROLL: u32 = 0x0080;
 const ES_PASSWORD: u32 = 0x0020;
 const ES_MULTILINE: u32 = 0x0004;
 const ES_AUTOVSCROLL: u32 = 0x0040;
+const ES_WANTRETURN: u32 = 0x1000;
 const PASSWORD_CHAR: usize = 0x25CF; // ●
 
 #[allow(clippy::too_many_arguments)]
@@ -73,7 +74,7 @@ pub fn multiline(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, h: i
         instance,
         w!("EDIT"),
         "",
-        WS_BORDER | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE | ES_AUTOVSCROLL),
+        WS_BORDER | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN),
         x,
         y,
         w,
