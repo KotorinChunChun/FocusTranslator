@@ -47,6 +47,61 @@ pub fn call(prof: &ApiProfile, req: &LlmRequest) -> Result<LlmResponse, String> 
     }
 }
 
+/// 送信ボディJSON文字列のみを組み立てる (APIキーは含まない: ヘッダーで送るため)。
+/// 実送信前にDBキャッシュを検索するために使う (SPECv0.4.8追補: 翻訳APIキャッシュ)。
+pub fn build_request_json(prof: &ApiProfile, req: &LlmRequest) -> String {
+    match prof.api_type {
+        ApiType::Gemini => gemini_body(req).to_string(),
+        ApiType::OpenAI => openai_body(prof, req).to_string(),
+        ApiType::Claude => claude_body(prof, req).to_string(),
+    }
+}
+
+fn gemini_body(req: &LlmRequest) -> serde_json::Value {
+    let mut parts = vec![serde_json::json!({ "text": req.prompt })];
+    if let Some(b64) = req.image_png_b64 {
+        parts.push(serde_json::json!({ "inlineData": { "mimeType": "image/png", "data": b64 } }));
+    }
+    let mut body = serde_json::json!({ "contents": [{ "parts": parts }] });
+    if req.json_mode {
+        body["generationConfig"] = serde_json::json!({ "responseMimeType": "application/json" });
+    }
+    body
+}
+
+fn openai_body(prof: &ApiProfile, req: &LlmRequest) -> serde_json::Value {
+    let content = match req.image_png_b64 {
+        Some(b64) => serde_json::json!([
+            { "type": "text", "text": req.prompt },
+            { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{b64}") } }
+        ]),
+        None => serde_json::json!(req.prompt),
+    };
+    let mut body = serde_json::json!({
+        "model": prof.model_name,
+        "messages": [{ "role": "user", "content": content }]
+    });
+    if req.json_mode {
+        body["response_format"] = serde_json::json!({ "type": "json_object" });
+    }
+    body
+}
+
+fn claude_body(prof: &ApiProfile, req: &LlmRequest) -> serde_json::Value {
+    let content = match req.image_png_b64 {
+        Some(b64) => serde_json::json!([
+            { "type": "text", "text": req.prompt },
+            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": b64 } }
+        ]),
+        None => serde_json::json!(req.prompt),
+    };
+    serde_json::json!({
+        "model": prof.model_name,
+        "max_tokens": CLAUDE_MAX_TOKENS,
+        "messages": [{ "role": "user", "content": content }]
+    })
+}
+
 fn url_or<'a>(url: &'a str, default: &'a str) -> &'a str {
     if url.is_empty() { default } else { url }
 }
@@ -71,14 +126,7 @@ fn usage_i64(v: &serde_json::Value, obj: &str, field: &str) -> Option<i64> {
 }
 
 fn call_gemini(prof: &ApiProfile, key: &str, req: &LlmRequest) -> Result<LlmResponse, String> {
-    let mut parts = vec![serde_json::json!({ "text": req.prompt })];
-    if let Some(b64) = req.image_png_b64 {
-        parts.push(serde_json::json!({ "inlineData": { "mimeType": "image/png", "data": b64 } }));
-    }
-    let mut body = serde_json::json!({ "contents": [{ "parts": parts }] });
-    if req.json_mode {
-        body["generationConfig"] = serde_json::json!({ "responseMimeType": "application/json" });
-    }
+    let body = gemini_body(req);
     let base = url_or(&prof.api_url, GEMINI_URL_BASE);
     let url = format!("{base}/{}:generateContent", prof.model_name);
     let request_json = body.to_string();
@@ -98,20 +146,7 @@ fn call_gemini(prof: &ApiProfile, key: &str, req: &LlmRequest) -> Result<LlmResp
 }
 
 fn call_openai(prof: &ApiProfile, key: &str, req: &LlmRequest) -> Result<LlmResponse, String> {
-    let content = match req.image_png_b64 {
-        Some(b64) => serde_json::json!([
-            { "type": "text", "text": req.prompt },
-            { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{b64}") } }
-        ]),
-        None => serde_json::json!(req.prompt),
-    };
-    let mut body = serde_json::json!({
-        "model": prof.model_name,
-        "messages": [{ "role": "user", "content": content }]
-    });
-    if req.json_mode {
-        body["response_format"] = serde_json::json!({ "type": "json_object" });
-    }
+    let body = openai_body(prof, req);
     let url = url_or(&prof.api_url, DEFAULT_OPENAI_URL);
     let request_json = body.to_string();
     let auth = format!("Bearer {key}");
@@ -131,18 +166,7 @@ fn call_openai(prof: &ApiProfile, key: &str, req: &LlmRequest) -> Result<LlmResp
 }
 
 fn call_claude(prof: &ApiProfile, key: &str, req: &LlmRequest) -> Result<LlmResponse, String> {
-    let content = match req.image_png_b64 {
-        Some(b64) => serde_json::json!([
-            { "type": "text", "text": req.prompt },
-            { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": b64 } }
-        ]),
-        None => serde_json::json!(req.prompt),
-    };
-    let body = serde_json::json!({
-        "model": prof.model_name,
-        "max_tokens": CLAUDE_MAX_TOKENS,
-        "messages": [{ "role": "user", "content": content }]
-    });
+    let body = claude_body(prof, req);
     let url = url_or(&prof.api_url, DEFAULT_CLAUDE_URL);
     let request_json = body.to_string();
     let v = post_json(
