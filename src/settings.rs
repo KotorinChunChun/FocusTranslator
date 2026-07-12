@@ -39,8 +39,6 @@ const IDC_NDL: i32 = 112;
 const IDC_AUTOSTART: i32 = 113;
 const IDC_PERFLOG: i32 = 114;
 const IDC_CONSENT_RESET: i32 = 115;
-const IDC_APPLY: i32 = 116;
-const IDC_SAVE: i32 = 117;
 const IDC_CLOSE: i32 = 118;
 const IDC_TEST_YOMI: i32 = 119;
 const IDC_TEST_NDL: i32 = 120;
@@ -65,17 +63,18 @@ const IDC_PROF_URL: i32 = 138;
 const IDC_PROF_KEY: i32 = 139;
 const IDC_PROF_TYPE: i32 = 140;
 const IDC_GLOSSARY: i32 = 141;
-const IDC_PROF_PROMPT_OCR: i32 = 142;
-const IDC_PROF_PROMPT_TR: i32 = 143;
-const IDC_PROF_PROMPT_EXP: i32 = 144;
 const IDC_DETECT_MODE: i32 = 145;
 const IDC_DETECT_KEY: i32 = 146;
 const IDC_PREVIEW_DETECT_MODE: i32 = 147;
-/// プロンプトの [?] 使える変数 ヘルプボタン (SPECv0.4 §7.3)
-const IDC_HELP_PROMPT_TR: i32 = 148;
-const IDC_HELP_PROMPT_OCR: i32 = 149;
-const IDC_HELP_PROMPT_EXP: i32 = 150;
 const IDC_PIN_HOLD: i32 = 151;
+/// プロンプト編集ウィンドウを開くボタン (SPECv0.4.7 §6.1)
+const IDC_PROMPT_TR_BTN: i32 = 152;
+const IDC_PROMPT_OCR_BTN: i32 = 153;
+const IDC_PROMPT_EXP_BTN: i32 = 154;
+
+/// エディットコントロールの通知コード (windows クレートに定義がないもの)
+const EN_KILLFOCUS: u32 = 0x0200;
+const BN_CLICKED: u32 = 0;
 
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
@@ -96,6 +95,12 @@ thread_local! {
     static REGISTERED: RefCell<bool> = const { RefCell::new(false) };
     static FONT: RefCell<isize> = const { RefCell::new(0) };
     static PROFILES: RefCell<Vec<crate::config::ApiProfile>> = const { RefCell::new(Vec::new()) };
+    /// 「新規」ボタン直後 (まだプロファイル保存していない) 状態。
+    /// プロンプト欄のUIが無くなったため、この状態での保存は既定プロンプトを使う (SPECv0.4.7 §6.1)。
+    static PENDING_NEW: RefCell<bool> = const { RefCell::new(false) };
+    /// ウィンドウ破棄中フラグ: 子コントロール破棄過程の EN_KILLFOCUS で
+    /// 不完全なUI状態が自動保存されるのを防ぐ。
+    static CLOSING: RefCell<bool> = const { RefCell::new(false) };
 }
 
 pub fn hwnd() -> HWND {
@@ -282,7 +287,7 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let gx = col_x[2];
         let lx = inner(gx);
         let cx = gx + 100;
-        group(h, inst, "4. LLMプロファイル設定", gx, 8, COL_W, 556);
+        group(h, inst, "4. LLMプロファイル設定", gx, 8, COL_W, 240);
         let mut y = 8 + GTOP;
         combo(h, inst, lx, y, 150, IDC_PROF_LIST);
         button(h, inst, "新規", lx + 156, y, 46, IDC_PROF_NEW);
@@ -304,27 +309,17 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         label(h, inst, "モデル名", lx, y + 2, 84);
         edit(h, inst, cx, y, 180, IDC_PROF_MODEL);
         y += STEP;
-        // 各プロンプトは文章全体を見渡せる縦幅を確保する (SPECv0.4 §5.1)
-        // 見出し右の [?] で使えるプレースホルダ一覧を表示 (§7.3)
-        const PROMPT_H: i32 = 96;
-        for (lab, edit_id, help_id) in [
-            ("翻訳プロンプト", IDC_PROF_PROMPT_TR, IDC_HELP_PROMPT_TR),
-            ("OCRプロンプト", IDC_PROF_PROMPT_OCR, IDC_HELP_PROMPT_OCR),
-            ("解説プロンプト", IDC_PROF_PROMPT_EXP, IDC_HELP_PROMPT_EXP),
-        ] {
-            label(h, inst, lab, lx, y + 2, 110);
-            button(h, inst, "[?] 使える変数", lx + 116, y, 100, help_id);
-            y += 26;
-            multiline(h, inst, lx, y, COL_W - 24, PROMPT_H, edit_id);
-            y += PROMPT_H + 6;
-        }
+        // プロンプトは専用の編集ウィンドウで編集する (SPECv0.4.7 §1)
+        label(h, inst, "プロンプト編集", lx, y + 4, 84);
+        button(h, inst, "翻訳プロンプト", cx, y, 92, IDC_PROMPT_TR_BTN);
+        button(h, inst, "OCRプロンプト", cx + 98, y, 92, IDC_PROMPT_OCR_BTN);
+        button(h, inst, "解説プロンプト", cx + 196, y, 92, IDC_PROMPT_EXP_BTN);
     }
 
-    // ---- 下部ボタン領域 (右下; SPECv0.4 §5.2) ----
+    // ---- 下部ボタン領域 (右下; SPECv0.4 §5.2)
+    // 設定は変更時に即座に保存されるため【閉じる】のみ (SPECv0.4.7 改)
     let btn_y = 570;
     let right = PAD * 3 + COL_W * 3;
-    button(h, inst, "適用", right - 258, btn_y, 80, IDC_APPLY);
-    button(h, inst, "保存", right - 172, btn_y, 80, IDC_SAVE);
     button(h, inst, "閉じる", right - 86, btn_y, 80, IDC_CLOSE);
 
     // フォント設定
@@ -388,17 +383,6 @@ fn get_text(h: HWND, id: i32) -> String {
         let n = GetWindowTextW(ctl, &mut buf);
         String::from_utf16_lossy(&buf[..n.max(0) as usize])
     }
-}
-
-/// マルチラインEDITへの書込み: Win32 EDITは改行に\r\nを要するため\nを正規化して変換する
-fn set_multiline_text(h: HWND, id: i32, text: &str) {
-    let normalized = text.replace("\r\n", "\n").replace('\n', "\r\n");
-    set_text(h, id, &normalized);
-}
-
-/// マルチラインEDITからの読込み: 保存データは\n改行で統一する
-fn get_multiline_text(h: HWND, id: i32) -> String {
-    get_text(h, id).replace("\r\n", "\n")
 }
 
 fn combo_fill(h: HWND, id: i32, items: &[&str], selected: usize) {
@@ -571,6 +555,7 @@ fn refill_profile_combo(h: HWND, sel: usize) {
 }
 
 fn load_profile_to_ui(h: HWND, idx: usize) {
+    PENDING_NEW.with(|f| *f.borrow_mut() = false);
     PROFILES.with(|p| {
         let profiles = p.borrow();
         if let Some(prof) = profiles.get(idx) {
@@ -579,9 +564,6 @@ fn load_profile_to_ui(h: HWND, idx: usize) {
             set_text(h, IDC_PROF_MODEL, &prof.model_name);
             set_text(h, IDC_PROF_URL, &prof.api_url);
             set_text(h, IDC_PROF_KEY, &prof.get_key());
-            set_multiline_text(h, IDC_PROF_PROMPT_OCR, &prof.ocr_prompt);
-            set_multiline_text(h, IDC_PROF_PROMPT_TR, &prof.translate_prompt);
-            set_multiline_text(h, IDC_PROF_PROMPT_EXP, &prof.explain_prompt);
         }
     });
 }
@@ -634,28 +616,191 @@ fn handle_install_done(h: HWND, wparam: WPARAM, lparam: LPARAM, refresh: fn(HWND
     }
 }
 
-/// プロンプトで使えるプレースホルダ一覧をポップアップ表示する (SPECv0.4 §7.3)
-fn show_placeholder_help(h: HWND) {
-    let msg = "プロンプトで使えるプレースホルダ:\n\n\
-{{source_lang}} … 翻訳元言語 (例: en)\n\
-{{target_lang}} … 翻訳先言語 (例: ja)\n\
-{{original_text}} … OCRまたはUIAで取得した翻訳前の原文\n\
-{{translated_text}} … 翻訳後の訳文 (翻訳前は空文字)\n\
-{{glossary}} … 用語集のテキスト\n\
-{{app_title}} … 対象アプリケーションのウィンドウタイトル\n\
-{{app_exe}} … 対象アプリケーションの実行ファイル名\n\
-{{uia_path}} … UIA取得時の要素のパス (画像OCR時は空文字)\n\
-{{ocr_engine}} … 実行されたOCRエンジン名\n\
-{{tr_engine}} … 実行された翻訳エンジン名 (翻訳前は空文字)";
+/// プロンプト編集ウィンドウの保存からの同期 (SPECv0.4.7 §4.3):
+/// 設定画面が開いていればメモリ上 PROFILES の該当プロファイルの該当プロンプトを更新する。
+/// 他フィールドの未保存編集 (UI上の入力) には触れない。
+pub fn update_prompt_in_memory(name: &str, kind: crate::prompt_edit::PromptKind, text: &str) {
+    if !is_open() {
+        return;
+    }
+    PROFILES.with(|p| {
+        if let Some(prof) = p.borrow_mut().iter_mut().find(|x| x.name == name) {
+            match kind {
+                crate::prompt_edit::PromptKind::Translate => prof.translate_prompt = text.to_string(),
+                crate::prompt_edit::PromptKind::Ocr => prof.ocr_prompt = text.to_string(),
+                crate::prompt_edit::PromptKind::Explain => prof.explain_prompt = text.to_string(),
+            }
+        }
+    });
+}
+
+/// 設定の即時保存 (SPECv0.4.7 改): 変更をディスクへ保存し main へ再読込を通知する
+fn auto_save(h: HWND, ask_consent: bool) {
+    if CLOSING.with(|f| *f.borrow()) {
+        return;
+    }
+    save(h, ask_consent);
     unsafe {
-        let wide = to_wide(msg);
-        MessageBoxW(
-            Some(h),
-            PCWSTR(wide.as_ptr()),
-            w!("使える変数"),
-            MB_OK | MB_ICONINFORMATION,
+        let _ = PostMessageW(
+            Some(crate::app_state::main_hwnd()),
+            crate::app_state::WM_APP_CFG,
+            WPARAM(0),
+            LPARAM(0),
         );
     }
+}
+
+/// プロファイル編集UI (名前/種別/URL/キー/モデル) が PROFILES の保存済み内容と異なるか
+fn profile_ui_dirty(h: HWND) -> bool {
+    if PENDING_NEW.with(|f| *f.borrow()) {
+        return true;
+    }
+    let name = get_text(h, IDC_PROF_NAME).trim().to_string();
+    PROFILES.with(|p| {
+        let profiles = p.borrow();
+        let Some(prof) = profiles.iter().find(|x| x.name == name) else {
+            return true;
+        };
+        prof.api_type != API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)]
+            || prof.model_name != get_text(h, IDC_PROF_MODEL).trim()
+            || prof.api_url != get_text(h, IDC_PROF_URL).trim()
+            || prof.get_key() != get_text(h, IDC_PROF_KEY).trim()
+    })
+}
+
+/// プロファイル編集UIの内容で PROFILES を更新する (保存/別名保存の共通処理)。
+/// プロンプトはUIに無いため、新規なら既定値、既存なら保存済みの値を引き継ぐ (SPECv0.4.7 §6.1)。
+/// 成功時は該当プロファイルのindexを返し、コンボを再構築して設定も即保存する。
+fn save_profile_from_ui(h: HWND, save_as: bool) -> Option<usize> {
+    let name = get_text(h, IDC_PROF_NAME).trim().to_string();
+    if name.is_empty() {
+        unsafe {
+            MessageBoxW(Some(h), w!("API登録名を入力してください"), w!("エラー"), MB_OK);
+        }
+        return None;
+    }
+    // プロンプトの引き継ぎ元: 新規=既定値 / 同名の既存=その値 / 別名複製=選択中プロファイルの値
+    let (ocr_p, tr_p, exp_p) = PROFILES.with(|p| {
+        let profiles = p.borrow();
+        let src = if PENDING_NEW.with(|f| *f.borrow()) {
+            None
+        } else {
+            profiles
+                .iter()
+                .find(|x| x.name == name)
+                .or_else(|| profiles.get(combo_sel(h, IDC_PROF_LIST)))
+        };
+        match src {
+            Some(s) => (s.ocr_prompt.clone(), s.translate_prompt.clone(), s.explain_prompt.clone()),
+            None => (
+                crate::config::DEFAULT_GEMINI_OCR_PROMPT.to_string(),
+                crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT.to_string(),
+                crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT.to_string(),
+            ),
+        }
+    });
+    let mut prof = crate::config::ApiProfile {
+        name: name.clone(),
+        api_type: API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)].clone(),
+        model_name: get_text(h, IDC_PROF_MODEL).trim().to_string(),
+        api_url: get_text(h, IDC_PROF_URL).trim().to_string(),
+        api_key_enc: String::new(),
+        ocr_prompt: ocr_p,
+        translate_prompt: tr_p,
+        explain_prompt: exp_p,
+    };
+    prof.set_key(get_text(h, IDC_PROF_KEY).trim());
+
+    let saved = PROFILES.with(|p| {
+        let mut profiles = p.borrow_mut();
+        if !save_as {
+            if let Some(existing) = profiles.iter_mut().find(|x| x.name == name) {
+                *existing = prof.clone();
+            } else {
+                profiles.push(prof.clone());
+            }
+        } else {
+            // 別名保存: 名前重複は拒否
+            if profiles.iter().any(|x| x.name == name) {
+                unsafe {
+                    MessageBoxW(Some(h), w!("その名前は既に存在します"), w!("エラー"), MB_OK);
+                }
+                return None;
+            }
+            profiles.push(prof.clone());
+        }
+        profiles.iter().position(|p| p.name == name)
+    })?;
+    PENDING_NEW.with(|f| *f.borrow_mut() = false);
+    refill_profile_combo(h, saved);
+    auto_save(h, false);
+    Some(saved)
+}
+
+/// プロンプト編集ボタン (SPECv0.4.7 §6.1): プロファイルが未保存なら保存確認→保存後に
+/// プロンプト編集ウィンドウ (モードA) を開く。
+fn open_prompt_editor(h: HWND, kind: crate::prompt_edit::PromptKind) {
+    if profile_ui_dirty(h) {
+        let r = unsafe {
+            MessageBoxW(
+                Some(h),
+                w!("プロファイルが保存されていません。保存してからプロンプト編集を開きますか?"),
+                w!("Focus Translator"),
+                MB_YESNO,
+            )
+        };
+        if r.0 != 6 {
+            // IDYES 以外は開かない
+            return;
+        }
+        if save_profile_from_ui(h, false).is_none() {
+            return;
+        }
+    }
+    let name = get_text(h, IDC_PROF_NAME).trim().to_string();
+    let (profiles, active_idx) = PROFILES.with(|p| {
+        let profiles = p.borrow();
+        let list: Vec<crate::prompt_edit::ProfilePrompt> = profiles
+            .iter()
+            .map(|x| crate::prompt_edit::ProfilePrompt {
+                name: x.name.clone(),
+                template: match kind {
+                    crate::prompt_edit::PromptKind::Translate => x.translate_prompt.clone(),
+                    crate::prompt_edit::PromptKind::Ocr => x.ocr_prompt.clone(),
+                    crate::prompt_edit::PromptKind::Explain => x.explain_prompt.clone(),
+                },
+            })
+            .collect();
+        let idx = profiles.iter().position(|x| x.name == name).unwrap_or(0);
+        (list, idx)
+    });
+    if profiles.is_empty() {
+        return;
+    }
+    // 設定画面の近傍に表示する
+    let pos = unsafe {
+        let mut r = windows::Win32::Foundation::RECT::default();
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(h, &mut r);
+        Some((r.left + 60, r.top + 60))
+    };
+    let inst = unsafe {
+        HINSTANCE(
+            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                .map(|m| m.0)
+                .unwrap_or(std::ptr::null_mut()),
+        )
+    };
+    crate::prompt_edit::open(
+        inst,
+        h,
+        pos,
+        kind,
+        profiles,
+        active_idx,
+        None,
+        Box::new(move |n, t| crate::prompt_edit::save_prompt_to_config(kind, n, t)),
+        None,
+    );
 }
 
 /// 既定ブラウザで指定URLを開く
@@ -674,7 +819,7 @@ fn open_url(h: HWND, url: &str) {
     }
 }
 
-fn save(h: HWND) {
+fn save(h: HWND, ask_consent: bool) {
     let mut cfg = Config::load();
     cfg.hold_key = HOLD_KEYS[combo_sel(h, IDC_HOLDKEY).min(HOLD_KEYS.len() - 1)].to_string();
     cfg.poll_ms = get_text(h, IDC_POLL).trim().parse().unwrap_or(100).clamp(20, 1000);
@@ -723,8 +868,12 @@ fn save(h: HWND) {
         None
     }).collect();
 
-    // 既定エンジンがクラウド/外部送信を伴う場合はここで同意を確認 (SPEC §9)
-    confirm_default_consents(h, &mut cfg);
+    // 既定エンジンがクラウド/外部送信を伴う場合の同意確認 (SPEC §9)。
+    // 即時保存化に伴い、既定エンジンのコンボを変更したときだけ確認する
+    // (毎回の自動保存でダイアログを出さないため)。
+    if ask_consent {
+        confirm_default_consents(h, &mut cfg);
+    }
 
     cfg.save();
     apply_autostart(cfg.autostart);
@@ -801,40 +950,40 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
     match msg {
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
+            let notif = ((wparam.0 >> 16) & 0xFFFF) as u32;
+            // 設定の即時保存 (SPECv0.4.7 改): コンボは選択変更時、チェックボックスは
+            // クリック時、エディットはフォーカス喪失時に自動保存する。
+            // プロファイル編集欄 (名前/種別/URL/キー/モデル) は【保存】ボタンで確定するため対象外。
             match id {
-                IDC_APPLY => {
-                    save(h);
-                    // main へ設定再読込を通知
-                    unsafe {
-                        let _ = PostMessageW(
-                            Some(crate::app_state::main_hwnd()),
-                            crate::app_state::WM_APP_CFG,
-                            WPARAM(0),
-                            LPARAM(0),
-                        );
-                    }
+                IDC_HOLDKEY | IDC_DETECT_KEY | IDC_SRCLANG | IDC_LANG
+                    if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE =>
+                {
+                    auto_save(h, false);
                 }
-                IDC_SAVE => {
-                    save(h);
-                    // main へ設定再読込を通知
-                    unsafe {
-                        let _ = PostMessageW(
-                            Some(crate::app_state::main_hwnd()),
-                            crate::app_state::WM_APP_CFG,
-                            WPARAM(0),
-                            LPARAM(0),
-                        );
-                        MessageBoxW(
-                            Some(h),
-                            w!("設定を保存しました。"),
-                            w!("Focus Translator"),
-                            MB_OK | MB_ICONINFORMATION,
-                        );
-                        let _ = DestroyWindow(h);
-                    }
+                IDC_OCR | IDC_TR
+                    if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE =>
+                {
+                    // 既定エンジンの変更は外部送信の同意確認を伴う
+                    auto_save(h, true);
                 }
+                IDC_AUTOSTART | IDC_PERFLOG | IDC_LOG_ENABLED | IDC_DEBUG_MODE | IDC_DETECT_MODE
+                | IDC_PREVIEW_DETECT_MODE
+                    if notif == BN_CLICKED =>
+                {
+                    auto_save(h, false);
+                }
+                IDC_POLL | IDC_PIN_HOLD | IDC_HOTKEY | IDC_DEEPL | IDC_GOOGLE | IDC_YOMI
+                | IDC_NDL | IDC_LOG_MAX | IDC_GLOSSARY
+                    if notif == EN_KILLFOCUS =>
+                {
+                    auto_save(h, false);
+                }
+                _ => {}
+            }
+            match id {
                 IDC_CLOSE => unsafe {
-                    let _ = DestroyWindow(h);
+                    // WM_CLOSE 経由でモードAプロンプト編集ウィンドウの連動クローズ処理を通す
+                    let _ = PostMessageW(Some(h), WM_CLOSE, WPARAM(0), LPARAM(0));
                 },
                 IDC_CONSENT_RESET => {
                     let mut cfg = Config::load();
@@ -877,21 +1026,22 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     );
                 }
                 IDC_ONNX_VARIANT => {
-                    let notif = ((wparam.0 >> 16) & 0xFFFF) as u32;
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE {
                         refresh_onnx_status(h);
+                        auto_save(h, false);
                     }
                 }
                 IDC_DEEPL_URL => open_url(h, DEEPL_KEY_URL),
                 IDC_GOOGLE_URL => open_url(h, GOOGLE_KEY_URL),
-                IDC_HELP_PROMPT_TR | IDC_HELP_PROMPT_OCR | IDC_HELP_PROMPT_EXP => {
-                    show_placeholder_help(h);
-                }
+                IDC_PROMPT_TR_BTN => open_prompt_editor(h, crate::prompt_edit::PromptKind::Translate),
+                IDC_PROMPT_OCR_BTN => open_prompt_editor(h, crate::prompt_edit::PromptKind::Ocr),
+                IDC_PROMPT_EXP_BTN => open_prompt_editor(h, crate::prompt_edit::PromptKind::Explain),
                 IDC_PROF_LIST | IDC_PROF_TYPE => {
-                    let notif = ((wparam.0 >> 16) & 0xFFFF) as u32;
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE {
                         if id == IDC_PROF_LIST {
                             load_profile_to_ui(h, combo_sel(h, IDC_PROF_LIST));
+                            // アクティブプロファイルの変更を即保存する
+                            auto_save(h, false);
                         } else {
                             // 種別切替: モデル名・URLをその種別の既定値に置き換える
                             let t = &API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)];
@@ -905,47 +1055,12 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     set_text(h, IDC_PROF_URL, "");
                     set_text(h, IDC_PROF_KEY, "");
                     set_text(h, IDC_PROF_MODEL, "");
-                    set_multiline_text(h, IDC_PROF_PROMPT_OCR, crate::config::DEFAULT_GEMINI_OCR_PROMPT);
-                    set_multiline_text(h, IDC_PROF_PROMPT_TR, crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT);
-                    set_multiline_text(h, IDC_PROF_PROMPT_EXP, crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT);
                     combo_select(h, IDC_PROF_TYPE, 0);
+                    // プロンプトはUI欄が無いため、保存時に既定値 (DEFAULT_GEMINI_*) を使う
+                    PENDING_NEW.with(|f| *f.borrow_mut() = true);
                 }
                 IDC_PROF_SAVE | IDC_PROF_SAVEAS => {
-                    let name = get_text(h, IDC_PROF_NAME).trim().to_string();
-                    if name.is_empty() { return LRESULT(0); }
-                    let mut prof = crate::config::ApiProfile {
-                        name: name.clone(),
-                        api_type: API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)].clone(),
-                        model_name: get_text(h, IDC_PROF_MODEL).trim().to_string(),
-                        api_url: get_text(h, IDC_PROF_URL).trim().to_string(),
-                        api_key_enc: String::new(),
-                        ocr_prompt: get_multiline_text(h, IDC_PROF_PROMPT_OCR),
-                        translate_prompt: get_multiline_text(h, IDC_PROF_PROMPT_TR),
-                        explain_prompt: get_multiline_text(h, IDC_PROF_PROMPT_EXP),
-                    };
-                    prof.set_key(get_text(h, IDC_PROF_KEY).trim());
-
-                    let saved = PROFILES.with(|p| {
-                        let mut profiles = p.borrow_mut();
-                        if id == IDC_PROF_SAVE {
-                            if let Some(existing) = profiles.iter_mut().find(|x| x.name == name) {
-                                *existing = prof.clone();
-                            } else {
-                                profiles.push(prof.clone());
-                            }
-                        } else {
-                            // 別名保存: 名前重複は拒否
-                            if profiles.iter().any(|x| x.name == name) {
-                                unsafe { MessageBoxW(Some(h), w!("その名前は既に存在します"), w!("エラー"), MB_OK); }
-                                return None;
-                            }
-                            profiles.push(prof.clone());
-                        }
-                        profiles.iter().position(|p| p.name == name)
-                    });
-                    if let Some(sel) = saved {
-                        refill_profile_combo(h, sel);
-                    }
+                    let _ = save_profile_from_ui(h, id == IDC_PROF_SAVEAS);
                 }
                 IDC_PROF_DEL => {
                     let deleted = PROFILES.with(|p| {
@@ -965,6 +1080,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     if deleted {
                         refill_profile_combo(h, 0);
                         load_profile_to_ui(h, 0);
+                        auto_save(h, false);
                     }
                 }
                 IDC_OPEN_LOG => {
@@ -1024,6 +1140,12 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             LRESULT(0)
         }
         WM_CLOSE => {
+            // モードAのプロンプト編集ウィンドウを連動して閉じる (SPECv0.4.7)。
+            // 未保存テンプレートの破棄をユーザーがキャンセルしたら設定画面も閉じない。
+            if !crate::prompt_edit::close_for_settings() {
+                return LRESULT(0);
+            }
+            CLOSING.with(|f| *f.borrow_mut() = true);
             unsafe {
                 let _ = DestroyWindow(h);
             }
@@ -1031,6 +1153,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
         }
         WM_DESTROY => {
             WND.with(|w| *w.borrow_mut() = 0);
+            CLOSING.with(|f| *f.borrow_mut() = false);
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(h, msg, wparam, lparam) },

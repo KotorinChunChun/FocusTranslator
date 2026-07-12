@@ -368,7 +368,7 @@ pub fn handle_chip(id: usize) {
             return;
         }
         overlay::CHIP_EXPLAIN => {
-            // プロンプト編集ダイアログを表示してから送信
+            // プロンプト編集ウィンドウ (モードB) を表示してから送信 (SPECv0.4.7 §2)
             with_app(|app| {
                 app.mode = Mode::Pinned;
                 sync_overlay(app);
@@ -384,33 +384,47 @@ pub fn handle_chip(id: usize) {
                     })
                     .unwrap_or_default();
 
-                    let pc = prompt_ctx_from_app(&source);
-                    let initial_prompt = crate::worker::build_explain_prompt(&cfg, &pc).unwrap_or_default();
-                    if initial_prompt.is_empty() {
+                    // 全プロファイルの解説テンプレートを渡す (テンプレート/送信内容の分離編集)
+                    let profiles: Vec<crate::prompt_edit::ProfilePrompt> = cfg
+                        .api_profiles
+                        .iter()
+                        .map(|p| crate::prompt_edit::ProfilePrompt {
+                            name: p.name.clone(),
+                            template: p.explain_prompt.clone(),
+                        })
+                        .collect();
+                    if profiles.is_empty() {
                         with_app(|app| {
                             app.badge = Some("LLM APIが設定されていません".into());
                             sync_overlay(app);
                         });
                         return;
                     }
-
-                    let profiles: Vec<String> = cfg.api_profiles.iter().map(|p| p.name.clone()).collect();
                     let active_idx = cfg
                         .api_profiles
                         .iter()
                         .position(|p| p.name == cfg.active_api_profile)
                         .unwrap_or(0);
 
+                    let pc = prompt_ctx_from_app(&source);
                     let main_hwnd_val = main;
                     let inst = with_app(|app| app.instance).unwrap_or_default();
                     crate::prompt_edit::open(
                         inst,
                         main_hwnd(),
                         Some(dialog_pos),
-                        &initial_prompt,
+                        crate::prompt_edit::PromptKind::Explain,
                         profiles,
                         active_idx,
-                        move |edited_prompt, profile| {
+                        Some(pc),
+                        Box::new(|name, tmpl| {
+                            crate::prompt_edit::save_prompt_to_config(
+                                crate::prompt_edit::PromptKind::Explain,
+                                name,
+                                tmpl,
+                            )
+                        }),
+                        Some(Box::new(move |edited_prompt, profile| {
                             let new_gen = with_app(|app| {
                                 app.generation += 1;
                                 app.mode = Mode::Pinned;
@@ -423,7 +437,7 @@ pub fn handle_chip(id: usize) {
                             .unwrap_or(0);
                             let cfg2 = Config::load();
                             crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val);
-                        },
+                        })),
                     );
                 }
             }
