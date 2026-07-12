@@ -432,7 +432,16 @@ pub fn update(hwnd: HWND, mut content: OverlayContent) {
     let (x, y) = place(anchor, w, h, kept);
     LAST_ANCHOR.with(|a| *a.borrow_mut() = Some(anchor));
     unsafe {
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
+        // プロンプト編集ウィンドウ/テキスト編集ダイアログが開いている間は、
+        // オーバーレイの再TOPMOST化でそれらを覆い隠さないよう、その直下に留める。
+        let insert_after = if crate::input_dialog::is_open() {
+            crate::input_dialog::hwnd()
+        } else if crate::prompt_edit::is_open() {
+            crate::prompt_edit::hwnd()
+        } else {
+            HWND_TOPMOST
+        };
+        let _ = SetWindowPos(hwnd, Some(insert_after), x, y, w, h, SWP_NOACTIVATE);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         let _ = InvalidateRect(Some(hwnd), None, true);
         if error_only && !pinned {
