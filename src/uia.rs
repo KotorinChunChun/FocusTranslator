@@ -10,6 +10,19 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern,
     IUIAutomationTextRange, TextUnit_Line, TextUnit_Paragraph, UIA_TextPatternId,
     UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+    UIA_AppBarControlTypeId, UIA_ButtonControlTypeId, UIA_CalendarControlTypeId,
+    UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId,
+    UIA_DataGridControlTypeId, UIA_DataItemControlTypeId, UIA_GroupControlTypeId,
+    UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId,
+    UIA_ImageControlTypeId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
+    UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
+    UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
+    UIA_ScrollBarControlTypeId, UIA_SemanticZoomControlTypeId, UIA_SeparatorControlTypeId,
+    UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_SplitButtonControlTypeId,
+    UIA_StatusBarControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
+    UIA_TableControlTypeId, UIA_TextControlTypeId, UIA_ThumbControlTypeId,
+    UIA_TitleBarControlTypeId, UIA_ToolBarControlTypeId, UIA_ToolTipControlTypeId,
+    UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_WindowControlTypeId,
 };
 use windows::core::Interface;
 
@@ -304,6 +317,75 @@ fn collect_descendant_texts(
         }
         collect_descendant_texts(walker, &e, depth - 1, visited, budget, seen, out);
         cur = unsafe { walker.GetNextSiblingElement(&e).ok() };
+    }
+}
+
+/// カーソル位置の要素のControlType名 (Edit/Document/Text/Button 等) を取得する。
+/// TextPatternが見つかった要素があればその種類、無ければ ElementFromPoint 直下要素の種類を返す
+/// (入力内容ログへの記録用: SPECv0.4.8追補)。
+pub fn control_type_at_point(x: i32, y: i32) -> Option<String> {
+    unsafe {
+        let auto = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+        let pt = POINT { x, y };
+        let el = auto.ElementFromPoint(pt).ok()?;
+        let target = find_text_hit(&auto, el.clone(), pt).map(|h| h.element).unwrap_or(el);
+        control_type_name(&target)
+    }
+}
+
+fn control_type_name(e: &IUIAutomationElement) -> Option<String> {
+    unsafe {
+        let ctrl = e.CurrentControlType().ok()?;
+        Some(control_type_label(ctrl).to_string())
+    }
+}
+
+/// UIA_CONTROLTYPE_ID → 表示用の短い英語名
+#[allow(non_upper_case_globals)]
+fn control_type_label(id: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID) -> &'static str {
+    match id {
+        UIA_ButtonControlTypeId => "Button",
+        UIA_CalendarControlTypeId => "Calendar",
+        UIA_CheckBoxControlTypeId => "CheckBox",
+        UIA_ComboBoxControlTypeId => "ComboBox",
+        UIA_EditControlTypeId => "Edit",
+        UIA_HyperlinkControlTypeId => "Hyperlink",
+        UIA_ImageControlTypeId => "Image",
+        UIA_ListItemControlTypeId => "ListItem",
+        UIA_ListControlTypeId => "List",
+        UIA_MenuControlTypeId => "Menu",
+        UIA_MenuBarControlTypeId => "MenuBar",
+        UIA_MenuItemControlTypeId => "MenuItem",
+        UIA_ProgressBarControlTypeId => "ProgressBar",
+        UIA_RadioButtonControlTypeId => "RadioButton",
+        UIA_ScrollBarControlTypeId => "ScrollBar",
+        UIA_SliderControlTypeId => "Slider",
+        UIA_SpinnerControlTypeId => "Spinner",
+        UIA_StatusBarControlTypeId => "StatusBar",
+        UIA_TabControlTypeId => "Tab",
+        UIA_TabItemControlTypeId => "TabItem",
+        UIA_TextControlTypeId => "Text",
+        UIA_ToolBarControlTypeId => "ToolBar",
+        UIA_ToolTipControlTypeId => "ToolTip",
+        UIA_TreeControlTypeId => "Tree",
+        UIA_TreeItemControlTypeId => "TreeItem",
+        UIA_CustomControlTypeId => "Custom",
+        UIA_GroupControlTypeId => "Group",
+        UIA_ThumbControlTypeId => "Thumb",
+        UIA_DataGridControlTypeId => "DataGrid",
+        UIA_DataItemControlTypeId => "DataItem",
+        UIA_DocumentControlTypeId => "Document",
+        UIA_SplitButtonControlTypeId => "SplitButton",
+        UIA_WindowControlTypeId => "Window",
+        UIA_PaneControlTypeId => "Pane",
+        UIA_HeaderControlTypeId => "Header",
+        UIA_HeaderItemControlTypeId => "HeaderItem",
+        UIA_TableControlTypeId => "Table",
+        UIA_TitleBarControlTypeId => "TitleBar",
+        UIA_SeparatorControlTypeId => "Separator",
+        UIA_SemanticZoomControlTypeId => "SemanticZoom",
+        UIA_AppBarControlTypeId => "AppBar",
+        _ => "Unknown",
     }
 }
 

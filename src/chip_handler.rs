@@ -31,7 +31,7 @@ fn prompt_ctx_from_app(original: &str) -> crate::config::PromptContext {
 /// 「選択範囲を残す/消す」「元に戻す」は編集セッション内(overlay.rs)で完結し、
 /// OCR/翻訳の再実行はここ(編集終了時)でのみ行う。
 fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
-    let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe, uia_path, uia_nodes)) =
+    let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe, uia_path, uia_nodes, control_type)) =
         with_app(|app| {
             app.last_img = Some(new_img.clone());
             app.generation += 1;
@@ -50,6 +50,7 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
                 app.app_exe.clone(),
                 app.uia_path.clone(),
                 app.uia_nodes.clone(),
+                app.control_type.clone(),
             )
         })
     else {
@@ -63,7 +64,7 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
     let new_gen = with_app(|app| app.generation).unwrap_or(0);
     crate::worker::reocr_edited(
         new_gen, cap_id, new_img, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe,
-        uia_path, uia_nodes,
+        uia_path, uia_nodes, control_type,
     );
 }
 
@@ -104,11 +105,19 @@ pub fn handle_chip(id: usize) {
             app.cur_tr.clone(),
             app.recog_id,
             app.capture_id,
+            app.app_title.clone(),
+            app.app_exe.clone(),
+            app.uia_path.clone(),
+            app.uia_nodes.clone(),
+            app.control_type.clone(),
         )
     }) else {
         return;
     };
-    let (cfg, source, last_img, last_focus, origin, target, main, anchor, cur_tr, recog_id, capture_id) = info;
+    let (
+        cfg, source, last_img, last_focus, origin, target, main, anchor, cur_tr, recog_id, capture_id,
+        held_app_title, held_app_exe, held_uia_path, held_uia_nodes, held_control_type,
+    ) = info;
 
     match id {
         overlay::CHIP_COPY => {
@@ -483,7 +492,7 @@ pub fn handle_chip(id: usize) {
         let cfg2 = Config::load();
         crate::worker::reocr(
             new_gen, capture_id, last_img, last_focus, origin.x, origin.y, target, key, cur_tr, cfg2,
-            main, anchor,
+            main, anchor, held_app_title, held_app_exe, held_uia_path, held_uia_nodes, held_control_type,
         );
     } else if id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_TR_BASE + engine::TR_KEYS.len() {
         // 翻訳エンジン切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)

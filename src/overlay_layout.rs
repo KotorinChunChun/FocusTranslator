@@ -320,23 +320,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 y += row_h + 4;
             }
 
-            // UIAパスの各ノードをボタン化
+            // UIAパスの各ノードをボタン化。ネストが深く1行に収まらない場合は
+            // ウィンドウ幅(MAXW)を広げず複数行に折り返す (SPECv0.4.8追補)。
             if !content.uia_nodes.is_empty() {
                 let mut x = PAD;
+                let mut max_x = PAD;
                 for (i, node) in content.uia_nodes.iter().enumerate() {
-                    if i > 0 {
-                        let sep = "＞";
-                        let (sw, sh) = measure(hdc, sep, FONT_CHIP, false, 40);
-                        let sy = y + (CHIP_H - sh) / 2;
-                        items.push(Item::Text {
-                            rect: RECT { left: x, top: sy, right: x + sw, bottom: sy + sh },
-                            text: sep.to_string(),
-                            size: FONT_CHIP,
-                            color: COL_LABEL,
-                            bold: false,
-                        });
-                        x += sw + 6;
-                    }
                     let node_text = node.text.trim();
                     let has_text = !node_text.is_empty();
                     let lab = if has_text {
@@ -345,17 +334,42 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                         node.label.clone()
                     };
                     let (cw, _) = measure(hdc, &lab, FONT_CHIP, false, 600);
-                    let w = cw + 18;
+                    let chip_w = cw + 18;
+
+                    let sep = "＞";
+                    let (sep_w, sep_h) = measure(hdc, sep, FONT_CHIP, false, 40);
+                    let needs_sep = i > 0;
+                    let item_w = chip_w + if needs_sep { sep_w + 6 } else { 0 };
+
+                    // 行末に収まらなければ次行へ折り返す。行頭の「＞」は描画しない。
+                    if x > PAD && x + item_w > PAD + MAXW {
+                        x = PAD;
+                        y += CHIP_H + 6;
+                    }
+
+                    if needs_sep && x > PAD {
+                        let sy = y + (CHIP_H - sep_h) / 2;
+                        items.push(Item::Text {
+                            rect: RECT { left: x, top: sy, right: x + sep_w, bottom: sy + sep_h },
+                            text: sep.to_string(),
+                            size: FONT_CHIP,
+                            color: COL_LABEL,
+                            bold: false,
+                        });
+                        x += sep_w + 6;
+                    }
+
                     items.push(Item::Chip {
-                        rect: RECT { left: x, top: y, right: x + w, bottom: y + CHIP_H },
+                        rect: RECT { left: x, top: y, right: x + chip_w, bottom: y + CHIP_H },
                         label: lab,
                         id: CHIP_UIA_NODE_BASE + i,
                         active: has_text && node_text == content.source.trim(),
                         enabled: has_text,
                     });
-                    x += w + 6;
+                    x += chip_w + 6;
+                    max_x = max_x.max(x);
                 }
-                need_w = need_w.max(x + PAD - 6);
+                need_w = need_w.max((max_x + PAD - 6).min(MAXW + PAD));
                 y += CHIP_H + 6;
             }
 

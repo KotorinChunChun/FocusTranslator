@@ -30,12 +30,17 @@ pub enum WorkerMsg {
         uia_path: String,
         /// UIAパスの各ノード (ボタン化してオーバーレイに表示。クリックでOCRの代わりに採用)
         uia_nodes: Vec<uia::UiaPathNode>,
+        /// カーソル位置要素のUIA ControlType名 (入力内容ログ用; SPECv0.4.8追補)
+        control_type: Option<String>,
     },
     Translation {
         text: String,
         badge: Option<String>,
         ms: u128,
         recog_id: Option<i64>,
+    },
+    TranslationSkipped {
+        msg: String,
     },
     TranslationFailed {
         msg: String,
@@ -78,17 +83,21 @@ struct AppContext {
     uia_path: String,
     /// UIAパスの各ノード (ボタン化してオーバーレイに表示。クリックでOCRの代わりに採用)
     uia_nodes: Vec<uia::UiaPathNode>,
+    /// カーソル位置要素のUIA ControlType名 (入力内容ログ用; SPECv0.4.8追補)
+    control_type: Option<String>,
 }
 
 impl AppContext {
     fn capture(x: i32, y: i32, target: HWND) -> Self {
         let (exe, title) = util::get_window_context(target);
         let uia_nodes = uia::path_nodes_at_point(x, y);
+        let control_type = uia::control_type_at_point(x, y);
         AppContext {
             exe,
             title: title.unwrap_or_default(),
             uia_path: build_uia_path_log(&uia_nodes),
             uia_nodes,
+            control_type,
         }
     }
 
@@ -124,6 +133,7 @@ impl AppContext {
             app_exe: self.exe.clone().unwrap_or_default(),
             uia_path: self.uia_path.clone(),
             uia_nodes: self.uia_nodes.clone(),
+            control_type: self.control_type.clone(),
         }
     }
 }
@@ -167,7 +177,8 @@ fn log_cap(cfg: &Config, mode: &str, ctx: &AppContext, image: Option<&Captured>)
         return None;
     }
     let id = crate::logdb::log_capture(
-        mode, ctx.exe.as_deref(), Some(&ctx.title), Some(&ctx.uia_path), image, cfg.debug_mode,
+        mode, ctx.exe.as_deref(), Some(&ctx.title), Some(&ctx.uia_path), ctx.control_type.as_deref(),
+        image, cfg.debug_mode,
     );
     crate::logdb::rotate(cfg.log_max_records);
     id
@@ -201,11 +212,34 @@ fn llm_profile_of(cfg: &Config, engine: &str) -> Option<String> {
 /// 同一入力+同一エンジンのキャッシュヒット時(translate::translate内のメモリキャッシュ)は
 /// 再翻訳しておらず、ログにも新規記録しない (SPECv0.4追補: OCRのハッシュキャッシュと同様の扱い)。
 fn log_trans_ok(cfg: &Config, recog_id: Option<i64>, ms: u128, t: &crate::translate::Translated) {
-    if t.cache_hit {
-        return;
-    }
     let Some(rid) = recog_id else { return };
     if !cfg.log_enabled {
+        return;
+    }
+    if let Some(cache_rid) = t.db_cache_recog_id {
+        // DBキャッシュ(同一request_json)ヒット: 別の親なら同内容を新規に追記する
+        // (SPECv0.4.8追補)。同じ親なら何もしない(既に記録済みのため)。
+        if cache_rid == rid {
+            return;
+        }
+        crate::logdb::log_translation(
+            rid,
+            &t.engine,
+            llm_profile_of(cfg, &t.engine).as_deref(),
+            &t.source_lang,
+            &t.target_lang,
+            0,
+            true,
+            Some(&t.text),
+            None,
+            t.detail.request_json.as_deref(),
+            t.detail.response_json.as_deref(),
+            Some(0),
+            Some(0),
+        );
+        return;
+    }
+    if t.cache_hit {
         return;
     }
     crate::logdb::log_translation(
@@ -327,7 +361,8 @@ fn dispatch_translation(
             recog_id,
         });
     } else {
-        translate(generation, cfg, o.text, tr_engine, main, recog_id, pc);
+        // 自動サイクル(ホールド/範囲/再OCR)からの翻訳は元言語チェックを適用する (SPECv0.4.8追補)
+        translate(generation, cfg, o.text, tr_engine, main, recog_id, pc, false);
     }
 }
 
@@ -365,7 +400,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
             ));
             // UIA経路なので ocr_engine は空文字 (SPECv0.4 §7.1)
             let pc = prompt_ctx(&ctx, "");
-            translate(generation, cfg, text, tr_engine, main, recog_id, pc);
+            translate(generation, cfg, text, tr_engine, main, recog_id, pc, false);
             return;
         }
 
@@ -426,6 +461,10 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
     });
 }
 
+/// 翻訳を実行する。force=false のときは元言語と明らかに異なるテキスト (SPECv0.4.8追補)
+/// をAPI/ローカルモデルを呼ばずにスキップする。自動サイクル(ホールド/範囲/再OCR後)は
+/// force=false、翻訳チップ切替・言語反転・原文編集後の再翻訳など明示的な操作は force=true とする。
+#[allow(clippy::too_many_arguments)]
 fn translate(
     generation: u64,
     cfg: Config,
@@ -434,7 +473,16 @@ fn translate(
     main: isize,
     recog_id: Option<i64>,
     pc: crate::config::PromptContext,
+    force: bool,
 ) {
+    if !force && !crate::translate::is_source_lang_text(&cfg.source_lang, &text) {
+        let msg = format!(
+            "元言語 ({}) のテキストではないため翻訳をスキップしました。",
+            cfg.source_lang
+        );
+        post(main, generation, WorkerMsg::TranslationSkipped { msg });
+        return;
+    }
     std::thread::spawn(move || {
         let t0 = Instant::now();
         match crate::translate::translate(&engine, &cfg, &text, &pc) {
@@ -470,6 +518,11 @@ pub fn reocr(
     cfg: Config,
     main: isize,
     anchor: (i32, i32),
+    app_title: String,
+    app_exe: String,
+    uia_path: String,
+    uia_nodes: Vec<uia::UiaPathNode>,
+    control_type: Option<String>,
 ) {
     std::thread::spawn(move || {
         init_com();
@@ -495,7 +548,21 @@ pub fn reocr(
                 }
             }
         };
-        let ctx = AppContext::capture(x, y, HWND(target as *mut _));
+        // 保持画像がある場合は、キャプチャ時点のUIAコンテキストをそのまま使う。この時点で
+        // 再プローブするとカーソルがオーバーレイ上(チップ押下位置)にあるため、無関係な
+        // 要素のUIA情報を拾ってしまう (SPECv0.4.8追補: {{uia_path}} 誤り修正)。
+        // 保持画像が無い(=対象が変わりうる)場合のみ従来通り再取得する。
+        let ctx = if held {
+            AppContext {
+                exe: if app_exe.is_empty() { None } else { Some(app_exe) },
+                title: app_title,
+                uia_path,
+                uia_nodes,
+                control_type,
+            }
+        } else {
+            AppContext::capture(x, y, HWND(target as *mut _))
+        };
         let pc = prompt_ctx(&ctx, &ocr_engine);
         // ログにはOCR対象領域だけを保存する
         let log_img = ocr::crop_for_focus(&image, focus);
@@ -569,6 +636,7 @@ pub fn reocr_edited(
     app_exe: String,
     uia_path: String,
     uia_nodes: Vec<uia::UiaPathNode>,
+    control_type: Option<String>,
 ) {
     std::thread::spawn(move || {
         init_com();
@@ -578,6 +646,7 @@ pub fn reocr_edited(
             title: app_title,
             uia_path,
             uia_nodes,
+            control_type,
         };
         let pc = prompt_ctx(&ctx, &ocr_engine);
         let hash = crate::capture::hash_hex(&image);
@@ -626,7 +695,8 @@ pub fn retranslate(
     recog_id: Option<i64>,
     pc: crate::config::PromptContext,
 ) {
-    translate(generation, cfg, text, engine, main, recog_id, pc);
+    // 明示的な再翻訳操作のため元言語チェックはスキップし常に翻訳する (SPECv0.4.8追補)
+    translate(generation, cfg, text, engine, main, recog_id, pc, true);
 }
 
 /// 範囲指定モード: 選択矩形をOCRして段落結合→翻訳、最初からピン留め (SPEC §3.2)
@@ -724,6 +794,19 @@ pub fn build_explain_prompt(cfg: &Config, ctx: &crate::config::PromptContext) ->
 pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, profile: String, main: isize) {
     std::thread::spawn(move || {
         init_com();
+        // 同一送信プロンプト(input_text)の成功済み解説がDBにあれば、APIを呼ばずそれを使う
+        // (SPECv0.4.8追補: 別の親であっても検索対象。別の親なら同内容を新規に記帳する)。
+        if cfg.log_enabled
+            && let Some((cached_rid, cached_profile, cached_text)) = crate::logdb::find_cached_explanation(&prompt)
+        {
+            if cached_rid != recog_id {
+                crate::logdb::log_explanation(
+                    recog_id, &cached_profile, 0, &prompt, Some(&cached_text), None, Some(0), Some(0),
+                );
+            }
+            post(main, generation, WorkerMsg::Explanation { text: cached_text });
+            return;
+        }
         let t0 = Instant::now();
         let Some(prof) = cfg
             .api_profiles

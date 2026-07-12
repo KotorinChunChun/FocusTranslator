@@ -82,6 +82,9 @@ const IDC_BTN_DEL_EXP: i32 = 246;
 const IDC_LBL_SEARCH: i32 = 247;
 const IDC_GRP_FILTER: i32 = 248;
 const IDC_GRP_ADD: i32 = 249;
+// 翻訳結果・解説結果の3列表示(リスト/入力プロンプト/結果テキスト)用プロンプト欄 (v0.4.8)
+const IDC_TRANS_PROMPT: i32 = 250;
+const IDC_EXP_PROMPT: i32 = 251;
 /// 手動追加テキストの取得元アプリ名として一律で記録する値
 const MANUAL_APP_NAME: &str = "FocusTranslator";
 
@@ -370,13 +373,16 @@ fn build(h: HWND, inst: HINSTANCE) {
     ctl(h, inst, w!("EDIT"), "", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP, 0, 0, 0, 0, IDC_TAG_EDIT);
     btn(h, inst, "タグ保存", IDC_BTN_SAVE_TAG);
 
-    // 【翻訳結果】ブロック
+    // 【翻訳結果】ブロック (3列: リスト/入力プロンプト/結果テキスト)
     label(h, inst, "【翻訳結果】", IDC_LBL_TRANS);
     let trans = lv(h, inst, IDC_TRANS_LV);
     add_col(trans, 0, "日時", 120);
     add_col(trans, 1, "エンジン", 60);
     add_col(trans, 2, "方向", 55);
-    add_col(trans, 3, "訳文", 200);
+    add_col(trans, 3, "プロファイル", 90);
+    add_col(trans, 4, "tok入/出", 70);
+    add_col(trans, 5, "訳文", 200);
+    detail_edit(h, inst, IDC_TRANS_PROMPT);
     detail_edit(h, inst, IDC_TRANS_DETAIL);
     let tr_combo = combo(h, inst, IDC_TR_COMBO);
     for (_, disp) in TR_ENGINES {
@@ -386,7 +392,7 @@ fn build(h: HWND, inst: HINSTANCE) {
     btn(h, inst, "再翻訳", IDC_BTN_RETRANS);
     btn(h, inst, "削除", IDC_BTN_DEL_TRANS);
 
-    // 【解説結果】ブロック (下段全幅)
+    // 【解説結果】ブロック (3列: リスト/入力プロンプト/結果テキスト)
     label(h, inst, "【解説結果】", IDC_LBL_EXP);
     let exp = lv(h, inst, IDC_EXP_LV);
     add_col(exp, 0, "日時", 120);
@@ -394,6 +400,7 @@ fn build(h: HWND, inst: HINSTANCE) {
     add_col(exp, 2, "ms", 50);
     add_col(exp, 3, "tok入/出", 70);
     add_col(exp, 4, "解説文", 320);
+    detail_edit(h, inst, IDC_EXP_PROMPT);
     detail_edit(h, inst, IDC_EXP_DETAIL);
     // モデル選択・再解説・選択削除(ログビューア拡張 §2)
     let exp_combo = combo(h, inst, IDC_EXP_COMBO);
@@ -559,8 +566,9 @@ const ADD_GRP_H: i32 = GTOP + ADD_EDIT_H + 8;
 const SPLIT_T: i32 = 4;
 
 thread_local! {
-    /// 田の字スプリッターの位置 (グリッド領域に対する比率 0.0-1.0): (縦線Xの比率, 横線Yの比率)
-    static SPLIT: RefCell<(f32, f32)> = const { RefCell::new((0.5, 0.5)) };
+    /// 田の字スプリッターの位置 (グリッド領域に対する比率 0.0-1.0): (縦線Xの比率, 横線Yの比率)。
+    /// 既定は左右比2:3 (v0.4.8)。
+    static SPLIT: RefCell<(f32, f32)> = const { RefCell::new((0.4, 0.5)) };
     /// ドラッグ中のスプリッター軸 (1=縦線/左右, 2=横線/上下)
     static SPLIT_DRAG: RefCell<Option<u8>> = const { RefCell::new(None) };
 }
@@ -591,14 +599,16 @@ struct Geo {
     recog_list: RECT,
     recog_text: RECT,
     trans_list: RECT,
+    trans_prompt: RECT,
     trans_text: RECT,
     exp_list: RECT,
+    exp_prompt: RECT,
     exp_text: RECT,
     filter_group: RECT,
-    /// 上段(入力内容/読み取り結果)・下段(翻訳結果/解説結果)の見出しY
+    /// 上段(入力内容/翻訳結果)・下段(読み取り結果/解説結果)の見出しY (v0.4.8: 配置入替)
     label_y1: i32,
     label_y2: i32,
-    /// 読み取り結果のボタン行Y(上段) / 翻訳結果・解説結果のボタン行Y(下段)
+    /// 翻訳結果のボタン行Y(上段) / 読み取り結果・解説結果のボタン行Y(下段)
     row1_btn_y: i32,
     row2_btn_y: i32,
     /// 2列それぞれの左端X・列幅
@@ -609,6 +619,15 @@ struct Geo {
     split_h: RECT,
 }
 
+/// リスト/入力プロンプト/結果テキストの3列 (1:1:1、間に4pxの余白) を計算する
+fn three_cols(left: i32, w: i32, top: i32, bottom: i32) -> (RECT, RECT, RECT) {
+    let seg = (w - 8) / 3;
+    let list = RECT { left, top, right: left + seg, bottom };
+    let prompt = RECT { left: left + seg + 4, top, right: left + seg * 2 + 4, bottom };
+    let text = RECT { left: left + seg * 2 + 8, top, right: left + w, bottom };
+    (list, prompt, text)
+}
+
 fn geometry(h: HWND) -> Geo {
     let (grid_left, grid_top, grid_right, grid_bottom) = grid_bounds(h);
 
@@ -616,7 +635,7 @@ fn geometry(h: HWND) -> Geo {
     let filter_grp_w = 8 + 70 + 6 + 200 + 6 + 160 + 8;
     let filter_group = RECT { left: PAD, top: PAD, right: PAD + filter_grp_w, bottom: PAD + filter_grp_h };
 
-    // 田の字スプリッター(ドラッグで移動可能)
+    // 田の字スプリッター(ドラッグで移動可能)。既定は左右比2:3 (v0.4.8)。
     let (rx, ry) = SPLIT.with(|s| *s.borrow());
     let split_x = (grid_left + ((grid_right - grid_left) as f32 * rx) as i32)
         .clamp(grid_left + 200, grid_right - 200);
@@ -636,22 +655,22 @@ fn geometry(h: HWND) -> Geo {
     let content_top1 = label_y1 + LBL_H + 2;
     let content_top2 = label_y2 + LBL_H + 2;
 
-    // 【読み取り結果】(上段右): リスト/詳細 50/50 + ボタン行
+    // 【翻訳結果】(上段右): リスト/入力プロンプト/結果テキスト 1:1:1 + ボタン行 (v0.4.8: 位置入替)
     let row1_btn_y = row1_bottom - BTN_H;
-    let recog_content_bottom = row1_btn_y - 4;
-    let recog_list_w = (col_w[1] as f32 * 0.5) as i32;
-    let recog_list = RECT { left: col_x[1], top: content_top1, right: col_x[1] + recog_list_w, bottom: recog_content_bottom };
-    let recog_text = RECT { left: col_x[1] + recog_list_w + 4, top: content_top1, right: col_x[1] + col_w[1], bottom: recog_content_bottom };
+    let trans_content_bottom = row1_btn_y - 4;
+    let (trans_list, trans_prompt, trans_text) =
+        three_cols(col_x[1], col_w[1], content_top1, trans_content_bottom);
 
-    // 【翻訳結果】(下段左) / 【解説結果】(下段右): リスト/詳細 50/50 + ボタン行(共通Y)
+    // 【読み取り結果】(下段左): リスト/詳細 50/50 + ボタン行 (v0.4.8: 位置入替)
     let row2_btn_y = grid_bottom - BTN_H;
     let row2_content_bottom = row2_btn_y - 4;
-    let trans_list_w = (col_w[0] as f32 * 0.5) as i32;
-    let trans_list = RECT { left: col_x[0], top: content_top2, right: col_x[0] + trans_list_w, bottom: row2_content_bottom };
-    let trans_text = RECT { left: col_x[0] + trans_list_w + 4, top: content_top2, right: col_x[0] + col_w[0], bottom: row2_content_bottom };
-    let exp_list_w = (col_w[1] as f32 * 0.5) as i32;
-    let exp_list = RECT { left: col_x[1], top: content_top2, right: col_x[1] + exp_list_w, bottom: row2_content_bottom };
-    let exp_text = RECT { left: col_x[1] + exp_list_w + 4, top: content_top2, right: col_x[1] + col_w[1], bottom: row2_content_bottom };
+    let recog_list_w = (col_w[0] as f32 * 0.5) as i32;
+    let recog_list = RECT { left: col_x[0], top: content_top2, right: col_x[0] + recog_list_w, bottom: row2_content_bottom };
+    let recog_text = RECT { left: col_x[0] + recog_list_w + 4, top: content_top2, right: col_x[0] + col_w[0], bottom: row2_content_bottom };
+
+    // 【解説結果】(下段右): リスト/入力プロンプト/結果テキスト 1:1:1 + ボタン行
+    let (exp_list, exp_prompt, exp_text) =
+        three_cols(col_x[1], col_w[1], content_top2, row2_content_bottom);
 
     // 【入力内容】(上段左): リスト/詳細+画像 → 選択削除ボタン行 → 【入力追加】グループ
     let cap_area_bottom = row1_bottom - (BTN_H + 4) - (ADD_GRP_H + 4);
@@ -682,7 +701,8 @@ fn geometry(h: HWND) -> Geo {
     Geo {
         cap_list, cap_text, cap_img, cap_del_btn,
         add_group, add_edit, add_btn_save, add_btn_clear,
-        recog_list, recog_text, trans_list, trans_text, exp_list, exp_text,
+        recog_list, recog_text, trans_list, trans_prompt, trans_text,
+        exp_list, exp_prompt, exp_text,
         filter_group, label_y1, label_y2, row1_btn_y, row2_btn_y, col_x, col_w,
         split_v, split_h,
     }
@@ -725,10 +745,10 @@ fn layout(h: HWND) {
         mv(IDC_BTN_REFRESH, rc.right - PAD - 90 - gap - 100, row_y, 90, BTN_H);
         mv(IDC_BTN_CLEAR, rc.right - PAD - 100, row_y, 100, BTN_H);
 
-        // 見出しラベル (2x2)
+        // 見出しラベル (2x2)。v0.4.8: 上段=入力内容/翻訳結果、下段=読み取り結果/解説結果
         mv(IDC_LBL_CAP, g.col_x[0], g.label_y1, g.col_w[0], LBL_H);
-        mv(IDC_LBL_RECOG, g.col_x[1], g.label_y1, g.col_w[1], LBL_H);
-        mv(IDC_LBL_TRANS, g.col_x[0], g.label_y2, g.col_w[0], LBL_H);
+        mv(IDC_LBL_TRANS, g.col_x[1], g.label_y1, g.col_w[1], LBL_H);
+        mv(IDC_LBL_RECOG, g.col_x[0], g.label_y2, g.col_w[0], LBL_H);
         mv(IDC_LBL_EXP, g.col_x[1], g.label_y2, g.col_w[1], LBL_H);
 
         // 【入力内容】(上段左)
@@ -748,37 +768,41 @@ fn layout(h: HWND) {
         let (cx, cy, cw, ch) = r(&g.add_btn_clear);
         mv(IDC_BTN_ADD_CANCEL, cx, cy, cw, ch);
 
-        // 【読み取り結果】(上段右)
+        // 【読み取り結果】(下段左、v0.4.8: 位置入替)
         let (x2, y2, w2, h2) = r(&g.recog_list);
         mv(IDC_RECOG_LV, x2, y2, w2, h2);
         let (x3, y3, w3, h3) = r(&g.recog_text);
         mv(IDC_RECOG_DETAIL, x3, y3, w3, h3);
-        let mut x = g.col_x[1];
-        mv(IDC_OCR_COMBO, x, g.row1_btn_y, 105, 200);
+        let mut x = g.col_x[0];
+        mv(IDC_OCR_COMBO, x, g.row2_btn_y, 105, 200);
         x += 105 + 4;
-        mv(IDC_BTN_REOCR, x, g.row1_btn_y, 60, BTN_H);
+        mv(IDC_BTN_REOCR, x, g.row2_btn_y, 60, BTN_H);
         x += 60 + gap;
-        mv(IDC_BTN_DEL_RECOG, x, g.row1_btn_y, 50, BTN_H);
+        mv(IDC_BTN_DEL_RECOG, x, g.row2_btn_y, 50, BTN_H);
         x += 50 + gap;
-        let tag_w = (g.col_x[1] + g.col_w[1] - x - 70 - 4).max(60);
-        mv(IDC_TAG_EDIT, x, g.row1_btn_y, tag_w, BTN_H);
-        mv(IDC_BTN_SAVE_TAG, x + tag_w + 4, g.row1_btn_y, 70, BTN_H);
+        let tag_w = (g.col_x[0] + g.col_w[0] - x - 70 - 4).max(60);
+        mv(IDC_TAG_EDIT, x, g.row2_btn_y, tag_w, BTN_H);
+        mv(IDC_BTN_SAVE_TAG, x + tag_w + 4, g.row2_btn_y, 70, BTN_H);
 
-        // 【翻訳結果】(下段左)
+        // 【翻訳結果】(上段右、v0.4.8: 位置入替 + 3列表示)
         let (x4, y4, w4, h4) = r(&g.trans_list);
         mv(IDC_TRANS_LV, x4, y4, w4, h4);
+        let (xp4, yp4, wp4, hp4) = r(&g.trans_prompt);
+        mv(IDC_TRANS_PROMPT, xp4, yp4, wp4, hp4);
         let (x5, y5, w5, h5) = r(&g.trans_text);
         mv(IDC_TRANS_DETAIL, x5, y5, w5, h5);
-        let mut x = g.col_x[0];
-        mv(IDC_TR_COMBO, x, g.row2_btn_y, 105, 200);
+        let mut x = g.col_x[1];
+        mv(IDC_TR_COMBO, x, g.row1_btn_y, 105, 200);
         x += 105 + 4;
-        mv(IDC_BTN_RETRANS, x, g.row2_btn_y, 60, BTN_H);
+        mv(IDC_BTN_RETRANS, x, g.row1_btn_y, 60, BTN_H);
         x += 60 + gap;
-        mv(IDC_BTN_DEL_TRANS, x, g.row2_btn_y, 50, BTN_H);
+        mv(IDC_BTN_DEL_TRANS, x, g.row1_btn_y, 50, BTN_H);
 
-        // 【解説結果】(下段右)
+        // 【解説結果】(下段右、3列表示)
         let (x6, y6, w6, h6) = r(&g.exp_list);
         mv(IDC_EXP_LV, x6, y6, w6, h6);
+        let (xp6, yp6, wp6, hp6) = r(&g.exp_prompt);
+        mv(IDC_EXP_PROMPT, xp6, yp6, wp6, hp6);
         let (x7, y7, w7, h7) = r(&g.exp_text);
         mv(IDC_EXP_DETAIL, x7, y7, w7, h7);
         mv(IDC_EXP_COMBO, g.col_x[1], g.row2_btn_y, 160, 200);
@@ -962,7 +986,9 @@ fn reload() {
     lv_clear(dlg_item(h, IDC_EXP_LV));
     set_edit(IDC_CAP_DETAIL, "");
     set_edit(IDC_RECOG_DETAIL, "");
+    set_edit(IDC_TRANS_PROMPT, "");
     set_edit(IDC_TRANS_DETAIL, "");
+    set_edit(IDC_EXP_PROMPT, "");
     set_edit(IDC_EXP_DETAIL, "");
     unsafe {
         let _ = InvalidateRect(Some(h), None, true);
@@ -983,6 +1009,10 @@ fn on_cap_selected(idx: usize) {
     if let Some(t) = &cap.app_title {
         d.push_str(&format!("タイトル: {t}\n"));
     }
+    if let Some(ct) = &cap.control_type
+        && !ct.is_empty() {
+            d.push_str(&format!("コントロール種類: {ct}\n"));
+        }
     if let (Some(w), Some(hh)) = (cap.image_w, cap.image_h) {
         d.push_str(&format!("画像: {w}x{hh}\n"));
     }
@@ -1023,7 +1053,9 @@ fn on_cap_selected(idx: usize) {
     lv_clear(dlg_item(h, IDC_TRANS_LV));
     lv_clear(dlg_item(h, IDC_EXP_LV));
     set_edit(IDC_RECOG_DETAIL, "");
+    set_edit(IDC_TRANS_PROMPT, "");
     set_edit(IDC_TRANS_DETAIL, "");
+    set_edit(IDC_EXP_PROMPT, "");
     set_edit(IDC_EXP_DETAIL, "");
     if has_recog {
         lv_select(recog_lv, 0);
@@ -1067,11 +1099,17 @@ fn on_recog_selected(idx: usize) {
     lv_clear(trans_lv);
     for (i, t) in trans.iter().enumerate() {
         let dir = format!("{}→{}", t.source_lang, t.target_lang);
+        let tok = match (t.tokens_in, t.tokens_out) {
+            (Some(a), Some(b)) => format!("{a}/{b}"),
+            _ => String::new(),
+        };
         let text = if t.success { t.translated_text.clone() } else { format!("[エラー] {}", t.error) };
         lv_add_row(trans_lv, i as i32, &[
             fmt_ts(t.ts_ms),
             t.engine.clone(),
             dir,
+            t.llm_profile.clone().unwrap_or_default(),
+            tok,
             truncate(&text, 60),
         ]);
     }
@@ -1118,61 +1156,43 @@ fn on_recog_selected(idx: usize) {
     }
 }
 
-/// 翻訳結果選択時: 詳細(訳文+JSON)を表示
+/// 翻訳結果選択時: 2列目に送信JSON(入力プロンプト相当)、3列目に訳文のみを表示する
+/// (日時・エンジン・トークン等はリストビューの列で確認できるためテキストには含めない; v0.4.8)。
 fn on_trans_selected(idx: usize) {
     let t = STATE.with(|s| s.borrow().trans.get(idx).cloned());
     let Some(t) = t else { return };
     STATE.with(|s| s.borrow_mut().sel_trans = Some(idx));
 
-    let mut d = format!(
-        "日時: {}\nエンジン: {}",
-        fmt_ts(t.ts_ms), t.engine
-    );
-    if let Some(p) = &t.llm_profile {
-        d.push_str(&format!(" (プロファイル: {p})"));
-    }
-    d.push_str(&format!(
-        "\n方向: {}→{} / {}ms{}",
-        t.source_lang, t.target_lang, t.duration_ms,
-        if t.cache_hit { " / キャッシュ" } else { "" }
-    ));
-    if let (Some(a), Some(b)) = (t.tokens_in, t.tokens_out) {
-        d.push_str(&format!("\nトークン: 入力{a} / 出力{b}"));
-    }
-    if t.success {
-        d.push_str(&format!("\n\n【訳文】\n{}", t.translated_text));
+    let prompt = if !t.request_json.is_empty() {
+        pretty_json(&t.request_json)
     } else {
-        d.push_str(&format!("\n\n【エラー】\n{}", t.error));
-    }
-    if !t.request_json.is_empty() {
-        d.push_str(&format!("\n\n【送信JSON】\n{}", pretty_json(&t.request_json)));
-    }
-    if !t.response_json.is_empty() {
-        d.push_str(&format!("\n\n【受信JSON】\n{}", pretty_json(&t.response_json)));
-    }
-    set_edit(IDC_TRANS_DETAIL, &d);
+        String::new()
+    };
+    set_edit(IDC_TRANS_PROMPT, &prompt);
+
+    let body = if t.success {
+        t.translated_text.clone()
+    } else {
+        format!("[エラー]\n{}", t.error)
+    };
+    set_edit(IDC_TRANS_DETAIL, &body);
 }
 
-/// 解説結果選択時: 詳細(解説文+送信プロンプト)を表示
+/// 解説結果選択時: 2列目に送信プロンプト、3列目に解説文のみを表示する
+/// (日時・プロファイル・トークン等はリストビューの列で確認できるためテキストには含めない; v0.4.8)。
 fn on_exp_selected(idx: usize) {
     let e = STATE.with(|s| s.borrow().exps.get(idx).cloned());
     let Some(e) = e else { return };
     STATE.with(|s| s.borrow_mut().sel_exp = Some(idx));
 
-    let mut d = format!(
-        "日時: {}\nプロファイル: {} / {}ms",
-        fmt_ts(e.ts_ms), e.llm_profile, e.duration_ms
-    );
-    if let (Some(a), Some(b)) = (e.tokens_in, e.tokens_out) {
-        d.push_str(&format!("\nトークン: 入力{a} / 出力{b}"));
-    }
-    if e.success {
-        d.push_str(&format!("\n\n【解説】\n{}", e.explanation_text));
+    set_edit(IDC_EXP_PROMPT, &e.input_text);
+
+    let body = if e.success {
+        e.explanation_text.clone()
     } else {
-        d.push_str(&format!("\n\n【エラー】\n{}", e.error));
-    }
-    d.push_str(&format!("\n\n【送信プロンプト】\n{}", e.input_text));
-    set_edit(IDC_EXP_DETAIL, &d);
+        format!("[エラー]\n{}", e.error)
+    };
+    set_edit(IDC_EXP_DETAIL, &body);
 }
 
 /// PNGファイルを RGBA へデコード
@@ -1993,7 +2013,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     } else {
                         // 取得元アプリ名は一律【FocusTranslator】として記録する
                         let cid = logdb::log_capture(
-                            "manual", Some(MANUAL_APP_NAME), Some(MANUAL_APP_NAME), None, None, false,
+                            "manual", Some(MANUAL_APP_NAME), Some(MANUAL_APP_NAME), None, None, None, false,
                         );
                         if let Some(cid) = cid {
                             logdb::log_recognition(cid, "manual", "manual", 0, Some(&text), None, None);

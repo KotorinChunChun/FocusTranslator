@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
@@ -87,6 +87,7 @@ fn init_db() -> Result<Connection, String> {
             app_exe TEXT,
             app_title TEXT,
             uia_path TEXT,
+            control_type TEXT,
             image_path TEXT,
             image_w INTEGER,
             image_h INTEGER
@@ -138,7 +139,9 @@ fn init_db() -> Result<Connection, String> {
          CREATE INDEX IF NOT EXISTS idx_recog_capture ON recognitions(capture_id);
          CREATE INDEX IF NOT EXISTS idx_recog_hash ON recognitions(image_hash, engine);
          CREATE INDEX IF NOT EXISTS idx_tr_recog ON translations(recognition_id);
-         CREATE INDEX IF NOT EXISTS idx_ex_recog ON explanations(recognition_id);",
+         CREATE INDEX IF NOT EXISTS idx_ex_recog ON explanations(recognition_id);
+         CREATE INDEX IF NOT EXISTS idx_ex_input ON explanations(input_text);
+         CREATE INDEX IF NOT EXISTS idx_tr_req ON translations(request_json);",
     )
     .map_err(|e| e.to_string())?;
 
@@ -168,20 +171,22 @@ fn store_capture_image(guard: &Connection, capture_id: i64, img: &crate::capture
 }
 
 /// 入力(キャプチャ)ログを記録し capture_id を返す。画像は image が Some かつ debug 時のみPNG保存。
+#[allow(clippy::too_many_arguments)]
 pub fn log_capture(
     mode: &str,
     app_exe: Option<&str>,
     app_title: Option<&str>,
     uia_path: Option<&str>,
+    control_type: Option<&str>,
     image: Option<&crate::capture::Captured>,
     debug: bool,
 ) -> Option<i64> {
     let m = conn()?;
     let guard = m.lock().ok()?;
     if let Err(e) = guard.execute(
-        "INSERT INTO captures (ts_ms, mode, app_exe, app_title, uia_path, image_path, image_w, image_h)
-         VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL)",
-        rusqlite::params![now_ms(), mode, app_exe, app_title, uia_path],
+        "INSERT INTO captures (ts_ms, mode, app_exe, app_title, uia_path, control_type, image_path, image_w, image_h)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL)",
+        rusqlite::params![now_ms(), mode, app_exe, app_title, uia_path, control_type],
     ) {
         util::app_log(&format!("log_capture failed: {e}"));
         return None;
@@ -242,6 +247,40 @@ pub fn find_cached_recognition(image_hash: &str, engine: &str) -> Option<(i64, S
              ORDER BY ts_ms DESC LIMIT 1",
             rusqlite::params![image_hash, engine],
             |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()
+}
+
+/// 同一 request_json (APIキーはマスク済み) の成功済み翻訳結果があれば、その
+/// (recognition_id, translated_text) を返す (SPECv0.4.8追補: 翻訳APIキャッシュ)。
+/// 対象は request_json を記録するエンジン(deepl/google/llm)のみ。最新のものを優先する。
+pub fn find_cached_translation(request_json: &str) -> Option<(i64, String)> {
+    let m = conn()?;
+    let guard = m.lock().ok()?;
+    guard
+        .query_row(
+            "SELECT recognition_id, translated_text FROM translations
+             WHERE request_json = ?1 AND success = 1 AND translated_text IS NOT NULL
+             ORDER BY ts_ms DESC LIMIT 1",
+            rusqlite::params![request_json],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()
+}
+
+/// 同一 input_text (送信プロンプト全文) の成功済み解説結果があれば、その
+/// (recognition_id, llm_profile, explanation_text) を返す (SPECv0.4.8追補: 解説APIキャッシュ)。
+/// 最新のものを優先する。
+pub fn find_cached_explanation(input_text: &str) -> Option<(i64, String, String)> {
+    let m = conn()?;
+    let guard = m.lock().ok()?;
+    guard
+        .query_row(
+            "SELECT recognition_id, llm_profile, explanation_text FROM explanations
+             WHERE input_text = ?1 AND success = 1 AND explanation_text IS NOT NULL
+             ORDER BY ts_ms DESC LIMIT 1",
+            rusqlite::params![input_text],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .ok()
 }
@@ -345,6 +384,7 @@ pub struct CaptureRow {
     pub app_exe: Option<String>,
     pub app_title: Option<String>,
     pub uia_path: Option<String>,
+    pub control_type: Option<String>,
     pub image_path: Option<String>,
     pub image_w: Option<i64>,
     pub image_h: Option<i64>,
@@ -407,13 +447,14 @@ fn map_capture_row(r: &rusqlite::Row) -> rusqlite::Result<CaptureRow> {
         app_exe: r.get(3)?,
         app_title: r.get(4)?,
         uia_path: r.get(5)?,
-        image_path: r.get(6)?,
-        image_w: r.get(7)?,
-        image_h: r.get(8)?,
+        control_type: r.get(6)?,
+        image_path: r.get(7)?,
+        image_w: r.get(8)?,
+        image_h: r.get(9)?,
     })
 }
 
-const CAPTURE_COLS: &str = "id, ts_ms, mode, app_exe, app_title, uia_path, image_path, image_w, image_h";
+const CAPTURE_COLS: &str = "id, ts_ms, mode, app_exe, app_title, uia_path, control_type, image_path, image_w, image_h";
 
 /// 入力履歴を新しい順に検索取得。query は配下の原文/訳文の部分一致、app_exe は完全一致。
 /// 両方空文字なら全件 (最大 limit 件)。
@@ -715,7 +756,7 @@ mod tests {
 
         // 4工程ツリー: capture → recognition → translation / explanation
         let cid = log_capture(
-            "hold", Some("game.exe"), Some("Game Window"), Some("Root > Panel"), None, false,
+            "hold", Some("game.exe"), Some("Game Window"), Some("Root > Panel"), Some("Edit"), None, false,
         )
         .expect("capture id");
         let rid = log_recognition(cid, "ocr", "win", 200, Some("hello"), None, Some("hash-a")).expect("recognition id");
@@ -729,6 +770,7 @@ mod tests {
         let caps = search_captures("", "", 10);
         assert_eq!(caps.len(), 1);
         assert_eq!(caps[0].app_exe.as_deref(), Some("game.exe"));
+        assert_eq!(caps[0].control_type.as_deref(), Some("Edit"), "コントロール種類が記録される");
         let recs = recognitions_for(cid);
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].source_text, "hello");
@@ -763,6 +805,20 @@ mod tests {
         assert_eq!(find_cached_recognition("hash-a", "paddle"), None, "エンジンが違えばヒットしない");
         assert_eq!(find_cached_recognition("hash-x", "win"), None, "ハッシュが違えばヒットしない");
 
+        // 翻訳・解説のDBキャッシュ検索 (SPECv0.4.8追補: API消費回避)
+        assert_eq!(
+            find_cached_translation("{\"req\":1}"),
+            Some((rid, "こんにちは".to_string())),
+            "同一request_jsonの成功済み翻訳がヒットする"
+        );
+        assert_eq!(find_cached_translation("{\"req\":no-match}"), None);
+        assert_eq!(
+            find_cached_explanation("prompt text"),
+            Some((rid, "prof1".to_string(), "解説文".to_string())),
+            "同一input_textの成功済み解説がヒットする(失敗ログは無視)"
+        );
+        assert_eq!(find_cached_explanation("no-match"), None);
+
         // CASCADE削除: recognition を消すと配下の翻訳・解説も消える
         delete_recognition(rid);
         assert_eq!(translations_for(rid).len(), 0);
@@ -777,7 +833,7 @@ mod tests {
         // ローテーション: captures 件数で絞り、配下はCASCADE
         let mut last_rid = 0;
         for i in 0..4 {
-            let c = log_capture("hold", None, None, None, None, false).unwrap();
+            let c = log_capture("hold", None, None, None, None, None, false).unwrap();
             last_rid = log_recognition(c, "ocr", "win", 100, Some(&format!("line{i}")), None, None).unwrap();
         }
         rotate(2);
