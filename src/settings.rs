@@ -181,7 +181,7 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let gx = col_x[0];
         let lx = inner(gx);
         let cx = gx + 152;
-        group(h, inst, "1. 操作", gx, 8, COL_W, 146);
+        group(h, inst, "1. 操作", gx, 8, COL_W, 184);
         let mut y = 8 + GTOP;
         label(h, inst, "キャプチャキー", lx, y + 2, 130);
         combo(h, inst, cx, y, 90, IDC_HOLDKEY);
@@ -206,8 +206,8 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let gx = col_x[0];
         let lx = inner(gx);
         let cx = gx + 152;
-        group(h, inst, "2. OCR設定", gx, 162, COL_W, 176);
-        let mut y = 162 + GTOP;
+        group(h, inst, "2. OCR設定", gx, 200, COL_W, 176);
+        let mut y = 200 + GTOP;
         label(h, inst, "既定OCRエンジン", lx, y + 2, 130);
         combo(h, inst, cx, y, 170, IDC_OCR);
         y += STEP;
@@ -390,6 +390,17 @@ fn get_text(h: HWND, id: i32) -> String {
     }
 }
 
+/// マルチラインEDITへの書込み: Win32 EDITは改行に\r\nを要するため\nを正規化して変換する
+fn set_multiline_text(h: HWND, id: i32, text: &str) {
+    let normalized = text.replace("\r\n", "\n").replace('\n', "\r\n");
+    set_text(h, id, &normalized);
+}
+
+/// マルチラインEDITからの読込み: 保存データは\n改行で統一する
+fn get_multiline_text(h: HWND, id: i32) -> String {
+    get_text(h, id).replace("\r\n", "\n")
+}
+
 fn combo_fill(h: HWND, id: i32, items: &[&str], selected: usize) {
     unsafe {
         let ctl = get_dlg_item(h, id);
@@ -568,9 +579,9 @@ fn load_profile_to_ui(h: HWND, idx: usize) {
             set_text(h, IDC_PROF_MODEL, &prof.model_name);
             set_text(h, IDC_PROF_URL, &prof.api_url);
             set_text(h, IDC_PROF_KEY, &prof.get_key());
-            set_text(h, IDC_PROF_PROMPT_OCR, &prof.ocr_prompt);
-            set_text(h, IDC_PROF_PROMPT_TR, &prof.translate_prompt);
-            set_text(h, IDC_PROF_PROMPT_EXP, &prof.explain_prompt);
+            set_multiline_text(h, IDC_PROF_PROMPT_OCR, &prof.ocr_prompt);
+            set_multiline_text(h, IDC_PROF_PROMPT_TR, &prof.translate_prompt);
+            set_multiline_text(h, IDC_PROF_PROMPT_EXP, &prof.explain_prompt);
         }
     });
 }
@@ -894,9 +905,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     set_text(h, IDC_PROF_URL, "");
                     set_text(h, IDC_PROF_KEY, "");
                     set_text(h, IDC_PROF_MODEL, "");
-                    set_text(h, IDC_PROF_PROMPT_OCR, crate::config::DEFAULT_GEMINI_OCR_PROMPT);
-                    set_text(h, IDC_PROF_PROMPT_TR, crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT);
-                    set_text(h, IDC_PROF_PROMPT_EXP, crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT);
+                    set_multiline_text(h, IDC_PROF_PROMPT_OCR, crate::config::DEFAULT_GEMINI_OCR_PROMPT);
+                    set_multiline_text(h, IDC_PROF_PROMPT_TR, crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT);
+                    set_multiline_text(h, IDC_PROF_PROMPT_EXP, crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT);
                     combo_select(h, IDC_PROF_TYPE, 0);
                 }
                 IDC_PROF_SAVE | IDC_PROF_SAVEAS => {
@@ -908,9 +919,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         model_name: get_text(h, IDC_PROF_MODEL).trim().to_string(),
                         api_url: get_text(h, IDC_PROF_URL).trim().to_string(),
                         api_key_enc: String::new(),
-                        ocr_prompt: get_text(h, IDC_PROF_PROMPT_OCR),
-                        translate_prompt: get_text(h, IDC_PROF_PROMPT_TR),
-                        explain_prompt: get_text(h, IDC_PROF_PROMPT_EXP),
+                        ocr_prompt: get_multiline_text(h, IDC_PROF_PROMPT_OCR),
+                        translate_prompt: get_multiline_text(h, IDC_PROF_PROMPT_TR),
+                        explain_prompt: get_multiline_text(h, IDC_PROF_PROMPT_EXP),
                     };
                     prof.set_key(get_text(h, IDC_PROF_KEY).trim());
 
