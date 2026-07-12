@@ -4,6 +4,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, GetDlgItem, GetWindowTextLengthW, GetWindowTextW, HMENU, SetWindowTextW,
     WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
     SendMessageW, BS_AUTOCHECKBOX, CBS_DROPDOWNLIST,
+    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
+    WM_SETFONT,
 };
 use windows::Win32::UI::Controls::{
     EM_SETPASSWORDCHAR,
@@ -169,4 +171,68 @@ pub fn checkbox(parent: HWND, instance: HINSTANCE, text: &str, x: i32, y: i32, w
         22,
         id,
     )
+}
+
+/// 指定IDの子コントロールHWNDを取得する
+pub fn get_dlg_item(parent: HWND, id: i32) -> HWND {
+    unsafe {
+        GetDlgItem(Some(parent), id).unwrap_or_default()
+    }
+}
+
+
+/// コンボボックスに項目を追加する
+pub fn combo_add_item(cb: HWND, text: &str) {
+    unsafe {
+        let wide = to_wide(text);
+        SendMessageW(cb, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide.as_ptr() as isize)));
+    }
+}
+
+/// コンボボックスの選択インデックスを設定する
+pub fn combo_set_sel(cb: HWND, idx: usize) {
+    unsafe {
+        SendMessageW(cb, CB_SETCURSEL, Some(WPARAM(idx)), Some(LPARAM(0)));
+    }
+}
+
+/// コンボボックスの現在の選択インデックスを取得する
+pub fn combo_get_sel(cb: HWND) -> usize {
+    unsafe {
+        let r = SendMessageW(cb, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
+        if r.0 < 0 { 0 } else { r.0 as usize }
+    }
+}
+
+/// コンボボックスの全項目をクリアする
+pub fn combo_reset_content(cb: HWND) {
+    unsafe {
+        SendMessageW(cb, CB_RESETCONTENT, Some(WPARAM(0)), Some(LPARAM(0)));
+    }
+}
+
+/// コンボボックスの指定インデックスのテキストを取得する
+pub fn combo_get_item_text(cb: HWND, idx: usize) -> String {
+    unsafe {
+        let len = SendMessageW(cb, CB_GETLBTEXTLEN, Some(WPARAM(idx)), Some(LPARAM(0))).0;
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; (len + 1) as usize];
+        SendMessageW(
+            cb,
+            CB_GETLBTEXT,
+            Some(WPARAM(idx)),
+            Some(LPARAM(buf.as_mut_ptr() as isize)),
+        );
+        String::from_utf16_lossy(&buf[..len as usize])
+    }
+}
+
+/// EnumChildWindows で使われるフォント設定用コールバック (UIフォントを適用する)
+pub unsafe extern "system" fn set_font_proc(child: HWND, lparam: LPARAM) -> windows::core::BOOL {
+    use windows::Win32::Graphics::Gdi::HFONT;
+    let hfont = HFONT(lparam.0 as *mut _);
+    SendMessageW(child, WM_SETFONT, Some(WPARAM(hfont.0 as usize)), Some(LPARAM(1)));
+    windows::core::BOOL(1)
 }

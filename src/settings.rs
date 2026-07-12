@@ -349,79 +349,30 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     }
 }
 
-unsafe extern "system" fn set_font_proc(child: HWND, lparam: LPARAM) -> windows::core::BOOL {
-    unsafe {
-        SendMessageW(child, WM_SETFONT, Some(WPARAM(lparam.0 as usize)), Some(LPARAM(1)));
-    }
-    true.into()
-}
-
-fn get_dlg_item(h: HWND, id: i32) -> HWND {
-    unsafe {
-        windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default()
-    }
-}
-
-fn set_text(h: HWND, id: i32, text: &str) {
-    unsafe {
-        let wide = to_wide(text);
-        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
-            get_dlg_item(h, id),
-            PCWSTR(wide.as_ptr()),
-        );
-    }
-}
-
-fn get_text(h: HWND, id: i32) -> String {
-    unsafe {
-        let ctl = get_dlg_item(h, id);
-        let len = GetWindowTextLengthW(ctl);
-        if len <= 0 {
-            return String::new();
-        }
-        let mut buf = vec![0u16; (len + 1) as usize];
-        let n = GetWindowTextW(ctl, &mut buf);
-        String::from_utf16_lossy(&buf[..n.max(0) as usize])
-    }
-}
-
 fn combo_fill(h: HWND, id: i32, items: &[&str], selected: usize) {
-    unsafe {
-        let ctl = get_dlg_item(h, id);
-        for item in items {
-            let wide = to_wide(item);
-            SendMessageW(
-                ctl,
-                CB_ADDSTRING,
-                Some(WPARAM(0)),
-                Some(LPARAM(wide.as_ptr() as isize)),
-            );
-        }
-        SendMessageW(ctl, CB_SETCURSEL, Some(WPARAM(selected)), Some(LPARAM(0)));
+    let cb = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default() };
+    for item in items {
+        combo_add_item(cb, item);
     }
+    combo_set_sel(cb, selected);
 }
 
 fn combo_sel(h: HWND, id: i32) -> usize {
-    unsafe {
-        let r = SendMessageW(get_dlg_item(h, id), CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
-        if r.0 < 0 { 0 } else { r.0 as usize }
-    }
+    let cb = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default() };
+    combo_get_sel(cb)
 }
 
 fn check_set(h: HWND, id: i32, checked: bool) {
     unsafe {
-        SendMessageW(
-            get_dlg_item(h, id),
-            BM_SETCHECK,
-            Some(WPARAM(if checked { 1 } else { 0 })),
-            Some(LPARAM(0)),
-        );
+        let ctl = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default();
+        SendMessageW(ctl, BM_SETCHECK, Some(WPARAM(if checked { 1 } else { 0 })), Some(LPARAM(0)));
     }
 }
 
 fn check_get(h: HWND, id: i32) -> bool {
     unsafe {
-        SendMessageW(get_dlg_item(h, id), BM_GETCHECK, Some(WPARAM(0)), Some(LPARAM(0))).0 == 1
+        let ctl = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default();
+        SendMessageW(ctl, BM_GETCHECK, Some(WPARAM(0)), Some(LPARAM(0))).0 == 1
     }
 }
 
@@ -433,9 +384,9 @@ fn populate(h: HWND) {
         &HOLD_KEYS,
         HOLD_KEYS.iter().position(|k| *k == cfg.hold_key).unwrap_or(0),
     );
-    set_text(h, IDC_POLL, &cfg.poll_ms.to_string());
-    set_text(h, IDC_PIN_HOLD, &cfg.pin_hold_seconds.to_string());
-    set_text(h, IDC_HOTKEY, &cfg.region_hotkey);
+    set_ctl_text(h, IDC_POLL, &cfg.poll_ms.to_string());
+    set_ctl_text(h, IDC_PIN_HOLD, &cfg.pin_hold_seconds.to_string());
+    set_ctl_text(h, IDC_HOTKEY, &cfg.region_hotkey);
     combo_fill(
         h,
         IDC_OCR,
@@ -460,8 +411,8 @@ fn populate(h: HWND) {
             .position(|v| v.key() == cfg.local_model_variant)
             .unwrap_or(0),
     );
-    set_text(h, IDC_DEEPL, &cfg.deepl_key());
-    set_text(h, IDC_GOOGLE, &cfg.google_key());
+    set_ctl_text(h, IDC_DEEPL, &cfg.deepl_key());
+    set_ctl_text(h, IDC_GOOGLE, &cfg.google_key());
 
     PROFILES.with(|p| *p.borrow_mut() = cfg.api_profiles.clone());
     let sel = cfg.api_profiles.iter().position(|p| p.name == cfg.active_api_profile).unwrap_or(0);
@@ -471,8 +422,8 @@ fn populate(h: HWND) {
     combo_fill(h, IDC_PROF_TYPE, &API_TYPE_DISP, 0);
 
     load_profile_to_ui(h, sel);
-    set_text(h, IDC_YOMI, &cfg.yomitoku_url);
-    set_text(h, IDC_NDL, &cfg.ndl_url);
+    set_ctl_text(h, IDC_YOMI, &cfg.yomitoku_url);
+    set_ctl_text(h, IDC_NDL, &cfg.ndl_url);
     check_set(h, IDC_AUTOSTART, cfg.autostart);
     check_set(h, IDC_PERFLOG, cfg.perf_log);
     check_set(h, IDC_LOG_ENABLED, cfg.log_enabled);
@@ -485,9 +436,9 @@ fn populate(h: HWND) {
         HOLD_KEYS.iter().position(|k| *k == cfg.detect_key).unwrap_or(1), // 既定 LCtrl
     );
     check_set(h, IDC_PREVIEW_DETECT_MODE, cfg.preview_detect_enabled);
-    set_text(h, IDC_LOG_MAX, &cfg.log_max_records.to_string());
+    set_ctl_text(h, IDC_LOG_MAX, &cfg.log_max_records.to_string());
     let glossary_text = cfg.glossary.iter().map(|e| format!("{}={}", e.source, e.target)).collect::<Vec<_>>().join("\r\n");
-    set_text(h, IDC_GLOSSARY, &glossary_text);
+    set_ctl_text(h, IDC_GLOSSARY, &glossary_text);
     refresh_paddle_status(h);
     refresh_onnx_status(h);
 }
@@ -495,9 +446,9 @@ fn populate(h: HWND) {
 /// PaddleOCRの導入状況をステータス欄・ボタンに反映する
 fn refresh_paddle_status(h: HWND) {
     let installed = crate::paddle_install::installed();
-    set_text(h, IDC_PADDLE_STATUS, if installed { "導入済み" } else { "未導入" });
+    set_ctl_text(h, IDC_PADDLE_STATUS, if installed { "導入済み" } else { "未導入" });
     unsafe {
-        let _ = EnableWindow(get_dlg_item(h, IDC_PADDLE_INSTALL), !installed);
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_PADDLE_INSTALL).unwrap_or_default(), !installed);
     }
 }
 
@@ -510,9 +461,9 @@ fn selected_onnx_variant(h: HWND) -> crate::onnx_translate_install::Variant {
 /// ローカルONNX翻訳モデル(選択中の種別)の導入状況をステータス欄・ボタンに反映する
 fn refresh_onnx_status(h: HWND) {
     let installed = crate::onnx_translate_install::installed(selected_onnx_variant(h));
-    set_text(h, IDC_ONNX_STATUS, if installed { "導入済み" } else { "未導入" });
+    set_ctl_text(h, IDC_ONNX_STATUS, if installed { "導入済み" } else { "未導入" });
     unsafe {
-        let _ = EnableWindow(get_dlg_item(h, IDC_ONNX_INSTALL), !installed);
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_ONNX_INSTALL).unwrap_or_default(), !installed);
     }
 }
 
@@ -530,20 +481,11 @@ fn api_type_index(t: &crate::config::ApiType) -> usize {
 
 /// コンボの内容を全消去する
 fn combo_reset(h: HWND, id: i32) {
-    unsafe {
-        SendMessageW(get_dlg_item(h, id), windows::Win32::UI::WindowsAndMessaging::CB_RESETCONTENT, None, None);
-    }
+    combo_reset_content(unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default() });
 }
 
 fn combo_select(h: HWND, id: i32, idx: usize) {
-    unsafe {
-        SendMessageW(
-            get_dlg_item(h, id),
-            windows::Win32::UI::WindowsAndMessaging::CB_SETCURSEL,
-            Some(WPARAM(idx)),
-            Some(LPARAM(0)),
-        );
-    }
+    combo_set_sel(unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default() }, idx);
 }
 
 /// PROFILES の内容でプロファイル一覧コンボを再構築する
@@ -559,11 +501,11 @@ fn load_profile_to_ui(h: HWND, idx: usize) {
     PROFILES.with(|p| {
         let profiles = p.borrow();
         if let Some(prof) = profiles.get(idx) {
-            set_text(h, IDC_PROF_NAME, &prof.name);
+            set_ctl_text(h, IDC_PROF_NAME, &prof.name);
             combo_select(h, IDC_PROF_TYPE, api_type_index(&prof.api_type));
-            set_text(h, IDC_PROF_MODEL, &prof.model_name);
-            set_text(h, IDC_PROF_URL, &prof.api_url);
-            set_text(h, IDC_PROF_KEY, &prof.get_key());
+            set_ctl_text(h, IDC_PROF_MODEL, &prof.model_name);
+            set_ctl_text(h, IDC_PROF_URL, &prof.api_url);
+            set_ctl_text(h, IDC_PROF_KEY, &prof.get_key());
         }
     });
 }
@@ -577,9 +519,9 @@ fn start_install(
     install_fn: impl FnOnce() -> Result<(), String> + Send + 'static,
 ) {
     unsafe {
-        let _ = EnableWindow(get_dlg_item(h, button_id), false);
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), button_id).unwrap_or_default(), false);
     }
-    set_text(h, status_id, "ダウンロード中…");
+    set_ctl_text(h, status_id, "ダウンロード中…");
     let hwnd_isize = h.0 as isize;
     std::thread::spawn(move || {
         let result = install_fn();
@@ -655,16 +597,16 @@ fn profile_ui_dirty(h: HWND) -> bool {
     if PENDING_NEW.with(|f| *f.borrow()) {
         return true;
     }
-    let name = get_text(h, IDC_PROF_NAME).trim().to_string();
+    let name = get_ctl_text(h, IDC_PROF_NAME).trim().to_string();
     PROFILES.with(|p| {
         let profiles = p.borrow();
         let Some(prof) = profiles.iter().find(|x| x.name == name) else {
             return true;
         };
         prof.api_type != API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)]
-            || prof.model_name != get_text(h, IDC_PROF_MODEL).trim()
-            || prof.api_url != get_text(h, IDC_PROF_URL).trim()
-            || prof.get_key() != get_text(h, IDC_PROF_KEY).trim()
+            || prof.model_name != get_ctl_text(h, IDC_PROF_MODEL).trim()
+            || prof.api_url != get_ctl_text(h, IDC_PROF_URL).trim()
+            || prof.get_key() != get_ctl_text(h, IDC_PROF_KEY).trim()
     })
 }
 
@@ -672,7 +614,7 @@ fn profile_ui_dirty(h: HWND) -> bool {
 /// プロンプトはUIに無いため、新規なら既定値、既存なら保存済みの値を引き継ぐ (SPECv0.4.7 §6.1)。
 /// 成功時は該当プロファイルのindexを返し、コンボを再構築して設定も即保存する。
 fn save_profile_from_ui(h: HWND, save_as: bool) -> Option<usize> {
-    let name = get_text(h, IDC_PROF_NAME).trim().to_string();
+    let name = get_ctl_text(h, IDC_PROF_NAME).trim().to_string();
     if name.is_empty() {
         unsafe {
             MessageBoxW(Some(h), w!("API登録名を入力してください"), w!("エラー"), MB_OK);
@@ -702,14 +644,14 @@ fn save_profile_from_ui(h: HWND, save_as: bool) -> Option<usize> {
     let mut prof = crate::config::ApiProfile {
         name: name.clone(),
         api_type: API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)].clone(),
-        model_name: get_text(h, IDC_PROF_MODEL).trim().to_string(),
-        api_url: get_text(h, IDC_PROF_URL).trim().to_string(),
+        model_name: get_ctl_text(h, IDC_PROF_MODEL).trim().to_string(),
+        api_url: get_ctl_text(h, IDC_PROF_URL).trim().to_string(),
         api_key_enc: String::new(),
         ocr_prompt: ocr_p,
         translate_prompt: tr_p,
         explain_prompt: exp_p,
     };
-    prof.set_key(get_text(h, IDC_PROF_KEY).trim());
+    prof.set_key(get_ctl_text(h, IDC_PROF_KEY).trim());
 
     let saved = PROFILES.with(|p| {
         let mut profiles = p.borrow_mut();
@@ -757,7 +699,7 @@ fn open_prompt_editor(h: HWND, kind: crate::prompt_edit::PromptKind) {
             return;
         }
     }
-    let name = get_text(h, IDC_PROF_NAME).trim().to_string();
+    let name = get_ctl_text(h, IDC_PROF_NAME).trim().to_string();
     let (profiles, active_idx) = PROFILES.with(|p| {
         let profiles = p.borrow();
         let list: Vec<crate::prompt_edit::ProfilePrompt> = profiles
@@ -822,9 +764,9 @@ fn open_url(h: HWND, url: &str) {
 fn save(h: HWND, ask_consent: bool) {
     let mut cfg = Config::load();
     cfg.hold_key = HOLD_KEYS[combo_sel(h, IDC_HOLDKEY).min(HOLD_KEYS.len() - 1)].to_string();
-    cfg.poll_ms = get_text(h, IDC_POLL).trim().parse().unwrap_or(100).clamp(20, 1000);
-    cfg.pin_hold_seconds = get_text(h, IDC_PIN_HOLD).trim().parse().unwrap_or(3);
-    let hk = get_text(h, IDC_HOTKEY);
+    cfg.poll_ms = get_ctl_text(h, IDC_POLL).trim().parse().unwrap_or(100).clamp(20, 1000);
+    cfg.pin_hold_seconds = get_ctl_text(h, IDC_PIN_HOLD).trim().parse().unwrap_or(3);
+    let hk = get_ctl_text(h, IDC_HOTKEY);
     if crate::config::parse_hotkey(&hk).is_some() {
         cfg.region_hotkey = hk.trim().to_string();
     }
@@ -833,8 +775,8 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.source_lang = LANGS[combo_sel(h, IDC_SRCLANG).min(LANGS.len() - 1)].to_string();
     cfg.target_lang = LANGS[combo_sel(h, IDC_LANG).min(LANGS.len() - 1)].to_string();
     cfg.local_model_variant = selected_onnx_variant(h).key().to_string();
-    cfg.deepl_key_enc = util::dpapi_encrypt(get_text(h, IDC_DEEPL).trim());
-    cfg.google_key_enc = util::dpapi_encrypt(get_text(h, IDC_GOOGLE).trim());
+    cfg.deepl_key_enc = util::dpapi_encrypt(get_ctl_text(h, IDC_DEEPL).trim());
+    cfg.google_key_enc = util::dpapi_encrypt(get_ctl_text(h, IDC_GOOGLE).trim());
     
     PROFILES.with(|p| {
         cfg.api_profiles = p.borrow().clone();
@@ -844,8 +786,8 @@ fn save(h: HWND, ask_consent: bool) {
         cfg.active_api_profile = prof.name.clone();
     }
     
-    cfg.yomitoku_url = get_text(h, IDC_YOMI).trim().to_string();
-    cfg.ndl_url = get_text(h, IDC_NDL).trim().to_string();
+    cfg.yomitoku_url = get_ctl_text(h, IDC_YOMI).trim().to_string();
+    cfg.ndl_url = get_ctl_text(h, IDC_NDL).trim().to_string();
     cfg.autostart = check_get(h, IDC_AUTOSTART);
     cfg.perf_log = check_get(h, IDC_PERFLOG);
     cfg.log_enabled = check_get(h, IDC_LOG_ENABLED);
@@ -853,9 +795,9 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.detect_enabled = check_get(h, IDC_DETECT_MODE);
     cfg.detect_key = HOLD_KEYS[combo_sel(h, IDC_DETECT_KEY).min(HOLD_KEYS.len() - 1)].to_string();
     cfg.preview_detect_enabled = check_get(h, IDC_PREVIEW_DETECT_MODE);
-    cfg.log_max_records = get_text(h, IDC_LOG_MAX).trim().parse().unwrap_or(5000).clamp(100, 100000);
+    cfg.log_max_records = get_ctl_text(h, IDC_LOG_MAX).trim().parse().unwrap_or(5000).clamp(100, 100000);
     
-    let glos_text = get_text(h, IDC_GLOSSARY);
+    let glos_text = get_ctl_text(h, IDC_GLOSSARY);
     cfg.glossary = glos_text.lines().filter_map(|line| {
         let parts: Vec<&str> = line.splitn(2, '=').collect();
         if parts.len() == 2 {
@@ -1045,16 +987,16 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         } else {
                             // 種別切替: モデル名・URLをその種別の既定値に置き換える
                             let t = &API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)];
-                            set_text(h, IDC_PROF_MODEL, t.default_model());
-                            set_text(h, IDC_PROF_URL, t.default_url());
+                            set_ctl_text(h, IDC_PROF_MODEL, t.default_model());
+                            set_ctl_text(h, IDC_PROF_URL, t.default_url());
                         }
                     }
                 }
                 IDC_PROF_NEW => {
-                    set_text(h, IDC_PROF_NAME, "");
-                    set_text(h, IDC_PROF_URL, "");
-                    set_text(h, IDC_PROF_KEY, "");
-                    set_text(h, IDC_PROF_MODEL, "");
+                    set_ctl_text(h, IDC_PROF_NAME, "");
+                    set_ctl_text(h, IDC_PROF_URL, "");
+                    set_ctl_text(h, IDC_PROF_KEY, "");
+                    set_ctl_text(h, IDC_PROF_MODEL, "");
                     combo_select(h, IDC_PROF_TYPE, 0);
                     // プロンプトはUI欄が無いため、保存時に既定値 (DEFAULT_GEMINI_*) を使う
                     PENDING_NEW.with(|f| *f.borrow_mut() = true);
@@ -1095,7 +1037,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 }
                 IDC_TEST_YOMI | IDC_TEST_NDL => {
                     let url =
-                        get_text(h, if id == IDC_TEST_YOMI { IDC_YOMI } else { IDC_NDL });
+                        get_ctl_text(h, if id == IDC_TEST_YOMI { IDC_YOMI } else { IDC_NDL });
                     let ok = crate::ocr::health_check(&url);
                     unsafe {
                         if ok {
