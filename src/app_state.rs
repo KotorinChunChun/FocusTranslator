@@ -382,6 +382,8 @@ fn tick_detect() {
 
 /// 認識サイクルの開始準備
 fn start_cycle_params(app: &mut App) -> Option<(u64, i32, i32, isize, Config, isize)> {
+    // 画像編集画面を開いたまま新規キャプチャした場合は、古い編集セッションを破棄してから開始する。
+    overlay::exit_edit_mode();
     let mut pt = POINT::default();
     unsafe {
         let _ = GetCursorPos(&mut pt);
