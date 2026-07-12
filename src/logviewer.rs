@@ -7,7 +7,7 @@ use crate::logdb::{self, CaptureRow, ExplainRow, RecogRow, TransRow};
 use crate::ui_helpers::*;
 use crate::util::to_wide;
 use std::cell::RefCell;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLOR_BTNFACE, CreateFontW, DEFAULT_CHARSET,
     DEFAULT_PITCH, DIB_RGB_COLORS, FF_DONTCARE, FW_NORMAL, GetMonitorInfoW, HALFTONE, HBRUSH,
@@ -22,16 +22,21 @@ use windows::Win32::UI::Controls::{
     LVN_ITEMCHANGED, LVN_KEYDOWN, NMLVKEYDOWN, LVS_EX_FULLROWSELECT, LVS_REPORT,
     LVS_SHOWSELALWAYS, LVS_SINGLESEL, NMHDR,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_DELETE};
+use windows::Win32::Graphics::Gdi::ScreenToClient;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_DELETE,
+};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CW_USEDEFAULT, CallWindowProcW,
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_WNDPROC, GetClientRect, GetDlgItem,
-    GetWindowRect, HMENU, IDC_ARROW, IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO,
-    MessageBoxW, SWP_NOACTIVATE, SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE,
-    WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NOTIFY, WM_SIZE, WNDCLASSW, WS_BORDER,
-    WS_CHILD, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_WNDPROC, GetClientRect, GetCursorPos,
+    GetDlgItem, GetWindowRect, GetWindowTextLengthW, HMENU, IDC_ARROW, IDC_SIZENS, IDC_SIZEWE,
+    IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW, SWP_NOACTIVATE,
+    SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR,
+    WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -65,6 +70,20 @@ const IDC_BTN_SAVE_TAG: i32 = 235;
 const IDC_TR_COMBO: i32 = 221;
 const IDC_BTN_RETRANS: i32 = 223;
 const IDC_BTN_DEL_TRANS: i32 = 226;
+// テキスト追加(ログビューア拡張 §1): 常時表示の3行テキストボックス+追加+クリア
+const IDC_ADD_TEXT_EDIT: i32 = 237;
+const IDC_BTN_ADD_SAVE: i32 = 238; // "追加"
+const IDC_BTN_ADD_CANCEL: i32 = 239; // "クリア"
+// 解説結果ブロックのモデル選択・再解説・削除(ログビューア拡張 §2)
+const IDC_EXP_COMBO: i32 = 244;
+const IDC_BTN_REEXPLAIN: i32 = 245;
+const IDC_BTN_DEL_EXP: i32 = 246;
+// 全文検索ラベル・グループ枠(v0.4.4 バグ修正)
+const IDC_LBL_SEARCH: i32 = 247;
+const IDC_GRP_FILTER: i32 = 248;
+const IDC_GRP_ADD: i32 = 249;
+/// 手動追加テキストの取得元アプリ名として一律で記録する値
+const MANUAL_APP_NAME: &str = "FocusTranslator";
 
 /// 再OCR/再翻訳のワーカースレッド完了通知(ビューア限定メッセージ)
 const WM_APP_RELOAD: u32 = WM_APP + 30;
@@ -98,6 +117,15 @@ struct State {
     image: Option<(u32, u32, Vec<u8>)>,
 }
 
+/// 再OCR/再翻訳完了後、WM_APP_RELOAD で新規追加されたアイテムへフォーカスするための指示
+enum ReloadFocus {
+    None,
+    /// 再OCR: 選択中captureの認識一覧の最新(末尾)行を選択する
+    NewestRecog,
+    /// 再翻訳: 指定した認識行を選択したうえで、その翻訳一覧の最新(末尾)行を選択する
+    NewestTrans(i64),
+}
+
 thread_local! {
     static WND: RefCell<isize> = const { RefCell::new(0) };
     static REGISTERED: RefCell<bool> = const { RefCell::new(false) };
@@ -106,6 +134,7 @@ thread_local! {
         sel_cap: None, sel_recog: None, sel_trans: None, sel_exp: None,
         image: None,
     }) };
+    static RELOAD_FOCUS: RefCell<ReloadFocus> = const { RefCell::new(ReloadFocus::None) };
 }
 
 pub fn hwnd() -> HWND {
@@ -250,12 +279,53 @@ fn detail_edit(parent: HWND, inst: HINSTANCE, id: i32) {
     }
 }
 
+/// 複数行・編集可能・折返しのエディットを作る (【入力追加】グループの常時表示テキストボックス用)。
+/// ES_WANTRETURN を付けて Enter キーが改行として入力されるようにする
+/// (親ウィンドウは IsDialogMessageW を通すため、無指定だと既定ボタン相当の扱いになる)。
+fn multiline_edit_editable(parent: HWND, inst: HINSTANCE, id: i32) -> HWND {
+    unsafe {
+        const ES_MULTILINE: u32 = 0x0004;
+        const ES_AUTOVSCROLL: u32 = 0x0040;
+        const ES_WANTRETURN: u32 = 0x1000;
+        let h = CreateWindowExW(
+            Default::default(),
+            w!("EDIT"),
+            w!(""),
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_BORDER
+                | WS_VSCROLL
+                | WS_TABSTOP
+                | WINDOW_STYLE(ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN),
+            0,
+            0,
+            0,
+            0,
+            Some(parent),
+            Some(HMENU(id as usize as *mut _)),
+            Some(inst),
+            None,
+        )
+        .unwrap_or_default();
+        subclass_detail(h);
+        h
+    }
+}
+
+/// BS_GROUPBOX でカテゴリ枠を作る (settings.rs の group() と同様のパターン)
+fn group(parent: HWND, inst: HINSTANCE, text: &str, id: i32) {
+    const BS_GROUPBOX: u32 = 0x0000_0007;
+    ctl(parent, inst, w!("BUTTON"), text, WINDOW_STYLE(BS_GROUPBOX), 0, 0, 0, 0, id);
+}
+
 fn label(parent: HWND, inst: HINSTANCE, text: &str, id: i32) {
     ctl(parent, inst, w!("STATIC"), text, Default::default(), 0, 0, 0, 0, id);
 }
 
 fn build(h: HWND, inst: HINSTANCE) {
-    // 検索行
+    // 【絞り込み】グループ: 全文検索ラベル + 検索欄 + アプリ絞り込みコンボ
+    group(h, inst, "絞り込み", IDC_GRP_FILTER);
+    label(h, inst, "全文検索", IDC_LBL_SEARCH);
     ctl(h, inst, w!("EDIT"), "", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP, 0, 0, 0, 0, IDC_SEARCH_EDIT);
     let exe_combo = combo(h, inst, IDC_EXE_COMBO);
     combo_add(exe_combo, "全アプリ");
@@ -276,6 +346,11 @@ fn build(h: HWND, inst: HINSTANCE) {
     add_col(cap, 3, "画像", 40);
     detail_edit(h, inst, IDC_CAP_DETAIL);
     btn(h, inst, "選択削除", IDC_BTN_DEL_CAP);
+    // 【入力追加】グループ(ログビューア拡張 §1): 常時表示の3行テキストボックス+追加+クリア
+    group(h, inst, "入力追加", IDC_GRP_ADD);
+    multiline_edit_editable(h, inst, IDC_ADD_TEXT_EDIT);
+    btn(h, inst, "追加", IDC_BTN_ADD_SAVE);
+    btn(h, inst, "クリア", IDC_BTN_ADD_CANCEL);
 
     // 【読み取り結果】ブロック
     label(h, inst, "【読み取り結果】", IDC_LBL_RECOG);
@@ -320,6 +395,21 @@ fn build(h: HWND, inst: HINSTANCE) {
     add_col(exp, 3, "tok入/出", 70);
     add_col(exp, 4, "解説文", 320);
     detail_edit(h, inst, IDC_EXP_DETAIL);
+    // モデル選択・再解説・選択削除(ログビューア拡張 §2)
+    let exp_combo = combo(h, inst, IDC_EXP_COMBO);
+    let cfg = crate::config::Config::load();
+    let mut active_idx = 0usize;
+    for (i, p) in cfg.api_profiles.iter().enumerate() {
+        combo_add(exp_combo, &p.name);
+        if p.name == cfg.active_api_profile {
+            active_idx = i;
+        }
+    }
+    if !cfg.api_profiles.is_empty() {
+        combo_set(exp_combo, active_idx);
+    }
+    btn(h, inst, "再解説", IDC_BTN_REEXPLAIN);
+    btn(h, inst, "選択削除", IDC_BTN_DEL_EXP);
 
     // フォント適用
     unsafe {
@@ -442,81 +532,159 @@ fn edit_text(h: HWND, id: i32) -> String {
     }
 }
 
+/// EDITコントロールの内容を長さ制限なしで取得する(貼り付けた長文もそのまま読める)。
+fn edit_text_long(h: HWND, id: i32) -> String {
+    unsafe {
+        let e = dlg_item(h, id);
+        let len = GetWindowTextLengthW(e);
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        let n = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(e, &mut buf);
+        String::from_utf16_lossy(&buf[..n as usize])
+    }
+}
+
 const PAD: i32 = 8;
 const BTN_H: i32 = 28;
 const LBL_H: i32 = 18;
+/// グループ枠タイトル分のオフセット (settings.rs の GTOP と同じ考え方)
+const GTOP: i32 = 22;
+/// 【入力追加】グループの3行テキストボックスの高さ
+const ADD_EDIT_H: i32 = 60;
+/// 【入力追加】グループ全体の高さ (タイトル + テキストボックス + 余白)
+const ADD_GRP_H: i32 = GTOP + ADD_EDIT_H + 8;
+/// スプリッター(ドラッグ境界)のヒット判定太さ
+const SPLIT_T: i32 = 4;
+
+thread_local! {
+    /// 田の字スプリッターの位置 (グリッド領域に対する比率 0.0-1.0): (縦線Xの比率, 横線Yの比率)
+    static SPLIT: RefCell<(f32, f32)> = const { RefCell::new((0.5, 0.5)) };
+    /// ドラッグ中のスプリッター軸 (1=縦線/左右, 2=横線/上下)
+    static SPLIT_DRAG: RefCell<Option<u8>> = const { RefCell::new(None) };
+}
+
+/// 検索行(絞り込みグループ)を除いた、田の字グリッド領域の外枠 (left, top, right, bottom)
+fn grid_bounds(h: HWND) -> (i32, i32, i32, i32) {
+    let mut rc = RECT::default();
+    unsafe {
+        let _ = GetClientRect(h, &mut rc);
+    }
+    let w = rc.right.max(700);
+    let ht = rc.bottom.max(500);
+    let filter_grp_h = GTOP + BTN_H + 8;
+    let grid_top = PAD + filter_grp_h + PAD;
+    (PAD, grid_top, w - PAD, ht - PAD)
+}
 
 /// 各領域の矩形(レイアウト・描画・ヒットテストで共有)
 struct Geo {
-    /// 上段3列それぞれの (リスト, 詳細) 矩形
     cap_list: RECT,
     cap_text: RECT,
     cap_img: RECT,
+    cap_del_btn: RECT,
+    add_group: RECT,
+    add_edit: RECT,
+    add_btn_save: RECT,
+    add_btn_clear: RECT,
     recog_list: RECT,
     recog_text: RECT,
     trans_list: RECT,
     trans_text: RECT,
     exp_list: RECT,
     exp_text: RECT,
-    /// 各列の見出しY / ボタン行Y
-    label_y: i32,
-    btn_y: i32,
-    exp_label_y: i32,
-    /// 各列の左端X・列幅
-    col_x: [i32; 3],
-    col_w: i32,
+    filter_group: RECT,
+    /// 上段(入力内容/読み取り結果)・下段(翻訳結果/解説結果)の見出しY
+    label_y1: i32,
+    label_y2: i32,
+    /// 読み取り結果のボタン行Y(上段) / 翻訳結果・解説結果のボタン行Y(下段)
+    row1_btn_y: i32,
+    row2_btn_y: i32,
+    /// 2列それぞれの左端X・列幅
+    col_x: [i32; 2],
+    col_w: [i32; 2],
+    /// スプリッターのヒットテスト用矩形(縦線・横線)
+    split_v: RECT,
+    split_h: RECT,
 }
 
 fn geometry(h: HWND) -> Geo {
-    let mut rc = RECT::default();
-    unsafe {
-        let _ = GetClientRect(h, &mut rc);
-    }
-    let w = rc.right.max(600);
-    let ht = rc.bottom.max(400);
+    let (grid_left, grid_top, grid_right, grid_bottom) = grid_bounds(h);
 
-    let search_bottom = PAD + BTN_H;
-    let label_y = search_bottom + PAD;
-    let upper_top = label_y + LBL_H + 2;
+    let filter_grp_h = GTOP + BTN_H + 8;
+    let filter_grp_w = 8 + 70 + 6 + 200 + 6 + 160 + 8;
+    let filter_group = RECT { left: PAD, top: PAD, right: PAD + filter_grp_w, bottom: PAD + filter_grp_h };
 
-    // 下段(解説)ブロックの高さは全体の約28%
-    let exp_h = (ht as f32 * 0.28) as i32;
-    let exp_label_y = ht - exp_h - PAD;
-    let exp_top = exp_label_y + LBL_H + 2;
-    let exp_bottom = ht - PAD;
+    // 田の字スプリッター(ドラッグで移動可能)
+    let (rx, ry) = SPLIT.with(|s| *s.borrow());
+    let split_x = (grid_left + ((grid_right - grid_left) as f32 * rx) as i32)
+        .clamp(grid_left + 200, grid_right - 200);
+    let split_y = (grid_top + ((grid_bottom - grid_top) as f32 * ry) as i32)
+        .clamp(grid_top + 150, grid_bottom - 150);
+    let split_v = RECT { left: split_x - SPLIT_T, top: grid_top, right: split_x + SPLIT_T, bottom: grid_bottom };
+    let split_h = RECT { left: grid_left, top: split_y - SPLIT_T, right: grid_right, bottom: split_y + SPLIT_T };
 
-    // 上段ブロックの底 = ボタン行の上
-    let btn_y = exp_label_y - PAD - BTN_H;
-    let upper_bottom = btn_y - 4;
+    let col_x = [grid_left, split_x + 4];
+    let col_w = [split_x - 4 - grid_left, grid_right - (split_x + 4)];
 
-    let col_w = (w - PAD * 4) / 3;
-    let col_x = [PAD, PAD * 2 + col_w, PAD * 3 + col_w * 2];
+    let row1_bottom = split_y - 4;
+    let row2_top = split_y + 4;
 
-    // 各列: 左45%リスト / 右55%詳細
-    let list_w = (col_w as f32 * 0.45) as i32;
-    let block = |cx: i32| {
-        (
-            RECT { left: cx, top: upper_top, right: cx + list_w, bottom: upper_bottom },
-            RECT { left: cx + list_w + 4, top: upper_top, right: cx + col_w, bottom: upper_bottom },
-        )
-    };
-    let (cap_list, cap_full) = block(col_x[0]);
-    let (recog_list, recog_text) = block(col_x[1]);
-    let (trans_list, trans_text) = block(col_x[2]);
+    let label_y1 = grid_top;
+    let label_y2 = row2_top;
+    let content_top1 = label_y1 + LBL_H + 2;
+    let content_top2 = label_y2 + LBL_H + 2;
 
-    // 入力ブロックの右側: 上半分テキスト / 下半分画像 (§9.1)
-    let mid = (cap_full.top + cap_full.bottom) / 2;
-    let cap_text = RECT { left: cap_full.left, top: cap_full.top, right: cap_full.right, bottom: mid - 2 };
-    let cap_img = RECT { left: cap_full.left, top: mid + 2, right: cap_full.right, bottom: cap_full.bottom };
+    // 【読み取り結果】(上段右): リスト/詳細 50/50 + ボタン行
+    let row1_btn_y = row1_bottom - BTN_H;
+    let recog_content_bottom = row1_btn_y - 4;
+    let recog_list_w = (col_w[1] as f32 * 0.5) as i32;
+    let recog_list = RECT { left: col_x[1], top: content_top1, right: col_x[1] + recog_list_w, bottom: recog_content_bottom };
+    let recog_text = RECT { left: col_x[1] + recog_list_w + 4, top: content_top1, right: col_x[1] + col_w[1], bottom: recog_content_bottom };
 
-    // 解説ブロック: 左30%リスト / 右70%詳細 (全幅)
-    let exp_list_w = ((w - PAD * 2) as f32 * 0.30) as i32;
-    let exp_list = RECT { left: PAD, top: exp_top, right: PAD + exp_list_w, bottom: exp_bottom };
-    let exp_text = RECT { left: PAD + exp_list_w + 4, top: exp_top, right: w - PAD, bottom: exp_bottom };
+    // 【翻訳結果】(下段左) / 【解説結果】(下段右): リスト/詳細 50/50 + ボタン行(共通Y)
+    let row2_btn_y = grid_bottom - BTN_H;
+    let row2_content_bottom = row2_btn_y - 4;
+    let trans_list_w = (col_w[0] as f32 * 0.5) as i32;
+    let trans_list = RECT { left: col_x[0], top: content_top2, right: col_x[0] + trans_list_w, bottom: row2_content_bottom };
+    let trans_text = RECT { left: col_x[0] + trans_list_w + 4, top: content_top2, right: col_x[0] + col_w[0], bottom: row2_content_bottom };
+    let exp_list_w = (col_w[1] as f32 * 0.5) as i32;
+    let exp_list = RECT { left: col_x[1], top: content_top2, right: col_x[1] + exp_list_w, bottom: row2_content_bottom };
+    let exp_text = RECT { left: col_x[1] + exp_list_w + 4, top: content_top2, right: col_x[1] + col_w[1], bottom: row2_content_bottom };
+
+    // 【入力内容】(上段左): リスト/詳細+画像 → 選択削除ボタン行 → 【入力追加】グループ
+    let cap_area_bottom = row1_bottom - (BTN_H + 4) - (ADD_GRP_H + 4);
+    let cap_list_w = (col_w[0] as f32 * 0.5) as i32;
+    let cap_list = RECT { left: col_x[0], top: content_top1, right: col_x[0] + cap_list_w, bottom: cap_area_bottom };
+    let cap_full = RECT { left: col_x[0] + cap_list_w + 4, top: content_top1, right: col_x[0] + col_w[0], bottom: cap_area_bottom };
+    // テキスト:画像 = 3:1 (§6)
+    let cap_full_h = (cap_full.bottom - cap_full.top).max(40);
+    let cap_text_h = cap_full_h * 3 / 4;
+    let cap_text = RECT { left: cap_full.left, top: cap_full.top, right: cap_full.right, bottom: cap_full.top + cap_text_h - 2 };
+    let cap_img = RECT { left: cap_full.left, top: cap_full.top + cap_text_h + 2, right: cap_full.right, bottom: cap_full.bottom };
+
+    let cap_del_btn_y = cap_area_bottom + 4;
+    let cap_del_btn = RECT { left: col_x[0], top: cap_del_btn_y, right: col_x[0] + 90, bottom: cap_del_btn_y + BTN_H };
+
+    let add_group_y = cap_del_btn_y + BTN_H + 4;
+    let add_group = RECT { left: col_x[0], top: add_group_y, right: col_x[0] + col_w[0], bottom: add_group_y + ADD_GRP_H };
+    let inner_top = add_group.top + GTOP;
+    let inner_bottom = add_group.bottom - 8;
+    let inner_left = add_group.left + 8;
+    let inner_right = add_group.right - 8;
+    let add_btn_w = 80;
+    let add_edit = RECT { left: inner_left, top: inner_top, right: inner_right - add_btn_w - 6, bottom: inner_bottom };
+    let mid_btn = inner_top + (inner_bottom - inner_top - 4) / 2;
+    let add_btn_save = RECT { left: inner_right - add_btn_w, top: inner_top, right: inner_right, bottom: mid_btn };
+    let add_btn_clear = RECT { left: inner_right - add_btn_w, top: mid_btn + 4, right: inner_right, bottom: inner_bottom };
 
     Geo {
-        cap_list, cap_text, cap_img, recog_list, recog_text, trans_list, trans_text,
-        exp_list, exp_text, label_y, btn_y, exp_label_y, col_x, col_w,
+        cap_list, cap_text, cap_img, cap_del_btn,
+        add_group, add_edit, add_btn_save, add_btn_clear,
+        recog_list, recog_text, trans_list, trans_text, exp_list, exp_text,
+        filter_group, label_y1, label_y2, row1_btn_y, row2_btn_y, col_x, col_w,
+        split_v, split_h,
     }
 }
 
@@ -538,65 +706,84 @@ fn layout(h: HWND) {
         let gap = 6;
         let r = |rc: &RECT| (rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
 
-        // 検索行 (全幅)
-        let mut x = PAD;
-        mv(IDC_SEARCH_EDIT, x, PAD, 240, BTN_H);
-        x += 240 + gap;
-        mv(IDC_EXE_COMBO, x, PAD, 160, 200);
-        x += 160 + gap;
-        mv(IDC_BTN_EXPORT, x, PAD, 90, BTN_H);
+        // 【絞り込み】グループ: 全文検索ラベル + 検索欄 + アプリコンボ
+        let (fx, fy, fw, fh) = r(&g.filter_group);
+        mv(IDC_GRP_FILTER, fx, fy, fw, fh);
+        let row_y = fy + GTOP;
+        let label_y = row_y + (BTN_H - LBL_H) / 2;
+        let mut x = fx + 8;
+        mv(IDC_LBL_SEARCH, x, label_y, 70, LBL_H);
+        x += 70 + 6;
+        mv(IDC_SEARCH_EDIT, x, row_y, 200, BTN_H);
+        x += 200 + 6;
+        mv(IDC_EXE_COMBO, x, row_y, 160, 200);
+
+        // グループの右側: CSV出力・最新に更新・ログを全削除
         let mut rc = RECT::default();
         let _ = GetClientRect(h, &mut rc);
-        mv(IDC_BTN_REFRESH, rc.right - PAD - 90 - gap - 100, PAD, 90, BTN_H);
-        mv(IDC_BTN_CLEAR, rc.right - PAD - 100, PAD, 100, BTN_H);
+        mv(IDC_BTN_EXPORT, fx + fw + gap, row_y, 90, BTN_H);
+        mv(IDC_BTN_REFRESH, rc.right - PAD - 90 - gap - 100, row_y, 90, BTN_H);
+        mv(IDC_BTN_CLEAR, rc.right - PAD - 100, row_y, 100, BTN_H);
 
-        // 見出しラベル
-        mv(IDC_LBL_CAP, g.col_x[0], g.label_y, g.col_w, LBL_H);
-        mv(IDC_LBL_RECOG, g.col_x[1], g.label_y, g.col_w, LBL_H);
-        mv(IDC_LBL_TRANS, g.col_x[2], g.label_y, g.col_w, LBL_H);
-        mv(IDC_LBL_EXP, PAD, g.exp_label_y, 300, LBL_H);
+        // 見出しラベル (2x2)
+        mv(IDC_LBL_CAP, g.col_x[0], g.label_y1, g.col_w[0], LBL_H);
+        mv(IDC_LBL_RECOG, g.col_x[1], g.label_y1, g.col_w[1], LBL_H);
+        mv(IDC_LBL_TRANS, g.col_x[0], g.label_y2, g.col_w[0], LBL_H);
+        mv(IDC_LBL_EXP, g.col_x[1], g.label_y2, g.col_w[1], LBL_H);
 
-        // 上段3ブロック
+        // 【入力内容】(上段左)
         let (x0, y0, w0, h0) = r(&g.cap_list);
         mv(IDC_CAP_LV, x0, y0, w0, h0);
         let (x1, y1, w1, h1) = r(&g.cap_text);
         mv(IDC_CAP_DETAIL, x1, y1, w1, h1);
+        let (xd, yd, wd, hd) = r(&g.cap_del_btn);
+        mv(IDC_BTN_DEL_CAP, xd, yd, wd, hd);
+        // 【入力追加】グループ: テキストボックス + 追加/クリアボタン
+        let (gx, gy, gw, gh) = r(&g.add_group);
+        mv(IDC_GRP_ADD, gx, gy, gw, gh);
+        let (ex, ey, ew, eh) = r(&g.add_edit);
+        mv(IDC_ADD_TEXT_EDIT, ex, ey, ew, eh);
+        let (sx, sy, sw, sh) = r(&g.add_btn_save);
+        mv(IDC_BTN_ADD_SAVE, sx, sy, sw, sh);
+        let (cx, cy, cw, ch) = r(&g.add_btn_clear);
+        mv(IDC_BTN_ADD_CANCEL, cx, cy, cw, ch);
+
+        // 【読み取り結果】(上段右)
         let (x2, y2, w2, h2) = r(&g.recog_list);
         mv(IDC_RECOG_LV, x2, y2, w2, h2);
         let (x3, y3, w3, h3) = r(&g.recog_text);
         mv(IDC_RECOG_DETAIL, x3, y3, w3, h3);
+        let mut x = g.col_x[1];
+        mv(IDC_OCR_COMBO, x, g.row1_btn_y, 105, 200);
+        x += 105 + 4;
+        mv(IDC_BTN_REOCR, x, g.row1_btn_y, 60, BTN_H);
+        x += 60 + gap;
+        mv(IDC_BTN_DEL_RECOG, x, g.row1_btn_y, 50, BTN_H);
+        x += 50 + gap;
+        let tag_w = (g.col_x[1] + g.col_w[1] - x - 70 - 4).max(60);
+        mv(IDC_TAG_EDIT, x, g.row1_btn_y, tag_w, BTN_H);
+        mv(IDC_BTN_SAVE_TAG, x + tag_w + 4, g.row1_btn_y, 70, BTN_H);
+
+        // 【翻訳結果】(下段左)
         let (x4, y4, w4, h4) = r(&g.trans_list);
         mv(IDC_TRANS_LV, x4, y4, w4, h4);
         let (x5, y5, w5, h5) = r(&g.trans_text);
         mv(IDC_TRANS_DETAIL, x5, y5, w5, h5);
-
-        // 各列のボタン行
-        // 列1: 選択削除
-        mv(IDC_BTN_DEL_CAP, g.col_x[0], g.btn_y, 90, BTN_H);
-        // 列2: 再OCRコンボ+実行+削除+タグ
-        let mut x = g.col_x[1];
-        mv(IDC_OCR_COMBO, x, g.btn_y, 105, 200);
+        let mut x = g.col_x[0];
+        mv(IDC_TR_COMBO, x, g.row2_btn_y, 105, 200);
         x += 105 + 4;
-        mv(IDC_BTN_REOCR, x, g.btn_y, 60, BTN_H);
+        mv(IDC_BTN_RETRANS, x, g.row2_btn_y, 60, BTN_H);
         x += 60 + gap;
-        mv(IDC_BTN_DEL_RECOG, x, g.btn_y, 50, BTN_H);
-        x += 50 + gap;
-        let tag_w = (g.col_x[1] + g.col_w - x - 70 - 4).max(60);
-        mv(IDC_TAG_EDIT, x, g.btn_y, tag_w, BTN_H);
-        mv(IDC_BTN_SAVE_TAG, x + tag_w + 4, g.btn_y, 70, BTN_H);
-        // 列3: 再翻訳コンボ+実行+削除
-        let mut x = g.col_x[2];
-        mv(IDC_TR_COMBO, x, g.btn_y, 105, 200);
-        x += 105 + 4;
-        mv(IDC_BTN_RETRANS, x, g.btn_y, 60, BTN_H);
-        x += 60 + gap;
-        mv(IDC_BTN_DEL_TRANS, x, g.btn_y, 50, BTN_H);
+        mv(IDC_BTN_DEL_TRANS, x, g.row2_btn_y, 50, BTN_H);
 
-        // 下段: 解説ブロック
+        // 【解説結果】(下段右)
         let (x6, y6, w6, h6) = r(&g.exp_list);
         mv(IDC_EXP_LV, x6, y6, w6, h6);
         let (x7, y7, w7, h7) = r(&g.exp_text);
         mv(IDC_EXP_DETAIL, x7, y7, w7, h7);
+        mv(IDC_EXP_COMBO, g.col_x[1], g.row2_btn_y, 160, 200);
+        mv(IDC_BTN_REEXPLAIN, g.col_x[1] + 160 + 4, g.row2_btn_y, 80, BTN_H);
+        mv(IDC_BTN_DEL_EXP, g.col_x[1] + 160 + 4 + 80 + gap, g.row2_btn_y, 90, BTN_H);
     }
 }
 
@@ -1028,6 +1215,9 @@ fn paint_image(h: HWND) {
             let scale = (img_w as f32 / *iw as f32).min(img_h as f32 / *ih as f32).min(1.0);
             let dw = (*iw as f32 * scale) as i32;
             let dh = (*ih as f32 * scale) as i32;
+            // 表示領域内で上下左右中央寄せ (§6)
+            let draw_x = img_left + (img_w - dw) / 2;
+            let draw_y = img_top + (img_h - dh) / 2;
 
             let hdc = windows::Win32::Graphics::Gdi::GetDC(Some(h));
             // 背景を塗る
@@ -1059,8 +1249,8 @@ fn paint_image(h: HWND) {
             SetStretchBltMode(hdc, HALFTONE);
             StretchDIBits(
                 hdc,
-                img_left,
-                img_top,
+                draw_x,
+                draw_y,
                 dw,
                 dh,
                 0,
@@ -1109,6 +1299,7 @@ fn start_reocr(h: HWND) {
     };
     let engine = OCR_ENGINES[combo_sel(h, IDC_OCR_COMBO).min(OCR_ENGINES.len() - 1)].0.to_string();
     let hwnd_isize = h.0 as isize;
+    RELOAD_FOCUS.with(|f| *f.borrow_mut() = ReloadFocus::NewestRecog);
     std::thread::spawn(move || {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(
@@ -1173,6 +1364,7 @@ fn start_retranslate(h: HWND) {
     }
     let engine = TR_ENGINES[combo_sel(h, IDC_TR_COMBO).min(TR_ENGINES.len() - 1)].0.to_string();
     let hwnd_isize = h.0 as isize;
+    RELOAD_FOCUS.with(|f| *f.borrow_mut() = ReloadFocus::NewestTrans(recog_id));
     std::thread::spawn(move || {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(
@@ -1213,6 +1405,82 @@ fn start_retranslate(h: HWND) {
                 LPARAM(0),
             );
         }
+    });
+}
+
+/// 選択した読み取り結果に対し、選択したLLMプロファイルで解説を(再)生成して追記する
+/// (ログビューア拡張 §2)。まだ解説が無いテキストへの新規生成にも使える。
+fn start_reexplain(h: HWND) {
+    let sel = STATE.with(|s| {
+        let st = s.borrow();
+        let cap = st.sel_cap.and_then(|i| st.caps.get(i)).cloned();
+        st.sel_recog.and_then(|i| st.recogs.get(i)).map(|r| (r.clone(), cap))
+    });
+    let Some((recog, cap)) = sel else {
+        unsafe { MessageBoxW(Some(h), w!("読み取り結果を選択してください。"), w!("再解説"), MB_OK); }
+        return;
+    };
+    if recog.source_text.trim().is_empty() {
+        unsafe { MessageBoxW(Some(h), w!("原文が空のため解説できません。"), w!("再解説"), MB_OK); }
+        return;
+    }
+    let profile_name = combo_item_text(h, IDC_EXP_COMBO, combo_sel(h, IDC_EXP_COMBO));
+    if profile_name.is_empty() {
+        unsafe {
+            MessageBoxW(
+                Some(h),
+                w!("LLM APIプロファイルが設定されていません。設定画面で追加してください。"),
+                w!("再解説"),
+                MB_OK,
+            );
+        }
+        return;
+    }
+    // 最新の成功した翻訳結果があればプレースホルダに使う (SPECv0.4 §7.1)
+    let (translated_text, tr_engine) = logdb::translations_for(recog.id)
+        .into_iter()
+        .rev()
+        .find(|t| t.success)
+        .map(|t| (t.translated_text, t.engine))
+        .unwrap_or_default();
+    let mut pc = cap.map(|c| prompt_ctx_from_cap(&c)).unwrap_or_default();
+    pc.original_text = recog.source_text.clone();
+    pc.translated_text = translated_text;
+    pc.ocr_engine = if recog.engine == "uia" || recog.engine == "manual" { String::new() } else { recog.engine.clone() };
+    pc.tr_engine = tr_engine;
+    let recog_id = recog.id;
+    let hwnd_isize = h.0 as isize;
+    std::thread::spawn(move || {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            );
+        }
+        let cfg = crate::config::Config::load();
+        let notify = || unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                Some(HWND(hwnd_isize as *mut _)),
+                WM_APP_RELOAD,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        };
+        let Some(prof) = cfg.api_profiles.iter().find(|p| p.name == profile_name) else {
+            notify();
+            return;
+        };
+        let prompt = cfg.fill_prompt(&prof.explain_prompt, &pc);
+        let t0 = std::time::Instant::now();
+        let result = crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt));
+        let ms = t0.elapsed().as_millis();
+        match result {
+            Ok(res) => logdb::log_explanation(
+                recog_id, &prof.name, ms, &prompt, Some(&res.text), None, res.tokens_in, res.tokens_out,
+            ),
+            Err(e) => logdb::log_explanation(recog_id, &prof.name, ms, &prompt, None, Some(&e), None, None),
+        }
+        notify();
     });
 }
 
@@ -1409,6 +1677,48 @@ fn restore_cap_selection(h: HWND, old_idx: Option<usize>) {
     }
 }
 
+/// 選択中4階層のID一覧(【最新に更新】での選択復元・再OCR/再翻訳後の対象特定に使う)
+fn current_selection_ids() -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+    STATE.with(|s| {
+        let st = s.borrow();
+        (
+            st.sel_cap.and_then(|i| st.caps.get(i)).map(|c| c.id),
+            st.sel_recog.and_then(|i| st.recogs.get(i)).map(|r| r.id),
+            st.sel_trans.and_then(|i| st.trans.get(i)).map(|t| t.id),
+            st.sel_exp.and_then(|i| st.exps.get(i)).map(|e| e.id),
+        )
+    })
+}
+
+/// 【最新に更新】用: リロード後、入力→読み取り→翻訳→解説の各選択をID一致で
+/// 存在する範囲で復元する。
+fn restore_full_selection(h: HWND, saved: (Option<i64>, Option<i64>, Option<i64>, Option<i64>)) {
+    let (cap_id, recog_id, trans_id, exp_id) = saved;
+    let Some(cap_id) = cap_id else { return };
+    let Some(idx) = STATE.with(|s| s.borrow().caps.iter().position(|c| c.id == cap_id)) else { return };
+    lv_select(dlg_item(h, IDC_CAP_LV), idx as i32);
+    on_cap_selected(idx);
+
+    if let Some(rid) = recog_id
+        && let Some(ridx) = STATE.with(|s| s.borrow().recogs.iter().position(|r| r.id == rid))
+    {
+        lv_select(dlg_item(h, IDC_RECOG_LV), ridx as i32);
+        on_recog_selected(ridx);
+    }
+    if let Some(tid) = trans_id
+        && let Some(tidx) = STATE.with(|s| s.borrow().trans.iter().position(|t| t.id == tid))
+    {
+        lv_select(dlg_item(h, IDC_TRANS_LV), tidx as i32);
+        on_trans_selected(tidx);
+    }
+    if let Some(eid) = exp_id
+        && let Some(eidx) = STATE.with(|s| s.borrow().exps.iter().position(|e| e.id == eid))
+    {
+        lv_select(dlg_item(h, IDC_EXP_LV), eidx as i32);
+        on_exp_selected(eidx);
+    }
+}
+
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_SIZE => {
@@ -1431,17 +1741,110 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             let g = geometry(h);
-            if in_rect(&g.cap_img, x, y) {
+            if in_rect(&g.split_v, x, y) {
+                SPLIT_DRAG.with(|d| *d.borrow_mut() = Some(1));
+                unsafe { SetCapture(h); }
+            } else if in_rect(&g.split_h, x, y) {
+                SPLIT_DRAG.with(|d| *d.borrow_mut() = Some(2));
+                unsafe { SetCapture(h); }
+            } else if in_rect(&g.cap_img, x, y) {
                 // 画像領域クリック → 原寸(1:1)表示ウィンドウ
                 open_image_1to1(h);
             }
             LRESULT(0)
         }
+        WM_MOUSEMOVE => {
+            let axis = SPLIT_DRAG.with(|d| *d.borrow());
+            if let Some(axis) = axis {
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let (grid_left, grid_top, grid_right, grid_bottom) = grid_bounds(h);
+                SPLIT.with(|s| {
+                    let mut sp = s.borrow_mut();
+                    match axis {
+                        1 => {
+                            let rx = (x - grid_left) as f32 / (grid_right - grid_left).max(1) as f32;
+                            sp.0 = rx.clamp(0.0, 1.0);
+                        }
+                        2 => {
+                            let ry = (y - grid_top) as f32 / (grid_bottom - grid_top).max(1) as f32;
+                            sp.1 = ry.clamp(0.0, 1.0);
+                        }
+                        _ => {}
+                    }
+                });
+                layout(h);
+                unsafe {
+                    let _ = InvalidateRect(Some(h), None, true);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            if SPLIT_DRAG.with(|d| d.borrow_mut().take()).is_some() {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+            }
+            LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            let axis = SPLIT_DRAG.with(|d| *d.borrow());
+            let cursor = if let Some(axis) = axis {
+                Some(if axis == 1 { IDC_SIZEWE } else { IDC_SIZENS })
+            } else {
+                let mut pt = POINT::default();
+                unsafe {
+                    let _ = GetCursorPos(&mut pt);
+                    let _ = ScreenToClient(h, &mut pt);
+                }
+                let g = geometry(h);
+                if in_rect(&g.split_v, pt.x, pt.y) {
+                    Some(IDC_SIZEWE)
+                } else if in_rect(&g.split_h, pt.x, pt.y) {
+                    Some(IDC_SIZENS)
+                } else {
+                    None
+                }
+            };
+            if let Some(cursor) = cursor {
+                unsafe {
+                    let _ = SetCursor(Some(LoadCursorW(None, cursor).unwrap_or_default()));
+                }
+                return LRESULT(1);
+            }
+            unsafe { DefWindowProcW(h, msg, wparam, lparam) }
+        }
         WM_APP_RELOAD => {
-            // 再OCR/再翻訳後のリロード: 前の選択アイテムを復元する
+            // 再OCR/再翻訳後のリロード: 前の選択アイテムを復元したうえで、新規追加された
+            // アイテム(認識行/翻訳行)へフォーカスを当てる
             let sel_before = STATE.with(|s| s.borrow().sel_cap);
+            let focus = RELOAD_FOCUS.with(|f| std::mem::replace(&mut *f.borrow_mut(), ReloadFocus::None));
             reload();
             restore_cap_selection(h, sel_before);
+            match focus {
+                ReloadFocus::NewestRecog => {
+                    let recog_lv = dlg_item(h, IDC_RECOG_LV);
+                    let n = lv_count(recog_lv);
+                    if n > 0 {
+                        lv_select(recog_lv, n - 1);
+                        on_recog_selected((n - 1) as usize);
+                    }
+                }
+                ReloadFocus::NewestTrans(recog_id) => {
+                    if let Some(ridx) = STATE.with(|s| s.borrow().recogs.iter().position(|r| r.id == recog_id)) {
+                        lv_select(dlg_item(h, IDC_RECOG_LV), ridx as i32);
+                        on_recog_selected(ridx);
+                    }
+                    let trans_lv = dlg_item(h, IDC_TRANS_LV);
+                    let n = lv_count(trans_lv);
+                    if n > 0 {
+                        lv_select(trans_lv, n - 1);
+                        on_trans_selected((n - 1) as usize);
+                    }
+                }
+                ReloadFocus::None => {}
+            }
             LRESULT(0)
         }
         WM_NOTIFY => {
@@ -1505,7 +1908,12 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 return LRESULT(0);
             }
             match id {
-                IDC_BTN_REFRESH => reload(),
+                IDC_BTN_REFRESH => {
+                    // 更新後、現在フォーカスの当たっているアイテムをID一致で再選択する
+                    let saved = current_selection_ids();
+                    reload();
+                    restore_full_selection(h, saved);
+                }
                 IDC_BTN_CLEAR => {
                     let r = unsafe {
                         MessageBoxW(
@@ -1557,6 +1965,48 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         logdb::delete_translation(tid);
                         if let Some(ri) = recog_idx {
                             on_recog_selected(ri);
+                        }
+                    }
+                }
+                IDC_BTN_REEXPLAIN => start_reexplain(h),
+                IDC_BTN_DEL_EXP => {
+                    let (recog_idx, eid) = STATE.with(|s| {
+                        let st = s.borrow();
+                        (st.sel_recog, st.sel_exp.and_then(|i| st.exps.get(i)).map(|e| e.id))
+                    });
+                    if let Some(eid) = eid {
+                        logdb::delete_explanation(eid);
+                        if let Some(ri) = recog_idx {
+                            on_recog_selected(ri);
+                        }
+                    }
+                }
+                IDC_BTN_ADD_CANCEL => unsafe {
+                    let _ = SetWindowTextW(dlg_item(h, IDC_ADD_TEXT_EDIT), w!(""));
+                },
+                IDC_BTN_ADD_SAVE => {
+                    let text = edit_text_long(h, IDC_ADD_TEXT_EDIT);
+                    if text.trim().is_empty() {
+                        unsafe {
+                            MessageBoxW(Some(h), w!("テキストを入力してください。"), w!("テキスト追加"), MB_OK);
+                        }
+                    } else {
+                        // 取得元アプリ名は一律【FocusTranslator】として記録する
+                        let cid = logdb::log_capture(
+                            "manual", Some(MANUAL_APP_NAME), Some(MANUAL_APP_NAME), None, None, false,
+                        );
+                        if let Some(cid) = cid {
+                            logdb::log_recognition(cid, "manual", "manual", 0, Some(&text), None, None);
+                        }
+                        unsafe {
+                            let _ = SetWindowTextW(dlg_item(h, IDC_ADD_TEXT_EDIT), w!(""));
+                        }
+                        reload();
+                        // 追加したアイテムにフォーカスを当てる (captures は id DESC なので先頭が最新)
+                        let cap_lv = dlg_item(h, IDC_CAP_LV);
+                        if lv_count(cap_lv) > 0 {
+                            lv_select(cap_lv, 0);
+                            on_cap_selected(0);
                         }
                     }
                 }

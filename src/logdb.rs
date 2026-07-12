@@ -657,7 +657,13 @@ pub fn delete_translation(id: i64) {
     let Some(m) = conn() else { return };
     let Ok(guard) = m.lock() else { return };
     let _ = guard.execute("DELETE FROM translations WHERE id=?1", rusqlite::params![id]);
-    let _ = guard.execute("DELETE FROM translations WHERE id=?1", rusqlite::params![id]);
+}
+
+/// 解説1件を削除 (ログビューア拡張: 解説結果ブロックの選択削除)。
+pub fn delete_explanation(id: i64) {
+    let Some(m) = conn() else { return };
+    let Ok(guard) = m.lock() else { return };
+    let _ = guard.execute("DELETE FROM explanations WHERE id=?1", rusqlite::params![id]);
 }
 
 /// 認識結果テキストを上書き修正する (SPECv0.4: オーバーレイインライン編集用)
