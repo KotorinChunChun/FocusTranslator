@@ -1,7 +1,8 @@
 use crate::util::to_wide;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, HMENU, WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, GetDlgItem, GetWindowTextLengthW, GetWindowTextW, HMENU, SetWindowTextW,
+    WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
     SendMessageW, BS_AUTOCHECKBOX, CBS_DROPDOWNLIST,
 };
 use windows::Win32::UI::Controls::{
@@ -119,6 +120,40 @@ pub fn combo(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32)
 
 pub fn button(parent: HWND, instance: HINSTANCE, text: &str, x: i32, y: i32, w: i32, id: i32) -> HWND {
     ctl(parent, instance, w!("BUTTON"), text, WS_TABSTOP, x, y, w, 26, id)
+}
+
+/// 子コントロールへテキストを設定する
+pub fn set_ctl_text(parent: HWND, id: i32, text: &str) {
+    unsafe {
+        let ctl = GetDlgItem(Some(parent), id).unwrap_or_default();
+        let wide = to_wide(text);
+        let _ = SetWindowTextW(ctl, PCWSTR(wide.as_ptr()));
+    }
+}
+
+/// 子コントロールのテキストを取得する
+pub fn get_ctl_text(parent: HWND, id: i32) -> String {
+    unsafe {
+        let ctl = GetDlgItem(Some(parent), id).unwrap_or_default();
+        let len = GetWindowTextLengthW(ctl);
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; (len + 1) as usize];
+        let n = GetWindowTextW(ctl, &mut buf);
+        String::from_utf16_lossy(&buf[..n.max(0) as usize])
+    }
+}
+
+/// マルチラインEDITへの書込み: Win32 EDITは改行に\r\nを要するため\nを正規化して変換する
+pub fn set_multiline_text(parent: HWND, id: i32, text: &str) {
+    let normalized = text.replace("\r\n", "\n").replace('\n', "\r\n");
+    set_ctl_text(parent, id, &normalized);
+}
+
+/// マルチラインEDITからの読込み: 保存データは\n改行で統一する
+pub fn get_multiline_text(parent: HWND, id: i32) -> String {
+    get_ctl_text(parent, id).replace("\r\n", "\n")
 }
 
 pub fn checkbox(parent: HWND, instance: HINSTANCE, text: &str, x: i32, y: i32, w: i32, id: i32) -> HWND {
