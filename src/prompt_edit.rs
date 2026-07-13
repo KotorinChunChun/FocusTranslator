@@ -82,13 +82,12 @@ const WIN_W_A: i32 = 800;
 const WIN_W_B: i32 = 1260;
 const WIN_H: i32 = 520;
 
-/// プレースホルダ変数の一覧 (SPECv0.4 §7.1 の10種): (変数名, 意味)
-const VARS: [(&str, &str); 10] = [
+/// プレースホルダ変数の一覧 (SPECv0.4 §7.1): (変数名, 意味)
+const VARS: [(&str, &str); 9] = [
     ("source_lang", "翻訳元言語 (例: en)"),
     ("target_lang", "翻訳先言語 (例: ja)"),
     ("original_text", "OCR/UIAで取得した原文"),
     ("translated_text", "訳文 (翻訳前は空)"),
-    ("glossary", "用語集のテキスト"),
     ("app_title", "対象アプリのタイトル"),
     ("app_exe", "対象アプリの実行ファイル名"),
     ("uia_path", "UIA要素のパス"),
@@ -213,12 +212,11 @@ fn window_title(kind: PromptKind, mode_b: bool) -> &'static str {
     }
 }
 
-/// 変数の現在値 (§3.1): source_lang / target_lang / glossary は Config、残りは PromptContext 由来
+/// 変数の現在値 (§3.1): source_lang / target_lang は Config、残りは PromptContext 由来
 fn var_value(name: &str, cfg: &Config, ctx: &PromptContext) -> String {
     let v = match name {
         "source_lang" => cfg.source_lang.clone(),
         "target_lang" => cfg.target_lang.clone(),
-        "glossary" => cfg.glossary_prompt(),
         "original_text" => ctx.original_text.clone(),
         "translated_text" => ctx.translated_text.clone(),
         "app_title" => ctx.app_title.clone(),

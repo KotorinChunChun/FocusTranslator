@@ -1,7 +1,7 @@
 // OCR エンジン群 (SPEC §7.1)
-// - win:      Windows.Media.Ocr (既定・ローカル)
+// - oneocr:   OneOCR (oneocr.dll、Windows 11 Snipping Tool同梱。既定・ローカル。oneocr 参照)
+// - win:      Windows.Media.Ocr (ローカル)
 // - paddle:   PaddleOCR (モデル導入は paddle_install、ONNX Runtime推論は paddle_ocr 参照)
-// - yomitoku / ndl: 外部OCRサーバー (HTTP POST /ocr, GET /health)
 // - llm:      LLM OCR+翻訳統合 (画像→原文+訳文を一括取得。llm_api 参照)
 use crate::capture::Captured;
 use crate::config::Config;
@@ -63,6 +63,11 @@ pub fn run(
     ctx: &crate::config::PromptContext,
 ) -> Result<OcrOutput, String> {
     match engine {
+        "oneocr" => crate::oneocr::ocr_oneocr(img, focus).map(|(text, focus_line)| OcrOutput {
+            text,
+            focus_line,
+            ..Default::default()
+        }),
         "win" => ocr_windows(img, focus).map(|(text, focus_line)| OcrOutput {
             text,
             focus_line,
@@ -76,8 +81,6 @@ pub fn run(
                 Err("PaddleOCRのモデルが未導入です。設定画面からインストールしてください".into())
             }
         }
-        "yomitoku" => ocr_http(&cfg.yomitoku_url, img, focus).map(OcrOutput::text_only),
-        "ndl" => ocr_http(&cfg.ndl_url, img, focus).map(OcrOutput::text_only),
         "llm" => llm_ocr_translate(cfg, img, focus, ctx),
         other => Err(format!("不明なOCRエンジン: {other}")),
     }
@@ -132,6 +135,16 @@ pub fn ocr_windows(img: &Captured, focus: Focus) -> Result<(String, Option<Strin
         }
         items.push((top, bottom, text));
     }
+    select_by_focus(items, focus)
+}
+
+/// (行の上端Y, 下端Y, テキスト) のリストから Focus に応じて採用テキストを選ぶ。
+/// Windows.Media.Ocr と OneOCR で共用する。
+/// 戻り値: (採用テキスト, Paragraphモード時のカーソル直下1行)
+pub(crate) fn select_by_focus(
+    mut items: Vec<(f32, f32, String)>,
+    focus: Focus,
+) -> Result<(String, Option<String>), String> {
     if items.is_empty() {
         return Err("テキストを検出できませんでした".into());
     }
@@ -259,54 +272,6 @@ pub fn crop_for_focus(img: &Captured, focus: Focus) -> std::borrow::Cow<'_, Capt
         }
     }
     std::borrow::Cow::Borrowed(img)
-}
-
-/// 外部OCRサーバー (YomiToku / NDL-OCR): POST {url}/ocr に PNG を送る
-pub fn ocr_http(base_url: &str, img: &Captured, focus: Focus) -> Result<String, String> {
-    let base = base_url.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return Err("サーバーURLが未設定です".into());
-    }
-    let target_img = crop_for_focus(img, focus);
-    let png = crate::capture::to_png(&target_img);
-    let url = format!("{base}/ocr");
-    let mut res = ureq::post(&url)
-        .header("Content-Type", "image/png")
-        .send(&png[..])
-        .map_err(|e| format!("外部OCRサーバーに接続できません: {e}"))?;
-    let v: serde_json::Value = res
-        .body_mut()
-        .read_json()
-        .map_err(|e| format!("応答の解析に失敗: {e}"))?;
-    // 想定形式: {"text": "..."} または {"results":[{"text":"..."}]}
-    if let Some(t) = v.get("text").and_then(|t| t.as_str()) {
-        return Ok(t.trim().to_string());
-    }
-    if let Some(arr) = v.get("results").and_then(|r| r.as_array()) {
-        let lines: Vec<String> = arr
-            .iter()
-            .filter_map(|e| e.get("text").and_then(|t| t.as_str()))
-            .map(|s| s.to_string())
-            .collect();
-        if !lines.is_empty() {
-            return Ok(join_paragraph(&lines));
-        }
-    }
-    Err("外部OCRサーバーの応答形式が不明です".into())
-}
-
-/// 外部OCRサーバーの接続確認 (GET {url}/health)
-pub fn health_check(base_url: &str) -> bool {
-    let base = base_url.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return false;
-    }
-    ureq::get(format!("{base}/health"))
-        .config()
-        .timeout_global(Some(std::time::Duration::from_secs(3)))
-        .build()
-        .call()
-        .is_ok()
 }
 
 /// LLM OCR+翻訳統合モード: 画像から原文と訳文を一括取得 (SPEC §8)

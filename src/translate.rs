@@ -185,10 +185,9 @@ fn translate_once(
     }
 }
 
-/// ローカルONNX翻訳 (Opus-MT / FuguMT / NLLB-200 のいずれか、ort によるONNX Runtime推論)。
-fn translate_local(cfg: &Config, text: &str, target: &str) -> Result<String, String> {
-    let variant = crate::onnx_translate_install::Variant::from_key(&cfg.local_model_variant);
-    crate::onnx_translate::translate(text, target == "ja", variant)
+/// ローカルONNX翻訳 (FuguMT、ort によるONNX Runtime推論)。
+fn translate_local(_cfg: &Config, text: &str, target: &str) -> Result<String, String> {
+    crate::onnx_translate::translate(text, target == "ja")
 }
 
 fn translate_deepl(cfg: &Config, text: &str, target: &str) -> Result<(String, TransDetail, Option<i64>), String> {

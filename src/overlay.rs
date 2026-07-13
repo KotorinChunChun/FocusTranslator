@@ -72,15 +72,19 @@ pub const CHIP_EDIT_UNDO: usize = 117;
 pub const CHIP_EDIT_ERASE: usize = 118;
 /// インライン編集関連チップ
 pub const CHIP_EDIT_SRC: usize = 119;
+#[allow(dead_code)]
 pub const CHIP_SAVE_SRC: usize = 120;
 pub const CHIP_EDIT_TR: usize = 121;
+#[allow(dead_code)]
 pub const CHIP_SAVE_TR: usize = 122;
 pub const CHIP_EDIT_EXP: usize = 123;
+#[allow(dead_code)]
 pub const CHIP_SAVE_EXP: usize = 124;
 pub const CHIP_FORCE_PIN: usize = 125;
 
 /// テキストのインライン編集対象ブロック
 #[derive(Clone, Copy, PartialEq, Default)]
+#[allow(dead_code)]
 pub enum EditBlock {
     #[default]
     None,

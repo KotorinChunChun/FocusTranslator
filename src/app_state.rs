@@ -15,7 +15,6 @@ use crate::worker;
 
 use overlay::OverlayContent;
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::sync::Arc;
 use windows::Win32::Foundation::{
     HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -80,8 +79,6 @@ pub struct App {
     pub last_focus: crate::ocr::Focus,
     pub anchor: (i32, i32),
     pub error_only: bool,
-    pub failed_ocr: HashSet<String>,
-    pub failed_tr: HashSet<String>,
     pub capture_id: Option<i64>,
     pub recog_id: Option<i64>,
     pub explanation: Option<String>,
@@ -155,8 +152,6 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             last_focus: crate::ocr::Focus::All,
             anchor: (0, 0),
             error_only: false,
-            failed_ocr: HashSet::new(),
-            failed_tr: HashSet::new(),
             capture_id: None,
             recog_id: None,
             explanation: None,
@@ -461,8 +456,6 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.badge = None;
                 app.error_only = false;
                 app.anchor = anchor;
-                app.failed_ocr.clear();
-                app.failed_tr.clear();
                 app.capture_id = capture_id;
                 app.recog_id = recog_id;
                 app.app_title = app_title;
@@ -484,7 +477,6 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 sync_overlay(app);
             }
             worker::WorkerMsg::Translation { text, badge, ms, recog_id } => {
-                app.failed_tr.remove(&app.cur_tr);
                 app.translation = Some(text);
                 app.status = None;
                 app.error_only = false;
@@ -499,15 +491,11 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.error_only = false;
                 sync_overlay(app);
             }
-            worker::WorkerMsg::TranslationFailed { msg, engine } => {
+            worker::WorkerMsg::TranslationFailed { msg, engine: _ } => {
                 app.status = Some(msg);
-                app.failed_tr.insert(engine);
                 sync_overlay(app);
             }
-            worker::WorkerMsg::Error { msg, anchor, engine } => {
-                if let Some(e) = engine {
-                    app.failed_ocr.insert(e);
-                }
+            worker::WorkerMsg::Error { msg, anchor, engine: _ } => {
                 app.explaining = false;
                 if !app.source.is_empty() {
                     app.status = Some(msg);
@@ -551,8 +539,6 @@ pub fn handle_region(rect: RECT) {
 
 pub fn reload_config(hwnd: HWND) {
     with_app(|app| {
-        app.failed_ocr.clear();
-        app.failed_tr.clear();
         app.cfg = Config::load();
         app.cur_ocr = app.cfg.default_ocr.clone();
         app.cur_tr = app.cfg.default_translator.clone();
@@ -578,11 +564,11 @@ pub fn reload_config(hwnd: HWND) {
 pub fn sync_overlay(app: &mut App) {
     let mut ocr_enabled = [false; engine::OCR_KEYS.len()];
     for (i, k) in engine::OCR_KEYS.iter().enumerate() {
-        ocr_enabled[i] = app.cfg.engine_available(k) && !app.failed_ocr.contains(*k);
+        ocr_enabled[i] = app.cfg.engine_available(k);
     }
     let mut tr_enabled = [false; engine::TR_KEYS.len()];
     for (i, k) in engine::TR_KEYS.iter().enumerate() {
-        tr_enabled[i] = app.cfg.engine_available(k) && !app.failed_tr.contains(*k);
+        tr_enabled[i] = app.cfg.engine_available(k);
     }
     let content = OverlayContent {
         main_hwnd: app.main.0 as isize,

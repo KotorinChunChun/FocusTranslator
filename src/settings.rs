@@ -14,13 +14,13 @@ use windows::Win32::System::Registry::{
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL,
+    BM_GETCHECK, BM_SETCHECK,
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, GetSystemMetrics, GetWindowTextLengthW,
-    GetWindowTextW, IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_OK,
+    DestroyWindow, GetSystemMetrics,
+    IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_OK,
     MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL,
     SendMessageW, SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_DESTROY, WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
+    WM_DESTROY, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
 };
 use windows::core::{PCWSTR, w};
 
@@ -34,14 +34,10 @@ const IDC_DEEPL: i32 = 107;
 const IDC_GOOGLE: i32 = 108;
 const IDC_PROF_LIST: i32 = 109;
 const IDC_PROF_NEW: i32 = 110;
-const IDC_YOMI: i32 = 111;
-const IDC_NDL: i32 = 112;
 const IDC_AUTOSTART: i32 = 113;
 const IDC_PERFLOG: i32 = 114;
 const IDC_CONSENT_RESET: i32 = 115;
 const IDC_CLOSE: i32 = 118;
-const IDC_TEST_YOMI: i32 = 119;
-const IDC_TEST_NDL: i32 = 120;
 const IDC_PADDLE_STATUS: i32 = 121;
 const IDC_PADDLE_INSTALL: i32 = 122;
 const IDC_ONNX_STATUS: i32 = 123;
@@ -57,12 +53,10 @@ const IDC_PROF_SAVEAS: i32 = 132;
 const IDC_PROF_DEL: i32 = 133;
 const IDC_PROF_NAME: i32 = 134;
 const IDC_OPEN_LOG: i32 = 135;
-const IDC_ONNX_VARIANT: i32 = 136;
 const IDC_PROF_MODEL: i32 = 137;
 const IDC_PROF_URL: i32 = 138;
 const IDC_PROF_KEY: i32 = 139;
 const IDC_PROF_TYPE: i32 = 140;
-const IDC_GLOSSARY: i32 = 141;
 const IDC_DETECT_MODE: i32 = 145;
 const IDC_DETECT_KEY: i32 = 146;
 const IDC_PREVIEW_DETECT_MODE: i32 = 147;
@@ -84,8 +78,13 @@ const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
 
 const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
-const OCR_KEYS: [&str; 5] = ["win", "paddle", "yomitoku", "ndl", "llm"];
-const OCR_DISP: [&str; 5] = ["Windows OCR", "PaddleOCR", "YomiToku", "NDL-OCR", "LLM(プロファイル)"];
+const OCR_KEYS: [&str; 4] = ["oneocr", "win", "paddle", "llm"];
+const OCR_DISP: [&str; 4] = [
+    "OneOCR (oneocr.dll・既定)",
+    "Windows.Media.Ocr.dll",
+    "PaddleOCR",
+    "LLM(プロファイル)",
+];
 const TR_KEYS: [&str; 4] = ["local", "deepl", "google", "llm"];
 const TR_DISP: [&str; 4] = ["ローカルONNX", "DeepL", "Google", "LLM(プロファイル)"];
 const LANGS: [&str; 2] = ["ja", "en"];
@@ -211,7 +210,7 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let gx = col_x[0];
         let lx = inner(gx);
         let cx = gx + 152;
-        group(h, inst, "2. OCR設定", gx, 200, COL_W, 176);
+        group(h, inst, "2. OCR設定", gx, 200, COL_W, 120);
         let mut y = 200 + GTOP;
         label(h, inst, "既定OCRエンジン", lx, y + 2, 130);
         combo(h, inst, cx, y, 170, IDC_OCR);
@@ -219,14 +218,6 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         label(h, inst, "PaddleOCR", lx, y + 2, 130);
         ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 100, 20, IDC_PADDLE_STATUS);
         button(h, inst, "インストール", cx + 106, y - 2, 104, IDC_PADDLE_INSTALL);
-        y += STEP;
-        label(h, inst, "YomiToku サーバーURL", lx, y + 2, 140);
-        edit(h, inst, cx, y, 176, IDC_YOMI);
-        button(h, inst, "テスト", cx + 182, y - 2, 54, IDC_TEST_YOMI);
-        y += STEP;
-        label(h, inst, "NDL-OCR サーバーURL", lx, y + 2, 140);
-        edit(h, inst, cx, y, 176, IDC_NDL);
-        button(h, inst, "テスト", cx + 182, y - 2, 54, IDC_TEST_NDL);
     }
 
     // ---- 中列 グループ3: 翻訳設定 ----
@@ -234,14 +225,12 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let gx = col_x[1];
         let lx = inner(gx);
         let cx = gx + 152;
-        group(h, inst, "3. 翻訳設定", gx, 8, COL_W, 330);
+        group(h, inst, "3. 翻訳設定", gx, 8, COL_W, 190);
         let mut y = 8 + GTOP;
         label(h, inst, "既定翻訳エンジン", lx, y + 2, 130);
         combo(h, inst, cx, y, 170, IDC_TR);
         y += STEP;
-        label(h, inst, "ローカルONNXモデル", lx, y + 2, 130);
-        combo(h, inst, cx, y, 226, IDC_ONNX_VARIANT);
-        y += STEP;
+        label(h, inst, "ローカルONNX翻訳 (FuguMT)", lx, y + 2, 150);
         ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 100, 20, IDC_ONNX_STATUS);
         button(h, inst, "インストール", cx + 106, y - 2, 104, IDC_ONNX_INSTALL);
         y += STEP;
@@ -257,9 +246,6 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         label(h, inst, "Google Trans APIキー", lx, y + 2, 140);
         password_edit(h, inst, cx, y, key_w, IDC_GOOGLE);
         button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 76, IDC_GOOGLE_URL);
-        y += STEP;
-        label(h, inst, "用語集 (1行に 原文=訳文)", lx, y + 2, 170);
-        multiline(h, inst, cx, y, 226, 108, IDC_GLOSSARY);
     }
 
     // ---- 中列 グループ5: その他の設定 ----
@@ -401,16 +387,6 @@ fn populate(h: HWND) {
     );
     combo_fill(h, IDC_SRCLANG, &LANGS, LANGS.iter().position(|k| *k == cfg.source_lang).unwrap_or(1));
     combo_fill(h, IDC_LANG, &LANGS, LANGS.iter().position(|k| *k == cfg.target_lang).unwrap_or(0));
-    let onnx_disp: Vec<&str> = crate::onnx_translate_install::Variant::ALL.iter().map(|v| v.display()).collect();
-    combo_fill(
-        h,
-        IDC_ONNX_VARIANT,
-        &onnx_disp,
-        crate::onnx_translate_install::Variant::ALL
-            .iter()
-            .position(|v| v.key() == cfg.local_model_variant)
-            .unwrap_or(0),
-    );
     set_ctl_text(h, IDC_DEEPL, &cfg.deepl_key());
     set_ctl_text(h, IDC_GOOGLE, &cfg.google_key());
 
@@ -422,8 +398,6 @@ fn populate(h: HWND) {
     combo_fill(h, IDC_PROF_TYPE, &API_TYPE_DISP, 0);
 
     load_profile_to_ui(h, sel);
-    set_ctl_text(h, IDC_YOMI, &cfg.yomitoku_url);
-    set_ctl_text(h, IDC_NDL, &cfg.ndl_url);
     check_set(h, IDC_AUTOSTART, cfg.autostart);
     check_set(h, IDC_PERFLOG, cfg.perf_log);
     check_set(h, IDC_LOG_ENABLED, cfg.log_enabled);
@@ -437,8 +411,6 @@ fn populate(h: HWND) {
     );
     check_set(h, IDC_PREVIEW_DETECT_MODE, cfg.preview_detect_enabled);
     set_ctl_text(h, IDC_LOG_MAX, &cfg.log_max_records.to_string());
-    let glossary_text = cfg.glossary.iter().map(|e| format!("{}={}", e.source, e.target)).collect::<Vec<_>>().join("\r\n");
-    set_ctl_text(h, IDC_GLOSSARY, &glossary_text);
     refresh_paddle_status(h);
     refresh_onnx_status(h);
 }
@@ -453,14 +425,9 @@ fn refresh_paddle_status(h: HWND) {
 }
 
 /// 設定画面で現在選択中のローカル翻訳モデル種別
-fn selected_onnx_variant(h: HWND) -> crate::onnx_translate_install::Variant {
-    let all = crate::onnx_translate_install::Variant::ALL;
-    all[combo_sel(h, IDC_ONNX_VARIANT).min(all.len() - 1)]
-}
-
-/// ローカルONNX翻訳モデル(選択中の種別)の導入状況をステータス欄・ボタンに反映する
+/// ローカルONNX翻訳モデル(FuguMT)の導入状況をステータス欄・ボタンに反映する
 fn refresh_onnx_status(h: HWND) {
-    let installed = crate::onnx_translate_install::installed(selected_onnx_variant(h));
+    let installed = crate::onnx_translate_install::installed();
     set_ctl_text(h, IDC_ONNX_STATUS, if installed { "導入済み" } else { "未導入" });
     unsafe {
         let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_ONNX_INSTALL).unwrap_or_default(), !installed);
@@ -774,7 +741,6 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.default_translator = TR_KEYS[combo_sel(h, IDC_TR).min(TR_KEYS.len() - 1)].to_string();
     cfg.source_lang = LANGS[combo_sel(h, IDC_SRCLANG).min(LANGS.len() - 1)].to_string();
     cfg.target_lang = LANGS[combo_sel(h, IDC_LANG).min(LANGS.len() - 1)].to_string();
-    cfg.local_model_variant = selected_onnx_variant(h).key().to_string();
     cfg.deepl_key_enc = util::dpapi_encrypt(get_ctl_text(h, IDC_DEEPL).trim());
     cfg.google_key_enc = util::dpapi_encrypt(get_ctl_text(h, IDC_GOOGLE).trim());
     
@@ -786,8 +752,6 @@ fn save(h: HWND, ask_consent: bool) {
         cfg.active_api_profile = prof.name.clone();
     }
     
-    cfg.yomitoku_url = get_ctl_text(h, IDC_YOMI).trim().to_string();
-    cfg.ndl_url = get_ctl_text(h, IDC_NDL).trim().to_string();
     cfg.autostart = check_get(h, IDC_AUTOSTART);
     cfg.perf_log = check_get(h, IDC_PERFLOG);
     cfg.log_enabled = check_get(h, IDC_LOG_ENABLED);
@@ -796,19 +760,6 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.detect_key = HOLD_KEYS[combo_sel(h, IDC_DETECT_KEY).min(HOLD_KEYS.len() - 1)].to_string();
     cfg.preview_detect_enabled = check_get(h, IDC_PREVIEW_DETECT_MODE);
     cfg.log_max_records = get_ctl_text(h, IDC_LOG_MAX).trim().parse().unwrap_or(5000).clamp(100, 100000);
-    
-    let glos_text = get_ctl_text(h, IDC_GLOSSARY);
-    cfg.glossary = glos_text.lines().filter_map(|line| {
-        let parts: Vec<&str> = line.splitn(2, '=').collect();
-        if parts.len() == 2 {
-            let s = parts[0].trim();
-            let t = parts[1].trim();
-            if !s.is_empty() && !t.is_empty() {
-                return Some(crate::config::GlossaryEntry { source: s.to_string(), target: t.to_string() });
-            }
-        }
-        None
-    }).collect();
 
     // 既定エンジンがクラウド/外部送信を伴う場合の同意確認 (SPEC §9)。
     // 即時保存化に伴い、既定エンジンのコンボを変更したときだけ確認する
@@ -843,27 +794,7 @@ fn confirm_default_consents(h: HWND, cfg: &mut Config) {
             );
             cfg.consent_image = r.0 == 6;
         }
-        if matches!(cfg.default_ocr.as_str(), "yomitoku" | "ndl") && !cfg.consent_ext_ocr {
-            let url = if cfg.default_ocr == "yomitoku" { &cfg.yomitoku_url } else { &cfg.ndl_url };
-            // 127.0.0.1 はローカル送信として同意不要 (SPEC §9.2)
-            if !is_localhost(url) {
-                let r = MessageBoxW(
-                    Some(h),
-                    w!("既定のOCRエンジンは画像を外部OCRサーバーへ送信します。許可しますか?"),
-                    w!("外部送信の同意"),
-                    MB_YESNO,
-                );
-                cfg.consent_ext_ocr = r.0 == 6;
-            } else {
-                cfg.consent_ext_ocr = true;
-            }
-        }
     }
-}
-
-pub fn is_localhost(url: &str) -> bool {
-    let u = url.trim().trim_start_matches("http://").trim_start_matches("https://");
-    u.starts_with("127.0.0.1") || u.starts_with("localhost")
 }
 
 fn apply_autostart(enable: bool) {
@@ -914,8 +845,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 {
                     auto_save(h, false);
                 }
-                IDC_POLL | IDC_PIN_HOLD | IDC_HOTKEY | IDC_DEEPL | IDC_GOOGLE | IDC_YOMI
-                | IDC_NDL | IDC_LOG_MAX | IDC_GLOSSARY
+                IDC_POLL | IDC_PIN_HOLD | IDC_HOTKEY | IDC_DEEPL | IDC_GOOGLE
+                | IDC_LOG_MAX
                     if notif == EN_KILLFOCUS =>
                 {
                     auto_save(h, false);
@@ -931,7 +862,6 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     let mut cfg = Config::load();
                     cfg.consent_text = false;
                     cfg.consent_image = false;
-                    cfg.consent_ext_ocr = false;
                     cfg.save();
                     unsafe {
                         let _ = PostMessageW(
@@ -958,20 +888,13 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     );
                 }
                 IDC_ONNX_INSTALL => {
-                    let variant = selected_onnx_variant(h);
                     start_install(
                         h,
                         IDC_ONNX_STATUS,
                         IDC_ONNX_INSTALL,
                         WM_ONNX_DONE,
-                        move || crate::onnx_translate_install::install_variant(variant),
+                        crate::onnx_translate_install::install,
                     );
-                }
-                IDC_ONNX_VARIANT => {
-                    if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE {
-                        refresh_onnx_status(h);
-                        auto_save(h, false);
-                    }
                 }
                 IDC_DEEPL_URL => open_url(h, DEEPL_KEY_URL),
                 IDC_GOOGLE_URL => open_url(h, GOOGLE_KEY_URL),
@@ -1034,28 +957,6 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         )
                     };
                     crate::logviewer::open(inst);
-                }
-                IDC_TEST_YOMI | IDC_TEST_NDL => {
-                    let url =
-                        get_ctl_text(h, if id == IDC_TEST_YOMI { IDC_YOMI } else { IDC_NDL });
-                    let ok = crate::ocr::health_check(&url);
-                    unsafe {
-                        if ok {
-                            MessageBoxW(
-                                Some(h),
-                                w!("接続に成功しました。"),
-                                w!("接続テスト"),
-                                MB_OK | MB_ICONINFORMATION,
-                            );
-                        } else {
-                            MessageBoxW(
-                                Some(h),
-                                w!("接続できませんでした。サーバーが起動しているか確認してください。"),
-                                w!("接続テスト"),
-                                MB_OK,
-                            );
-                        }
-                    }
                 }
                 _ => {}
             }

@@ -585,6 +585,27 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             }
         }
 
+        // 画像編集中はOCR/翻訳エンジン切替・解説・言語反転・UIAノード・テキスト編集を禁止する
+        // (編集セッションと再認識が衝突しUIが操作不能になるのを防ぐ)。
+        // 編集用チップ(CHIP_EDIT_*)はこの後に追加されるため影響しない。
+        if content.edit.is_some() {
+            for item in &mut items {
+                if let Item::Chip { id, enabled, .. } = item {
+                    let forbidden = *id < CHIP_OCR_BASE + engine::OCR_KEYS.len()
+                        || (*id >= CHIP_TR_BASE && *id < CHIP_TR_BASE + engine::TR_KEYS.len())
+                        || matches!(
+                            *id,
+                            CHIP_EXPLAIN | CHIP_EXPLAIN_QUICK | CHIP_SWAP_LANG
+                                | CHIP_EDIT_SRC | CHIP_EDIT_TR | CHIP_EDIT_EXP
+                        )
+                        || *id >= CHIP_UIA_NODE_BASE;
+                    if forbidden {
+                        *enabled = false;
+                    }
+                }
+            }
+        }
+
         // 右上角: システムメッセージ行と同じ行に [設定] [ログを開く] [📌] [✕] を右寄せで配置する。
         let ty_base = sys_msg_btns.map(|(_, _, y)| y).unwrap_or(6);
         let ty_close = ty_base + (CHIP_H - CLOSE_SIZE) / 2;

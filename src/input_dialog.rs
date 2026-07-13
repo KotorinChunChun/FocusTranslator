@@ -145,7 +145,7 @@ pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
             let _ = SetForegroundWindow(hwnd);
 
             let mut msg = MSG::default();
-            while unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool() && GetMessageW(&mut msg, None, 0, 0).as_bool() } {
+            while windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool() && GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if msg.message == WM_DESTROY && msg.hwnd == hwnd {
                     break;
                 }

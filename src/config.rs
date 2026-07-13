@@ -3,12 +3,6 @@
 use crate::util;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct GlossaryEntry {
-    pub source: String,
-    pub target: String,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum ApiType {
     Gemini,
@@ -82,7 +76,7 @@ pub struct Config {
     pub pin_hold_seconds: u32,
     /// 範囲指定ホットキー (例: "Ctrl+Alt+T")
     pub region_hotkey: String,
-    /// 既定OCRエンジン: "win" | "paddle" | "yomitoku" | "ndl" | "gemini"
+    /// 既定OCRエンジン: "oneocr" | "win" | "paddle" | "llm"
     pub default_ocr: String,
     /// 既定翻訳エンジン: "local" | "deepl" | "google" | "gemini"
     pub default_translator: String,
@@ -114,12 +108,9 @@ pub struct Config {
     pub gemini_ocr_prompt: String,
     #[serde(default, skip_serializing)]
     pub gemini_explain_prompt: String,
-    pub yomitoku_url: String,
-    pub ndl_url: String,
-    /// 外部送信同意: テキスト送信 / 画像送信 / 外部OCRサーバー送信
+    /// 外部送信同意: テキスト送信 / 画像送信
     pub consent_text: bool,
     pub consent_image: bool,
-    pub consent_ext_ocr: bool,
     pub autostart: bool,
     pub perf_log: bool,
     /// 実行ログをSQLiteに記録する (既定OFF)
@@ -136,21 +127,19 @@ pub struct Config {
     pub preview_detect_enabled: bool,
     /// 認識ログの保持上限件数
     pub log_max_records: u32,
-    /// ローカルONNX翻訳のモデル種別: "opus_mt" | "fugu_mt" | "nllb200"
-    pub local_model_variant: String,
-    /// 用語集 (原文 -> 訳文)
-    pub glossary: Vec<GlossaryEntry>,
+    /// 初回起動時のセットアップ提案ダイアログを表示済みか
+    pub first_launch_done: bool,
 }
 
 /// 翻訳プロンプトの既定値
 pub const DEFAULT_GEMINI_TRANSLATE_PROMPT: &str =
-    "Translate the following text from {{source_lang}} to {{target_lang}}. Output only the translation.\n{{glossary}}\n\n{{original_text}}";
+    "Translate the following text from {{source_lang}} to {{target_lang}}. Output only the translation.\n\n{{original_text}}";
 /// OCR+翻訳統合プロンプトの既定値
 pub const DEFAULT_GEMINI_OCR_PROMPT: &str =
-    "Extract the text in this image and translate it from {{source_lang}} to {{target_lang}}. Respond with JSON only: {\"source\": \"<extracted text>\", \"translation\": \"<translation>\"}\n{{glossary}}";
+    "Extract the text in this image and translate it from {{source_lang}} to {{target_lang}}. Respond with JSON only: {\"source\": \"<extracted text>\", \"translation\": \"<translation>\"}";
 /// 解説プロンプトの既定値 (SPECv0.4 §7.2)
-pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、{{app_title}} というタイトルのWindowsアプリケーションの中で表示されているテキストです。\nこれが何か{{target_lang}}で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 実行ファイル名\n{{app_exe}}\n\n## UIAパス\n{{uia_path}}\n{{glossary}}\n\n## 表示テキスト\n{{original_text}}";
-/// v0.3 までの解説プロンプト既定値 (設定移行の判定用)
+pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、{{app_title}} というタイトルのWindowsアプリケーションの中で表示されているテキストです。\nこれが何か{{target_lang}}で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 実行ファイル名\n{{app_exe}}\n\n## UIAパス\n{{uia_path}}\n\n## 表示テキスト\n{{original_text}}";
+/// v0.3 までの解説プロンプト既定値 (設定移行の判定用。当時の文言そのままで比較する)
 const OLD_EXPLAIN_PROMPT: &str =
     "Explain the grammar, nuances, and background of the following text in {{target_lang}}.\n{{glossary}}\n\n{{original_text}}";
 
@@ -181,7 +170,7 @@ impl Default for Config {
             poll_ms: 100,
             pin_hold_seconds: 3,
             region_hotkey: "Ctrl+Alt+T".into(),
-            default_ocr: "win".into(),
+            default_ocr: "oneocr".into(),
             default_translator: "local".into(),
             target_lang: "ja".into(),
             source_lang: "en".into(),
@@ -197,11 +186,8 @@ impl Default for Config {
             gemini_translate_prompt: DEFAULT_GEMINI_TRANSLATE_PROMPT.into(),
             gemini_ocr_prompt: DEFAULT_GEMINI_OCR_PROMPT.into(),
             gemini_explain_prompt: DEFAULT_GEMINI_EXPLAIN_PROMPT.into(),
-            yomitoku_url: String::new(),
-            ndl_url: String::new(),
             consent_text: false,
             consent_image: false,
-            consent_ext_ocr: false,
             autostart: false,
             perf_log: false,
             log_enabled: false,
@@ -210,8 +196,7 @@ impl Default for Config {
             detect_key: "LCtrl".into(),
             preview_detect_enabled: false,
             log_max_records: 5000,
-            local_model_variant: "opus_mt".into(),
-            glossary: Vec::new(),
+            first_launch_done: false,
         }
     }
 }
@@ -291,27 +276,14 @@ impl Config {
         self.api_profiles.iter().find(|p| p.name == self.active_api_profile)
     }
 
-    /// 用語集をプロンプト埋め込み用テキストにする ({{glossary}} の置換値)
-    pub fn glossary_prompt(&self) -> String {
-        if self.glossary.is_empty() {
-            return String::new();
-        }
-        let lines = self
-            .glossary
-            .iter()
-            .map(|e| format!("{}={}", e.source, e.target))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("Glossary:\n{lines}")
-    }
-
-    /// プロンプトテンプレートのプレースホルダ置換 (SPECv0.4 §7.1 の10種)
+    /// プロンプトテンプレートのプレースホルダ置換 (SPECv0.4 §7.1)
     pub fn fill_prompt(&self, tmpl: &str, ctx: &PromptContext) -> String {
+        // 旧バージョンのテンプレートに残る {{glossary}} は空文字へ畳む(用語集機能は廃止)
         tmpl.replace("{{source_lang}}", &self.source_lang)
             .replace("{{target_lang}}", &self.target_lang)
             .replace("{{original_text}}", &ctx.original_text)
             .replace("{{translated_text}}", &ctx.translated_text)
-            .replace("{{glossary}}", &self.glossary_prompt())
+            .replace("{{glossary}}", "")
             .replace("{{app_title}}", &ctx.app_title)
             .replace("{{app_exe}}", &ctx.app_exe)
             .replace("{{uia_path}}", &ctx.uia_path)
@@ -337,10 +309,9 @@ impl Config {
     /// エンジンが利用可能か(キー・URL設定の有無)
     pub fn engine_available(&self, key: &str) -> bool {
         match key {
+            "oneocr" => crate::oneocr::available(),
             "win" => true,
             "paddle" => crate::paddle_install::installed(),
-            "yomitoku" => !self.yomitoku_url.trim().is_empty(),
-            "ndl" => !self.ndl_url.trim().is_empty(),
             "llm" => {
                 if let Some(p) = self.active_profile() {
                     !p.get_key().is_empty()
@@ -348,9 +319,7 @@ impl Config {
                     false
                 }
             }
-            "local" => crate::onnx_translate_install::installed(
-                crate::onnx_translate_install::Variant::from_key(&self.local_model_variant),
-            ),
+            "local" => crate::onnx_translate_install::installed(),
             "deepl" => !self.deepl_key_enc.is_empty(),
             "google" => !self.google_key_enc.is_empty(),
             _ => false,

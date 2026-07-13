@@ -15,6 +15,7 @@ mod llm_api;
 mod logdb;
 mod logviewer;
 mod ocr;
+mod oneocr;
 mod onnx_translate;
 mod onnx_translate_install;
 mod overlay;
@@ -24,6 +25,8 @@ mod paddle_ocr;
 mod prompt_edit;
 mod region;
 mod settings;
+#[cfg(test)]
+mod test_util;
 mod translate;
 mod tray;
 mod uia;
@@ -72,7 +75,7 @@ fn main() {
     let instance: HINSTANCE = unsafe {
         HINSTANCE(GetModuleHandleW(None).map(|m| m.0).unwrap_or(std::ptr::null_mut()))
     };
-    let cfg = Config::load();
+    let mut cfg = Config::load();
 
     // メイン(非表示)ウィンドウ
     let main = unsafe {
@@ -117,6 +120,19 @@ fn main() {
             );
         }
         SetTimer(Some(main), app_state::TIMER_POLL, cfg.poll_ms, None);
+    }
+
+    if !cfg.first_launch_done {
+        unsafe {
+            let msg = windows::core::HSTRING::from("初回起動です。\n高精度な画面認識(PaddleOCR)と、ONNX翻訳モデルをダウンロードしますか？\n（※画面認識は標準でOneOCR(Windows 11内蔵)を使用します。ONNXを導入しないとローカル翻訳ができません）");
+            let title = w!("Focus Translator - 初回セットアップ");
+            let result = MessageBoxW(Some(main), &msg, title, windows::Win32::UI::WindowsAndMessaging::MB_YESNO | windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION);
+            if result == windows::Win32::UI::WindowsAndMessaging::IDYES {
+                settings::open(instance, main);
+            }
+        }
+        cfg.first_launch_done = true;
+        cfg.save();
     }
 
     app_state::init(cfg, instance, main, overlay);

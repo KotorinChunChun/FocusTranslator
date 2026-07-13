@@ -1,11 +1,7 @@
 // ローカルONNX翻訳の推論 (ort クレートによる ONNX Runtime 連携)
-// 3種類のモデルに対応する:
-//   - Opus-MT / FuguMT: Marian系アーキテクチャ。decoder_start_token_idを起点に貪欲法(greedy)デコード。
-//   - NLLB-200 distilled 600M: M2M100系アーキテクチャ。入力の先頭に原文言語トークンを付与し、
-//     生成1トークン目に訳先言語トークンを強制する(forced_bos_token_id)必要がある。
+//   - FuguMT: Marian系アーキテクチャ。decoder_start_token_idを起点に貪欲法(greedy)デコード。
 // KVキャッシュは使用せず、各生成ステップでデコーダ入力列全体を毎回計算し直す簡易実装
 // (系列長に対して計算量はO(n^2)だが、キャッシュ管理が不要でシンプルかつ確実に動作する)。
-use crate::onnx_translate_install::Variant;
 use ort::session::Session;
 use ort::value::{Tensor, TensorRef};
 use serde_json::Value as JsonValue;
@@ -17,10 +13,6 @@ use tokenizers::Tokenizer;
 /// 生成する最大トークン数(これを超えたら打ち切る)
 const MAX_NEW_TOKENS: usize = 128;
 
-/// NLLB-200 の言語コードトークンID (tokenizer.json の added_tokens より)
-const NLLB_ENG_LATN: i64 = 256047;
-const NLLB_JPN_JPAN: i64 = 256079;
-
 struct DirCfg {
     encoder_file: &'static str,
     decoder_file: &'static str,
@@ -28,93 +20,43 @@ struct DirCfg {
     /// 文末トークンID
     eos_id: i64,
     /// デコーダ開始トークンID。Marian系ではpad_token_idと同一(generation_config.jsonの
-    /// bad_words_idsに相当し生成候補から除外)。NLLBではeos_token_idと同一の値になる。
+    /// bad_words_idsに相当し生成候補から除外)。
     decoder_start_id: i64,
     num_layers: usize,
     num_heads: i64,
     head_dim: i64,
-    /// NLLBのみ: 入力の先頭に付与する原文言語トークンID。Marian系はNone。
+    /// 入力の先頭に付与する原文言語トークンID(多言語モデル用)。Marian系はNone。
     src_lang_id: Option<i64>,
-    /// NLLBのみ: 生成1トークン目に強制する訳先言語トークンID。Marian系はNone。
+    /// 生成1トークン目に強制する訳先言語トークンID(多言語モデル用)。Marian系はNone。
     forced_bos_id: Option<i64>,
 }
 
-fn dir_cfg(variant: Variant, to_japanese: bool) -> DirCfg {
-    match variant {
-        Variant::OpusMt => {
-            if to_japanese {
-                DirCfg {
-                    encoder_file: "en_ja_encoder.onnx",
-                    decoder_file: "en_ja_decoder.onnx",
-                    tokenizer_file: "en_ja_tokenizer.json",
-                    eos_id: 0,
-                    decoder_start_id: 46275,
-                    num_layers: 6,
-                    num_heads: 8,
-                    head_dim: 64,
-                    src_lang_id: None,
-                    forced_bos_id: None,
-                }
-            } else {
-                DirCfg {
-                    encoder_file: "ja_en_encoder.onnx",
-                    decoder_file: "ja_en_decoder.onnx",
-                    tokenizer_file: "ja_en_tokenizer.json",
-                    eos_id: 0,
-                    decoder_start_id: 60715,
-                    num_layers: 6,
-                    num_heads: 8,
-                    head_dim: 64,
-                    src_lang_id: None,
-                    forced_bos_id: None,
-                }
-            }
+fn dir_cfg(to_japanese: bool) -> DirCfg {
+    if to_japanese {
+        DirCfg {
+            encoder_file: "en_ja_encoder.onnx",
+            decoder_file: "en_ja_decoder.onnx",
+            tokenizer_file: "en_ja_tokenizer.json",
+            eos_id: 0,
+            decoder_start_id: 32000,
+            num_layers: 6,
+            num_heads: 8,
+            head_dim: 64,
+            src_lang_id: None,
+            forced_bos_id: None,
         }
-        Variant::FuguMt => {
-            if to_japanese {
-                DirCfg {
-                    encoder_file: "en_ja_encoder.onnx",
-                    decoder_file: "en_ja_decoder.onnx",
-                    tokenizer_file: "en_ja_tokenizer.json",
-                    eos_id: 0,
-                    decoder_start_id: 32000,
-                    num_layers: 6,
-                    num_heads: 8,
-                    head_dim: 64,
-                    src_lang_id: None,
-                    forced_bos_id: None,
-                }
-            } else {
-                DirCfg {
-                    encoder_file: "ja_en_encoder.onnx",
-                    decoder_file: "ja_en_decoder.onnx",
-                    tokenizer_file: "ja_en_tokenizer.json",
-                    eos_id: 0,
-                    decoder_start_id: 32000,
-                    num_layers: 6,
-                    num_heads: 8,
-                    head_dim: 64,
-                    src_lang_id: None,
-                    forced_bos_id: None,
-                }
-            }
-        }
-        Variant::Nllb200 => {
-            // 方向によらずencoder/decoder/tokenizerは同一。言語トークンのみ入れ替える。
-            let (src, tgt) =
-                if to_japanese { (NLLB_ENG_LATN, NLLB_JPN_JPAN) } else { (NLLB_JPN_JPAN, NLLB_ENG_LATN) };
-            DirCfg {
-                encoder_file: "encoder.onnx",
-                decoder_file: "decoder.onnx",
-                tokenizer_file: "tokenizer.json",
-                eos_id: 2,
-                decoder_start_id: 2,
-                num_layers: 12,
-                num_heads: 16,
-                head_dim: 64,
-                src_lang_id: Some(src),
-                forced_bos_id: Some(tgt),
-            }
+    } else {
+        DirCfg {
+            encoder_file: "ja_en_encoder.onnx",
+            decoder_file: "ja_en_decoder.onnx",
+            tokenizer_file: "ja_en_tokenizer.json",
+            eos_id: 0,
+            decoder_start_id: 32000,
+            num_layers: 6,
+            num_heads: 8,
+            head_dim: 64,
+            src_lang_id: None,
+            forced_bos_id: None,
         }
     }
 }
@@ -129,8 +71,8 @@ struct Engine {
 /// エンコーダファイルの絶対パスをキーにして自然に共有される。
 static ENGINES: Mutex<Option<HashMap<String, Arc<Engine>>>> = Mutex::new(None);
 
-fn models_dir(variant: Variant) -> PathBuf {
-    crate::onnx_translate_install::dir(variant)
+fn models_dir() -> PathBuf {
+    crate::onnx_translate_install::dir()
 }
 
 /// Xenova配布のtokenizer.jsonはPrecompiledノーマライザのcharsmapを含まないため、
@@ -170,20 +112,20 @@ fn engine_for(cfg: &DirCfg, base: &Path) -> Result<Arc<Engine>, String> {
     Ok(eng)
 }
 
-/// ja↔en のローカルONNX翻訳を実行する。to_japanese=true なら英→日、false なら日→英。
-pub fn translate(text: &str, to_japanese: bool, variant: Variant) -> Result<String, String> {
-    if !crate::onnx_translate_install::installed(variant) {
+/// ja↔en のローカルONNX翻訳(FuguMT)を実行する。to_japanese=true なら英→日、false なら日→英。
+pub fn translate(text: &str, to_japanese: bool) -> Result<String, String> {
+    if !crate::onnx_translate_install::installed() {
         return Err("ローカル翻訳モデルが未導入です。設定画面からインストールしてください".into());
     }
-    let cfg = dir_cfg(variant, to_japanese);
-    let base = models_dir(variant);
+    let cfg = dir_cfg(to_japanese);
+    let base = models_dir();
     let eng = engine_for(&cfg, &base)?;
     run(&eng, &cfg, text)
 }
 
 fn run(eng: &Engine, cfg: &DirCfg, text: &str) -> Result<String, String> {
     let ids: Vec<i64> = if let Some(src) = cfg.src_lang_id {
-        // NLLB: [原文言語トークン] + 本文 + [eos] を手動で組み立てる
+        // 多言語モデル: [原文言語トークン] + 本文 + [eos] を手動で組み立てる
         // (fast tokenizerの既定post-processorは固定言語ペア用のため使わない)
         let encoding =
             eng.tokenizer.encode(text, false).map_err(|e| format!("トークナイズに失敗しました: {e}"))?;
@@ -305,56 +247,17 @@ mod tests {
     }
 
     #[test]
-    fn ja_to_en_smoke() {
-        let _guard = env_lock();
-        if !crate::onnx_translate_install::installed(Variant::OpusMt) {
-            eprintln!("モデル未導入のためスキップ");
-            return;
-        }
-        let out = translate("こんにちは、元気ですか？", false, Variant::OpusMt).unwrap();
-        println!("ja->en: {out}");
-        assert!(!out.is_empty());
-    }
-
-    #[test]
-    fn en_to_ja_smoke() {
-        let _guard = env_lock();
-        if !crate::onnx_translate_install::installed(Variant::OpusMt) {
-            eprintln!("モデル未導入のためスキップ");
-            return;
-        }
-        let out = translate("Thank you very much.", true, Variant::OpusMt).unwrap();
-        println!("en->ja: {out}");
-        assert!(!out.is_empty());
-    }
-
-    #[test]
     fn fugu_mt_smoke() {
         let _guard = env_lock();
-        if !crate::onnx_translate_install::installed(Variant::FuguMt) {
+        if !crate::onnx_translate_install::installed() {
             eprintln!("モデル未導入のためスキップ");
             return;
         }
-        let out = translate("Compiling focus-translator v0.1.0", true, Variant::FuguMt).unwrap();
+        let out = translate("Compiling focus-translator v0.1.0", true).unwrap();
         println!("fugu en->ja: {out}");
         assert!(!out.is_empty());
-        let out2 = translate("こんにちは、元気ですか？", false, Variant::FuguMt).unwrap();
+        let out2 = translate("こんにちは、元気ですか？", false).unwrap();
         println!("fugu ja->en: {out2}");
-        assert!(!out2.is_empty());
-    }
-
-    #[test]
-    fn nllb200_smoke() {
-        let _guard = env_lock();
-        if !crate::onnx_translate_install::installed(Variant::Nllb200) {
-            eprintln!("モデル未導入のためスキップ");
-            return;
-        }
-        let out = translate("Compiling focus-translator v0.1.0", true, Variant::Nllb200).unwrap();
-        println!("nllb en->ja: {out}");
-        assert!(!out.is_empty());
-        let out2 = translate("こんにちは、元気ですか？", false, Variant::Nllb200).unwrap();
-        println!("nllb ja->en: {out2}");
         assert!(!out2.is_empty());
     }
 }

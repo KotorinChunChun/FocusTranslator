@@ -10,7 +10,9 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-/// ワーカーから main へ送るメッセージ(LPARAM に Box して渡す)
+/// ワーカーからメインスレッド（ウィンドウプロシージャ）への通知。
+/// バックグラウンド処理の完了や進捗をメインスレッドに伝えます。
+#[allow(dead_code)]
 pub enum WorkerMsg {
     Source {
         text: String,
@@ -288,10 +290,15 @@ fn effective_ocr(cfg: &Config) -> String {
     let e = cfg.default_ocr.as_str();
     let allowed = match e {
         "llm" => cfg.consent_image,
-        "yomitoku" | "ndl" => cfg.consent_ext_ocr,
         _ => true,
     };
-    if allowed && cfg.engine_available(e) { e.to_string() } else { "win".to_string() }
+    if allowed && cfg.engine_available(e) {
+        e.to_string()
+    } else if cfg.engine_available("oneocr") {
+        "oneocr".to_string()
+    } else {
+        "win".to_string()
+    }
 }
 
 fn effective_translator(cfg: &Config) -> String {
@@ -503,7 +510,7 @@ fn translate(
 /// OCRチップ切替: 保持画像(無ければ再キャプチャ)で選択エンジンOCR→再翻訳 (SPEC §8)。
 /// 保持画像がある場合は同じ capture_id を引き継ぎ、新しいcaptureは作らず読み取り結果を
 /// 追記する (SPECv0.4追補)。同一画像+同一エンジンの認識が既にログにあれば、再OCRせず
-/// その結果を再利用する (ログへの新規記録も行わない)。
+/// その結果を再利用する (切替操作の記録としてrecognition行は追記する)。
 #[allow(clippy::too_many_arguments)]
 pub fn reocr(
     generation: u64,
@@ -573,18 +580,21 @@ pub fn reocr(
         // ここでは画像ありのcapture_idを先に決める(エラー時は画像なしで作り直す)。
         let capture_with_img = || if held { capture_id } else { log_cap(&cfg, "chip", &ctx, Some(&log_img)) };
 
-        // 同一画像+同一エンジンの既存認識結果があれば再利用する (再OCRなし・ログ追記なし)
-        if let Some((rid, text)) = crate::logdb::find_cached_recognition(&hash, &ocr_engine) {
+        // 同一画像+同一エンジンの既存認識結果があれば再OCRせず再利用する。
+        // 操作の記録としてrecognition行は追記する (SPECv0.4.9追補: 切替操作をログに残す)
+        if let Some((cached_rid, text)) = crate::logdb::find_cached_recognition(&hash, &ocr_engine) {
             let ms = t0.elapsed().as_millis();
             util::perf_log(cfg.perf_log, &format!("reocr {ocr_engine} {ms}ms (cached)"));
             let use_capture_id = capture_with_img();
+            let rid = log_recog(&cfg, use_capture_id, "ocr", &ocr_engine, ms, Some(&text), None, Some(&hash))
+                .or(Some(cached_rid));
             let pin = text.contains('\n');
             post(main, generation, ctx.source_msg(
                 text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), pin, anchor, focus, ms,
-                use_capture_id, Some(rid),
+                use_capture_id, rid,
             ));
             let o = ocr::OcrOutput { text, ..Default::default() };
-            dispatch_translation(generation, cfg, o, tr_engine, main, Some(rid), pc, &t0);
+            dispatch_translation(generation, cfg, o, tr_engine, main, rid, pc, &t0);
             return;
         }
 
@@ -621,7 +631,7 @@ pub fn reocr(
 /// 画像編集(トリミング)適用後の再認識 (SPECv0.4 §4-3, §8.2.1):
 /// 新しい capture は作らず、同じ capture の下に認識行を追加する。
 /// 同一画像+同一エンジンの認識が既にログにあれば、再OCRせずその結果を再利用する
-/// (ログへの新規記録も行わない) (SPECv0.4追補)。
+/// (切替操作の記録としてrecognition行は追記する) (SPECv0.4追補)。
 #[allow(clippy::too_many_arguments)]
 pub fn reocr_edited(
     generation: u64,
@@ -651,16 +661,19 @@ pub fn reocr_edited(
         let pc = prompt_ctx(&ctx, &ocr_engine);
         let hash = crate::capture::hash_hex(&image);
 
-        // 同一画像+同一エンジンの既存認識結果があれば再利用する (再OCRなし・ログ追記なし)
-        if let Some((rid, text)) = crate::logdb::find_cached_recognition(&hash, &ocr_engine) {
+        // 同一画像+同一エンジンの既存認識結果があれば再OCRせず再利用する。
+        // 操作の記録としてrecognition行は追記する (SPECv0.4.9追補: 切替操作をログに残す)
+        if let Some((cached_rid, text)) = crate::logdb::find_cached_recognition(&hash, &ocr_engine) {
             let ms = t0.elapsed().as_millis();
             util::perf_log(cfg.perf_log, &format!("reocr_edited {ocr_engine} {ms}ms (cached)"));
+            let rid = log_recog(&cfg, capture_id, "ocr", &ocr_engine, ms, Some(&text), None, Some(&hash))
+                .or(Some(cached_rid));
             post(main, generation, ctx.source_msg(
                 text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), true, anchor,
-                ocr::Focus::All, ms, capture_id, Some(rid),
+                ocr::Focus::All, ms, capture_id, rid,
             ));
             let o = ocr::OcrOutput { text, ..Default::default() };
-            dispatch_translation(generation, cfg, o, tr_engine, main, Some(rid), pc, &t0);
+            dispatch_translation(generation, cfg, o, tr_engine, main, rid, pc, &t0);
             return;
         }
 
