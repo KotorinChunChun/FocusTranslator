@@ -2,7 +2,7 @@ use crate::util::to_wide;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, GetDlgItem, GetWindowTextLengthW, GetWindowTextW, HMENU, SetWindowTextW,
-    WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
     SendMessageW, BS_AUTOCHECKBOX, CBS_DROPDOWNLIST,
     CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
     WM_SETFONT,
@@ -14,9 +14,6 @@ use windows::core::{PCWSTR, w};
 
 const ES_AUTOHSCROLL: u32 = 0x0080;
 const ES_PASSWORD: u32 = 0x0020;
-const ES_MULTILINE: u32 = 0x0004;
-const ES_AUTOVSCROLL: u32 = 0x0040;
-const ES_WANTRETURN: u32 = 0x1000;
 const PASSWORD_CHAR: usize = 0x25CF; // ●
 
 #[allow(clippy::too_many_arguments)]
@@ -67,21 +64,6 @@ pub fn edit(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32) 
         y,
         w,
         22,
-        id,
-    )
-}
-
-pub fn multiline(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, h: i32, id: i32) -> HWND {
-    ctl(
-        parent,
-        instance,
-        w!("EDIT"),
-        "",
-        WS_BORDER | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN),
-        x,
-        y,
-        w,
-        h,
         id,
     )
 }
@@ -233,6 +215,6 @@ pub fn combo_get_item_text(cb: HWND, idx: usize) -> String {
 pub unsafe extern "system" fn set_font_proc(child: HWND, lparam: LPARAM) -> windows::core::BOOL {
     use windows::Win32::Graphics::Gdi::HFONT;
     let hfont = HFONT(lparam.0 as *mut _);
-    SendMessageW(child, WM_SETFONT, Some(WPARAM(hfont.0 as usize)), Some(LPARAM(1)));
+    unsafe { SendMessageW(child, WM_SETFONT, Some(WPARAM(hfont.0 as usize)), Some(LPARAM(1))); }
     windows::core::BOOL(1)
 }

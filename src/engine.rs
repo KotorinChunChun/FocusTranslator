@@ -4,9 +4,9 @@
 use crate::config::Config;
 
 /// OCRエンジンのキー配列 (チップボタンのID算出に使用)
-pub const OCR_KEYS: [&str; 5] = ["win", "paddle", "yomitoku", "ndl", "llm"];
+pub const OCR_KEYS: [&str; 4] = ["oneocr", "win", "paddle", "llm"];
 /// OCRエンジンの表示ラベル (ボタン表示・見出し用)
-pub const OCR_LABELS: [&str; 5] = ["Win", "Paddle", "YomiToku", "NDL", "LLM(統合)"];
+pub const OCR_LABELS: [&str; 4] = ["OneOCR", "MediaOCR", "Paddle", "LLM(統合)"];
 /// 翻訳エンジンのキー配列
 pub const TR_KEYS: [&str; 4] = ["local", "deepl", "google", "llm"];
 /// 翻訳エンジンの表示ラベル
@@ -14,7 +14,7 @@ pub const TR_LABELS: [&str; 4] = ["ローカル", "DeepL", "Google", "LLM"];
 
 /// OCRエンジンキーから表示ラベルを取得する
 pub fn ocr_label(key: &str) -> &'static str {
-    OCR_KEYS.iter().position(|k| *k == key).map(|i| OCR_LABELS[i]).unwrap_or("Win")
+    OCR_KEYS.iter().position(|k| *k == key).map(|i| OCR_LABELS[i]).unwrap_or("OneOCR")
 }
 
 /// 翻訳エンジンキーから表示ラベルを取得する

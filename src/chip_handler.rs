@@ -5,7 +5,6 @@ use crate::app_state::{self, Mode, with_app, main_hwnd, sync_overlay};
 use crate::config::Config;
 use crate::engine;
 use crate::overlay;
-use crate::settings;
 use crate::util;
 
 use windows::Win32::Foundation::RECT;
@@ -89,8 +88,30 @@ fn run_edit_action(action: impl FnOnce() -> Result<(), String>) {
     });
 }
 
+/// 画像編集モード中に禁止するチップか (OCR/翻訳エンジン切替・解説・言語反転・
+/// UIAノード・テキスト編集)。編集セッションと再認識の衝突によるUI操作不能を防ぐ。
+/// overlay_layout 側の無効表示と対で、ハンドラ側でも二重にガードする。
+fn forbidden_while_editing(id: usize) -> bool {
+    id < overlay::CHIP_OCR_BASE + engine::OCR_KEYS.len()
+        || (id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_TR_BASE + engine::TR_KEYS.len())
+        || matches!(
+            id,
+            overlay::CHIP_EXPLAIN
+                | overlay::CHIP_EXPLAIN_QUICK
+                | overlay::CHIP_SWAP_LANG
+                | overlay::CHIP_EDIT_SRC
+                | overlay::CHIP_EDIT_TR
+                | overlay::CHIP_EDIT_EXP
+        )
+        || id >= overlay::CHIP_UIA_NODE_BASE
+}
+
 /// チップ押下 (SPEC §8): 押下時点でピン留めし、再OCR/再翻訳を実行
 pub fn handle_chip(id: usize) {
+    // 画像編集中はエンジン切替等を受け付けない (SPECv0.4.9追補)
+    if overlay::is_editing_image() && forbidden_while_editing(id) {
+        return;
+    }
     // フェーズ1: 状態取得(借用を解放してから同意ダイアログを出す)
     let Some(info) = with_app(|app| {
         (
@@ -471,7 +492,6 @@ pub fn handle_chip(id: usize) {
     if id < overlay::CHIP_OCR_BASE + engine::OCR_KEYS.len() {
         // OCRエンジン切替: 保持画像で再認識→現行エンジンで再翻訳 (SPEC §8)
         let key = engine::OCR_KEYS[id - overlay::CHIP_OCR_BASE].to_string();
-        with_app(|app| { app.failed_ocr.remove(&key); });
         if !cfg.engine_available(&key) {
             with_app(|app| {
                 app.status = Some(engine_unavailable_msg(&key));
@@ -500,7 +520,6 @@ pub fn handle_chip(id: usize) {
     } else if id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_TR_BASE + engine::TR_KEYS.len() {
         // 翻訳エンジン切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)
         let key = engine::TR_KEYS[id - overlay::CHIP_TR_BASE].to_string();
-        with_app(|app| { app.failed_tr.remove(&key); });
         if source.is_empty() {
             return;
         }
@@ -561,9 +580,6 @@ fn engine_unavailable_msg(key: &str) -> String {
     match key {
         "paddle" => "PaddleOCRのモデルが未導入です。設定画面からインストールしてください".into(),
         "local" => "ローカル翻訳モデルが未導入です。設定画面からインストールしてください".into(),
-        "yomitoku" | "ndl" => {
-            "サーバーURLが未設定です。設定画面で接続テストを実行してください".into()
-        }
         _ => "APIキーが未設定です。設定画面で設定してください".into(),
     }
 }
@@ -574,20 +590,6 @@ fn ensure_consent(engine_key: &str, cfg: &Config) -> bool {
     let (need, kind): (bool, &str) = match engine_key {
         "deepl" | "google" => (!cfg.consent_text, "text"),
         "llm" => (!cfg.consent_image || !cfg.consent_text, "image"),
-        "yomitoku" => {
-            if settings::is_localhost(&cfg.yomitoku_url) {
-                (false, "ext")
-            } else {
-                (!cfg.consent_ext_ocr, "ext")
-            }
-        }
-        "ndl" => {
-            if settings::is_localhost(&cfg.ndl_url) {
-                (false, "ext")
-            } else {
-                (!cfg.consent_ext_ocr, "ext")
-            }
-        }
         _ => (false, ""),
     };
     if !need {
@@ -597,11 +599,8 @@ fn ensure_consent(engine_key: &str, cfg: &Config) -> bool {
         "text" => w!(
             "このエンジンはOCR済みの原文テキストを外部サービスへ送信します。\n初回のみ確認しています。許可しますか?"
         ),
-        "image" => w!(
-            "このエンジンはキャプチャ画像と言語設定を外部サービスへ送信する可能性があります。\n初回のみ確認しています。許可しますか?"
-        ),
         _ => w!(
-            "このエンジンは設定されたサーバーURLへキャプチャ画像を送信します。\n初回のみ確認しています。許可しますか?"
+            "このエンジンはキャプチャ画像と言語設定を外部サービスへ送信する可能性があります。\n初回のみ確認しています。許可しますか?"
         ),
     };
     let r = unsafe { MessageBoxW(Some(main_hwnd()), msg, w!("外部送信の同意"), MB_YESNO) };
@@ -609,11 +608,10 @@ fn ensure_consent(engine_key: &str, cfg: &Config) -> bool {
         let mut c = Config::load();
         match kind {
             "text" => c.consent_text = true,
-            "image" => {
+            _ => {
                 c.consent_image = true;
                 c.consent_text = true;
             }
-            _ => c.consent_ext_ocr = true,
         }
         c.save();
         with_app(|app| app.cfg = c);

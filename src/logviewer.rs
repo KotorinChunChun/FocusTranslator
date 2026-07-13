@@ -28,9 +28,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CW_USEDEFAULT, CallWindowProcW,
+    CBS_DROPDOWNLIST, CW_USEDEFAULT, CallWindowProcW,
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_WNDPROC, GetClientRect, GetCursorPos,
-    GetDlgItem, GetWindowRect, GetWindowTextLengthW, HMENU, IDC_ARROW, IDC_SIZENS, IDC_SIZEWE,
+    GetWindowRect, HMENU, IDC_ARROW, IDC_SIZENS, IDC_SIZEWE,
     IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW, SWP_NOACTIVATE,
     SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
     SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
@@ -92,11 +92,10 @@ const MANUAL_APP_NAME: &str = "FocusTranslator";
 const WM_APP_RELOAD: u32 = WM_APP + 30;
 
 /// 再OCRエンジン(内部キー / 表示名)
-const OCR_ENGINES: [(&str, &str); 5] = [
-    ("win", "Windows OCR"),
+const OCR_ENGINES: [(&str, &str); 4] = [
+    ("oneocr", "OneOCR"),
+    ("win", "Windows.Media.Ocr.dll"),
     ("paddle", "PaddleOCR"),
-    ("yomitoku", "YomiToku"),
-    ("ndl", "NDL-OCR"),
     ("llm", "LLM(統合)"),
 ];
 /// 再翻訳エンジン(内部キー / 表示名)

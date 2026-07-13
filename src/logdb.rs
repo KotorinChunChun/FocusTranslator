@@ -416,6 +416,7 @@ pub struct CaptureRow {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct RecogRow {
     pub id: i64,
     pub capture_id: i64,
@@ -430,6 +431,7 @@ pub struct RecogRow {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct TransRow {
     pub id: i64,
     pub recognition_id: i64,
@@ -450,6 +452,7 @@ pub struct TransRow {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct ExplainRow {
     pub id: i64,
     pub recognition_id: i64,
@@ -574,6 +577,7 @@ pub fn search_captures(query: &str, app_exe: &str, limit: usize) -> Vec<CaptureR
     })
 }
 
+#[allow(dead_code)]
 pub fn get_capture(id: i64) -> Option<CaptureRow> {
     with_conn_opt(|guard| {
         guard
@@ -666,6 +670,7 @@ pub fn latest_explanation(recognition_id: i64) -> Option<String> {
 }
 
 /// 認識へのユーザー付与タグを取得
+#[allow(dead_code)]
 pub fn get_tags(recognition_id: i64) -> String {
     with_conn(String::new(), |guard| {
         guard
