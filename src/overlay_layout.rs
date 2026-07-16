@@ -197,8 +197,8 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
 
         let chip_row = |items: &mut Vec<Item>,
                         y: &mut i32,
-                        keys: &[&str],
-                        labels: &[&str],
+                        keys: &[String],
+                        labels: &[String],
                         cur: &str,
                         enabled: &[bool],
                         base: usize,
@@ -424,12 +424,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             need_w = need_w.max(sw + PAD * 2 + 4);
 
             // UIA経路はOCRを行っていないため、どのOCRエンジンもアクティブ表示にしない
-            let ocr_cur: &str = if content.via_uia { "" } else { content.cur_ocr.as_str() };
+            let ocr_cur: &str = if content.via_uia { "" } else { content.cur_ocr_chip_key.as_str() };
             chip_row(
                 &mut items,
                 &mut y,
-                &engine::OCR_KEYS,
-                &engine::OCR_LABELS,
+                &content.ocr_keys,
+                &content.ocr_labels,
                 ocr_cur,
                 &content.ocr_enabled,
                 CHIP_OCR_BASE,
@@ -484,9 +484,9 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             chip_row(
                 &mut items,
                 &mut y,
-                &engine::TR_KEYS,
-                &engine::TR_LABELS,
-                &content.cur_tr,
+                &content.tr_keys,
+                &content.tr_labels,
+                &content.cur_tr_chip_key,
                 &content.tr_enabled,
                 CHIP_TR_BASE,
                 &mut need_w,
@@ -592,7 +592,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             for item in &mut items {
                 if let Item::Chip { id, enabled, .. } = item {
                     let forbidden = *id < CHIP_OCR_BASE + engine::OCR_KEYS.len()
-                        || (*id >= CHIP_TR_BASE && *id < CHIP_TR_BASE + engine::TR_KEYS.len())
+                        || (*id >= CHIP_TR_BASE && *id < CHIP_COPY)
                         || matches!(
                             *id,
                             CHIP_EXPLAIN | CHIP_EXPLAIN_QUICK | CHIP_SWAP_LANG

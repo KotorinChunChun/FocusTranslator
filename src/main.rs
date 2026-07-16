@@ -37,7 +37,7 @@ mod input_dialog;
 
 use config::Config;
 use windows::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE,
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE,
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -59,11 +59,40 @@ use windows::core::w;
 
 fn main() {
     // 多重起動防止
+    // 設定リセットによる自己再起動 (--restart-wait) は、旧プロセスがミューテックスを
+    // 解放し終える前に起動してしまう可能性があるため、既存プロセスありと判定されても
+    // 短時間リトライしてから諦める。通常の多重起動時はリトライ対象外で即終了する。
+    let restart_wait = std::env::args().any(|a| a == "--restart-wait");
     unsafe {
-        let _mutex = CreateMutexW(None, false, w!("FocusTranslator_Singleton"));
+        let mut mutex = CreateMutexW(None, false, w!("FocusTranslator_Singleton"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            return;
+            // 重複と判定されたハンドルはこの時点で閉じる。閉じずに次のCreateMutexWで
+            // 上書きすると、そのハンドル自体がミューテックスを生かし続けてしまい、
+            // 旧プロセスがとっくに終了していても ERROR_ALREADY_EXISTS が解消されない
+            // (自分自身の未クローズハンドルによる自己デッドロック)。
+            if let Ok(h) = mutex {
+                let _ = CloseHandle(h);
+            }
+            if !restart_wait {
+                return;
+            }
+            let mut acquired = false;
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                mutex = CreateMutexW(None, false, w!("FocusTranslator_Singleton"));
+                if GetLastError() != ERROR_ALREADY_EXISTS {
+                    acquired = true;
+                    break;
+                }
+                if let Ok(h) = mutex {
+                    let _ = CloseHandle(h);
+                }
+            }
+            if !acquired {
+                return;
+            }
         }
+        let _ = mutex;
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }

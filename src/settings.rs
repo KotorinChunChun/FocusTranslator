@@ -17,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK,
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DestroyWindow, GetSystemMetrics,
-    IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_OK,
+    IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
     MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL,
     SendMessageW, SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
     WM_DESTROY, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
@@ -65,6 +65,12 @@ const IDC_PIN_HOLD: i32 = 151;
 const IDC_PROMPT_TR_BTN: i32 = 152;
 const IDC_PROMPT_OCR_BTN: i32 = 153;
 const IDC_PROMPT_EXP_BTN: i32 = 154;
+const IDC_OCR_EXP: i32 = 155;
+const IDC_TR_EXP: i32 = 156;
+/// 選択中のプロファイルを既定LLMプロファイルにするボタン (OCR/翻訳/解説すべてで共用するため
+/// LLMプロファイル設定グループ側に配置する)
+const IDC_PROF_SET_DEFAULT: i32 = 157;
+const IDC_RESET_SETTINGS: i32 = 158;
 
 /// エディットコントロールの通知コード (windows クレートに定義がないもの)
 const EN_KILLFOCUS: u32 = 0x0200;
@@ -94,6 +100,8 @@ thread_local! {
     static REGISTERED: RefCell<bool> = const { RefCell::new(false) };
     static FONT: RefCell<isize> = const { RefCell::new(0) };
     static PROFILES: RefCell<Vec<crate::config::ApiProfile>> = const { RefCell::new(Vec::new()) };
+    /// 既定LLMプロファイル名 (OCR/翻訳/解説共通)。【既定にする】ボタンでのみ変更する。
+    static DEFAULT_PROFILE: RefCell<String> = const { RefCell::new(String::new()) };
     /// 「新規」ボタン直後 (まだプロファイル保存していない) 状態。
     /// プロンプト欄のUIが無くなったため、この状態での保存は既定プロンプトを使う (SPECv0.4.7 §6.1)。
     static PENDING_NEW: RefCell<bool> = const { RefCell::new(false) };
@@ -205,31 +213,57 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         edit(h, inst, cx, y, 60, IDC_PIN_HOLD);
     }
 
-    // ---- 左列 グループ2: OCR設定 ----
+    // ---- 左列 グループ2: システム設定 (旧 5. その他の設定) ----
     {
         let gx = col_x[0];
         let lx = inner(gx);
-        let cx = gx + 152;
-        group(h, inst, "2. OCR設定", gx, 200, COL_W, 120);
+        group(h, inst, "2. システム設定", gx, 200, COL_W, 216); // リセットボタン追加で高さ216に拡張
         let mut y = 200 + GTOP;
+        checkbox(h, inst, "起動時に常駐する", lx, y, 170, IDC_AUTOSTART);
+        checkbox(h, inst, "計測ログを有効化", lx + 180, y, 160, IDC_PERFLOG);
+        y += STEP;
+        checkbox(h, inst, "実行ログを記録 (原文/訳文を平文保存)", lx, y, 300, IDC_LOG_ENABLED);
+        y += STEP;
+        checkbox(h, inst, "デバッグモード (OCR画像をPNG保存)", lx, y, 280, IDC_DEBUG_MODE);
+        y += STEP;
+        label(h, inst, "保持上限", lx, y + 2, 60);
+        edit(h, inst, lx + 66, y, 70, IDC_LOG_MAX);
+        button(h, inst, "ログビューアを開く", lx + 150, y - 2, 130, IDC_OPEN_LOG);
+        y += STEP;
+        button(h, inst, "外部送信の同意状態をリセット", lx, y, 220, IDC_CONSENT_RESET);
+        y += STEP;
+        button(h, inst, "設定をリセット (アプリ再起動)", lx, y, 220, IDC_RESET_SETTINGS);
+    }
+
+    // ---- 中列 グループ3: OCR設定 (旧 2. OCR設定) ----
+    {
+        let gx = col_x[1];
+        let lx = inner(gx);
+        let cx = gx + 152;
+        group(h, inst, "3. OCR設定", gx, 8, COL_W, 170); // 高さを170に拡張して解説用スペース確保
+        let mut y = 8 + GTOP;
         label(h, inst, "既定OCRエンジン", lx, y + 2, 130);
         combo(h, inst, cx, y, 170, IDC_OCR);
         y += STEP;
+        ctl(h, inst, w!("STATIC"), "", WINDOW_STYLE(0), lx, y, COL_W - 24, 40, IDC_OCR_EXP); // 解説表示
+        y += 44;
         label(h, inst, "PaddleOCR", lx, y + 2, 130);
         ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 100, 20, IDC_PADDLE_STATUS);
         button(h, inst, "インストール", cx + 106, y - 2, 104, IDC_PADDLE_INSTALL);
     }
 
-    // ---- 中列 グループ3: 翻訳設定 ----
+    // ---- 中列 グループ4: 翻訳設定 (旧 3. 翻訳設定) ----
     {
         let gx = col_x[1];
         let lx = inner(gx);
         let cx = gx + 152;
-        group(h, inst, "3. 翻訳設定", gx, 8, COL_W, 190);
-        let mut y = 8 + GTOP;
+        group(h, inst, "4. 翻訳設定", gx, 186, COL_W, 250); // y=186から配置
+        let mut y = 186 + GTOP;
         label(h, inst, "既定翻訳エンジン", lx, y + 2, 130);
         combo(h, inst, cx, y, 170, IDC_TR);
         y += STEP;
+        ctl(h, inst, w!("STATIC"), "", WINDOW_STYLE(0), lx, y, COL_W - 24, 60, IDC_TR_EXP); // 解説表示
+        y += 64;
         label(h, inst, "ローカルONNX翻訳 (FuguMT)", lx, y + 2, 150);
         ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 100, 20, IDC_ONNX_STATUS);
         button(h, inst, "インストール", cx + 106, y - 2, 104, IDC_ONNX_INSTALL);
@@ -248,38 +282,21 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 76, IDC_GOOGLE_URL);
     }
 
-    // ---- 中列 グループ5: その他の設定 ----
-    {
-        let gx = col_x[1];
-        let lx = inner(gx);
-        group(h, inst, "5. その他の設定", gx, 346, COL_W, 186);
-        let mut y = 346 + GTOP;
-        checkbox(h, inst, "起動時に常駐する", lx, y, 170, IDC_AUTOSTART);
-        checkbox(h, inst, "計測ログを有効化", lx + 180, y, 160, IDC_PERFLOG);
-        y += STEP;
-        checkbox(h, inst, "実行ログを記録 (原文/訳文を平文保存)", lx, y, 300, IDC_LOG_ENABLED);
-        y += STEP;
-        checkbox(h, inst, "デバッグモード (OCR画像をPNG保存)", lx, y, 280, IDC_DEBUG_MODE);
-        y += STEP;
-        label(h, inst, "保持上限", lx, y + 2, 60);
-        edit(h, inst, lx + 66, y, 70, IDC_LOG_MAX);
-        button(h, inst, "ログビューアを開く", lx + 150, y - 2, 130, IDC_OPEN_LOG);
-        y += STEP;
-        button(h, inst, "外部送信の同意状態をリセット", lx, y, 220, IDC_CONSENT_RESET);
-    }
-
-    // ---- 右列 グループ4: LLMプロファイル設定 ----
+    // ---- 右列 グループ5: LLMプロファイル設定 ----
     {
         let gx = col_x[2];
         let lx = inner(gx);
         let cx = gx + 100;
-        group(h, inst, "4. LLMプロファイル設定", gx, 8, COL_W, 240);
+        group(h, inst, "5. LLMプロファイル設定", gx, 8, COL_W, 230); // 既定プロファイルは翻訳設定へ移動、高さ230に縮小
         let mut y = 8 + GTOP;
-        combo(h, inst, lx, y, 150, IDC_PROF_LIST);
-        button(h, inst, "新規", lx + 156, y, 46, IDC_PROF_NEW);
-        button(h, inst, "保存", lx + 206, y, 46, IDC_PROF_SAVE);
-        button(h, inst, "別名保存", lx + 256, y, 66, IDC_PROF_SAVEAS);
-        button(h, inst, "削除", lx + 326, y, 46, IDC_PROF_DEL);
+        label(h, inst, "プロファイル編集", lx, y + 2, 90);
+        combo(h, inst, lx + 96, y, 150, IDC_PROF_LIST);
+        y += STEP;
+        button(h, inst, "新規", lx, y, 46, IDC_PROF_NEW);
+        button(h, inst, "保存", lx + 50, y, 46, IDC_PROF_SAVE);
+        button(h, inst, "別名保存", lx + 100, y, 66, IDC_PROF_SAVEAS);
+        button(h, inst, "削除", lx + 170, y, 46, IDC_PROF_DEL);
+        button(h, inst, "既定にする", lx + 222, y, 90, IDC_PROF_SET_DEFAULT);
         y += STEP;
         label(h, inst, "API登録名", lx, y + 2, 84);
         edit(h, inst, cx, y, 140, IDC_PROF_NAME);
@@ -391,6 +408,14 @@ fn populate(h: HWND) {
     set_ctl_text(h, IDC_GOOGLE, &cfg.google_key());
 
     PROFILES.with(|p| *p.borrow_mut() = cfg.api_profiles.clone());
+    // 既定LLMプロファイル名を保持する (active とは独立)。コンボの「(既定)」表示に使うため
+    // refill_profile_combo より先に確定させておく。
+    let default_name = if cfg.api_profiles.iter().any(|p| p.name == cfg.default_api_profile) {
+        cfg.default_api_profile.clone()
+    } else {
+        cfg.api_profiles.first().map(|p| p.name.clone()).unwrap_or_default()
+    };
+    DEFAULT_PROFILE.with(|d| *d.borrow_mut() = default_name);
     let sel = cfg.api_profiles.iter().position(|p| p.name == cfg.active_api_profile).unwrap_or(0);
     refill_profile_combo(h, sel);
 
@@ -398,6 +423,7 @@ fn populate(h: HWND) {
     combo_fill(h, IDC_PROF_TYPE, &API_TYPE_DISP, 0);
 
     load_profile_to_ui(h, sel);
+    update_prof_default_btn(h);
     check_set(h, IDC_AUTOSTART, cfg.autostart);
     check_set(h, IDC_PERFLOG, cfg.perf_log);
     check_set(h, IDC_LOG_ENABLED, cfg.log_enabled);
@@ -413,6 +439,7 @@ fn populate(h: HWND) {
     set_ctl_text(h, IDC_LOG_MAX, &cfg.log_max_records.to_string());
     refresh_paddle_status(h);
     refresh_onnx_status(h);
+    update_explanations(h);
 }
 
 /// PaddleOCRの導入状況をステータス欄・ボタンに反映する
@@ -432,6 +459,29 @@ fn refresh_onnx_status(h: HWND) {
     unsafe {
         let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_ONNX_INSTALL).unwrap_or_default(), !installed);
     }
+}
+
+/// 選択されたOCRエンジンおよび翻訳エンジンに対する解説をStatic Textに反映する
+fn update_explanations(h: HWND) {
+    let ocr_idx = combo_sel(h, IDC_OCR).min(OCR_KEYS.len().saturating_sub(1));
+    let ocr_desc = if OCR_KEYS.is_empty() { "" } else { match OCR_KEYS[ocr_idx] {
+        "oneocr" => "【OneOCR】Windows11標準モデルを使用する、軽量・高速で標準的なOCRエンジンです。",
+        "win" => "【Windows】内蔵OCR(MediaOCR)を使用します。Windows10対応ですが精度は劣ります。",
+        "paddle" => "【PaddleOCR】高精度なOCRです。インストールが必要です。",
+        "llm" => "【LLM】AIを使用して画像から直接テキストを抽出します。",
+        _ => "",
+    }};
+    set_ctl_text(h, IDC_OCR_EXP, ocr_desc);
+
+    let tr_idx = combo_sel(h, IDC_TR).min(TR_KEYS.len().saturating_sub(1));
+    let tr_desc = if TR_KEYS.is_empty() { "" } else { match TR_KEYS[tr_idx] {
+        "local" => "【ローカルONNX】オフラインで高速・安全に翻訳します。",
+        "deepl" => "【DeepL】高精度な翻訳を行います。APIキーが必要です。",
+        "google" => "【Google】Google翻訳を使用します。APIキーが必要です。",
+        "llm" => "【LLM】AIプロファイルを使用して文脈に応じた翻訳を行います。",
+        _ => "",
+    }};
+    set_ctl_text(h, IDC_TR_EXP, tr_desc);
 }
 
 /// APIプロファイル種別のコンボ表示順 (IDC_PROF_TYPE の選択indexと対応)
@@ -455,12 +505,37 @@ fn combo_select(h: HWND, id: i32, idx: usize) {
     combo_set_sel(unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default() }, idx);
 }
 
-/// PROFILES の内容でプロファイル一覧コンボを再構築する
+/// PROFILES の内容でプロファイル一覧コンボを再構築する。既定LLMプロファイルには
+/// 末尾に「(既定)」を併記する (表示のみ。名前そのものやconfig.jsonには付与しない)。
 fn refill_profile_combo(h: HWND, sel: usize) {
-    let names: Vec<String> = PROFILES.with(|p| p.borrow().iter().map(|x| x.name.clone()).collect());
+    let default_name = DEFAULT_PROFILE.with(|d| d.borrow().clone());
+    let names: Vec<String> = PROFILES.with(|p| {
+        p.borrow()
+            .iter()
+            .map(|x| if x.name == default_name { format!("{} (既定)", x.name) } else { x.name.clone() })
+            .collect()
+    });
     let strs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+
     combo_reset(h, IDC_PROF_LIST);
     combo_fill(h, IDC_PROF_LIST, &strs, sel);
+}
+
+/// 【既定にする】ボタンの有効/無効を更新する。新規未保存中、または選択中が既に既定なら無効。
+fn update_prof_default_btn(h: HWND) {
+    let is_pending = PENDING_NEW.with(|f| *f.borrow());
+    let sel = combo_sel(h, IDC_PROF_LIST);
+    let is_current_default = !is_pending
+        && PROFILES.with(|p| {
+            let default_name = DEFAULT_PROFILE.with(|d| d.borrow().clone());
+            p.borrow().get(sel).map(|x| x.name == default_name).unwrap_or(false)
+        });
+    unsafe {
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_PROF_SET_DEFAULT).unwrap_or_default(),
+            !is_pending && !is_current_default,
+        );
+    }
 }
 
 fn load_profile_to_ui(h: HWND, idx: usize) {
@@ -747,9 +822,12 @@ fn save(h: HWND, ask_consent: bool) {
     PROFILES.with(|p| {
         cfg.api_profiles = p.borrow().clone();
     });
-    let sel = combo_sel(h, IDC_PROF_LIST);
-    if let Some(prof) = cfg.api_profiles.get(sel) {
-        cfg.active_api_profile = prof.name.clone();
+    // 既定LLMプロファイルは default_api_profile にのみ反映する。active_api_profile
+    // (セッションで使用中のプロファイル) には触れず、現行オーバーレイに波及させない。
+    // 【既定にする】ボタンでのみ変更される DEFAULT_PROFILE をそのまま書き込む。
+    let default_name = DEFAULT_PROFILE.with(|d| d.borrow().clone());
+    if cfg.api_profiles.iter().any(|p| p.name == default_name) {
+        cfg.default_api_profile = default_name;
     }
     
     cfg.autostart = check_get(h, IDC_AUTOSTART);
@@ -838,6 +916,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 {
                     // 既定エンジンの変更は外部送信の同意確認を伴う
                     auto_save(h, true);
+                    update_explanations(h);
                 }
                 IDC_AUTOSTART | IDC_PERFLOG | IDC_LOG_ENABLED | IDC_DEBUG_MODE | IDC_DETECT_MODE
                 | IDC_PREVIEW_DETECT_MODE
@@ -878,6 +957,26 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         );
                     }
                 }
+                IDC_RESET_SETTINGS => unsafe {
+                    let r = MessageBoxW(
+                        Some(h),
+                        w!("設定を初期状態にリセットします。この操作は元に戻せません。\nリセット後、アプリを自動的に再起動します。よろしいですか?"),
+                        w!("設定のリセット"),
+                        MB_YESNO | MB_ICONWARNING,
+                    );
+                    if r.0 == 6 {
+                        // IDYES
+                        let _ = std::fs::remove_file(Config::path());
+                        if let Ok(exe) = std::env::current_exe() {
+                            // 旧プロセスがミューテックスを解放し終える前に新プロセスが起動する
+                            // 可能性があるため、新プロセス側で再試行させる (main.rs 参照)。
+                            let _ = std::process::Command::new(exe).arg("--restart-wait").spawn();
+                        }
+                        CLOSING.with(|f| *f.borrow_mut() = true);
+                        let _ = DestroyWindow(h);
+                        let _ = DestroyWindow(crate::app_state::main_hwnd());
+                    }
+                },
                 IDC_PADDLE_INSTALL => {
                     start_install(
                         h,
@@ -905,6 +1004,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE {
                         if id == IDC_PROF_LIST {
                             load_profile_to_ui(h, combo_sel(h, IDC_PROF_LIST));
+                            update_prof_default_btn(h);
                             // アクティブプロファイルの変更を即保存する
                             auto_save(h, false);
                         } else {
@@ -923,9 +1023,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     combo_select(h, IDC_PROF_TYPE, 0);
                     // プロンプトはUI欄が無いため、保存時に既定値 (DEFAULT_GEMINI_*) を使う
                     PENDING_NEW.with(|f| *f.borrow_mut() = true);
+                    update_prof_default_btn(h);
                 }
                 IDC_PROF_SAVE | IDC_PROF_SAVEAS => {
                     let _ = save_profile_from_ui(h, id == IDC_PROF_SAVEAS);
+                    update_prof_default_btn(h);
                 }
                 IDC_PROF_DEL => {
                     let deleted = PROFILES.with(|p| {
@@ -936,7 +1038,15 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         }
                         let sel = combo_sel(h, IDC_PROF_LIST);
                         if sel < profiles.len() {
+                            let removed_name = profiles[sel].name.clone();
                             profiles.remove(sel);
+                            // 既定プロファイルを削除した場合は残りの先頭へ繰り上げる (宙に浮いた
+                            // default_api_profile 参照によるLLM機能の全停止を防ぐ)。
+                            if DEFAULT_PROFILE.with(|d| *d.borrow() == removed_name) {
+                                if let Some(first) = profiles.first() {
+                                    DEFAULT_PROFILE.with(|d| *d.borrow_mut() = first.name.clone());
+                                }
+                            }
                             true
                         } else {
                             false
@@ -945,6 +1055,17 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     if deleted {
                         refill_profile_combo(h, 0);
                         load_profile_to_ui(h, 0);
+                        update_prof_default_btn(h);
+                        auto_save(h, false);
+                    }
+                }
+                IDC_PROF_SET_DEFAULT => {
+                    let sel = combo_sel(h, IDC_PROF_LIST);
+                    let name = PROFILES.with(|p| p.borrow().get(sel).map(|x| x.name.clone()));
+                    if let Some(name) = name {
+                        DEFAULT_PROFILE.with(|d| *d.borrow_mut() = name);
+                        refill_profile_combo(h, sel);
+                        update_prof_default_btn(h);
                         auto_save(h, false);
                     }
                 }

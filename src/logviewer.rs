@@ -1095,7 +1095,14 @@ fn on_trans_selected(idx: usize) {
     let prompt = if !t.request_json.is_empty() {
         pretty_json(&t.request_json)
     } else {
-        String::new()
+        STATE.with(|s| {
+            let st = s.borrow();
+            if let Some(r_idx) = st.sel_recog {
+                st.recogs.get(r_idx).map(|r| r.source_text.clone()).unwrap_or_default()
+            } else {
+                String::new()
+            }
+        })
     };
     set_edit(IDC_TRANS_PROMPT, &prompt);
 

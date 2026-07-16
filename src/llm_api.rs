@@ -37,7 +37,8 @@ pub struct LlmResponse {
 /// 応答本文テキストとトークン数を取り出す。
 pub fn call(prof: &ApiProfile, req: &LlmRequest) -> Result<LlmResponse, String> {
     let key = prof.get_key();
-    if key.is_empty() {
+    let is_local = prof.api_url.contains("localhost") || prof.api_url.contains("127.0.0.1");
+    if key.is_empty() && !is_local {
         return Err(format!("APIキーが未設定です ({})", prof.name));
     }
     match prof.api_type {

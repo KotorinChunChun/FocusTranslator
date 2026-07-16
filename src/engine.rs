@@ -10,7 +10,7 @@ pub const OCR_LABELS: [&str; 4] = ["OneOCR", "MediaOCR", "Paddle", "LLM(統合)"
 /// 翻訳エンジンのキー配列
 pub const TR_KEYS: [&str; 4] = ["local", "deepl", "google", "llm"];
 /// 翻訳エンジンの表示ラベル
-pub const TR_LABELS: [&str; 4] = ["ローカル", "DeepL", "Google", "LLM"];
+pub const TR_LABELS: [&str; 4] = ["ONNX", "DeepL", "Google", "LLM"];
 
 /// OCRエンジンキーから表示ラベルを取得する
 pub fn ocr_label(key: &str) -> &'static str {
@@ -19,11 +19,11 @@ pub fn ocr_label(key: &str) -> &'static str {
 
 /// 翻訳エンジンキーから表示ラベルを取得する
 pub fn tr_label(key: &str) -> &'static str {
-    TR_KEYS.iter().position(|k| *k == key).map(|i| TR_LABELS[i]).unwrap_or("ローカル")
+    TR_KEYS.iter().position(|k| *k == key).map(|i| TR_LABELS[i]).unwrap_or("ONNX")
 }
 
 /// 翻訳エンジンの表示名を生成する。LLMの場合はプロファイル名を含める。
-/// (例: "LLM:Gemini Default", "DeepL", "ローカル")
+/// (例: "LLM:Gemini", "DeepL", "ONNX")
 pub fn tr_display_name(key: &str, cfg: &Config) -> String {
     if key == "llm" {
         let profile_name = cfg

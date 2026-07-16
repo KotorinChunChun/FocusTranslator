@@ -92,8 +92,8 @@ fn run_edit_action(action: impl FnOnce() -> Result<(), String>) {
 /// UIAノード・テキスト編集)。編集セッションと再認識の衝突によるUI操作不能を防ぐ。
 /// overlay_layout 側の無効表示と対で、ハンドラ側でも二重にガードする。
 fn forbidden_while_editing(id: usize) -> bool {
-    id < overlay::CHIP_OCR_BASE + engine::OCR_KEYS.len()
-        || (id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_TR_BASE + engine::TR_KEYS.len())
+    id < overlay::CHIP_TR_BASE
+        || (id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_COPY)
         || matches!(
             id,
             overlay::CHIP_EXPLAIN
@@ -489,23 +489,50 @@ pub fn handle_chip(id: usize) {
         _ => {}
     }
 
-    if id < overlay::CHIP_OCR_BASE + engine::OCR_KEYS.len() {
+    if id < overlay::CHIP_TR_BASE {
         // OCRエンジン切替: 保持画像で再認識→現行エンジンで再翻訳 (SPEC §8)
-        let key = engine::OCR_KEYS[id - overlay::CHIP_OCR_BASE].to_string();
-        if !cfg.engine_available(&key) {
+        let mut keys = Vec::new();
+        for k in engine::OCR_KEYS.iter() {
+            if *k != "llm" {
+                keys.push(k.to_string());
+            }
+        }
+        for prof in &cfg.api_profiles {
+            keys.push(prof.name.clone());
+        }
+        let idx = id - overlay::CHIP_OCR_BASE;
+        if idx >= keys.len() {
+            return;
+        }
+        let selected_key = keys[idx].clone();
+        let is_fixed = engine::OCR_KEYS.iter().any(|k| *k == selected_key && *k != "llm");
+        let target_ocr = if is_fixed { selected_key.clone() } else { "llm".to_string() };
+
+        let available = if is_fixed {
+            cfg.engine_available(&selected_key)
+        } else {
+            cfg.api_profiles.iter().find(|p| p.name == selected_key).is_some_and(|p| p.is_ready())
+        };
+        if !available {
             with_app(|app| {
-                app.status = Some(engine_unavailable_msg(&key));
+                app.status = Some(engine_unavailable_msg(&selected_key));
                 sync_overlay(app);
             });
             return;
         }
-        if !ensure_consent(&key, &cfg) {
+        if is_fixed && !ensure_consent(&selected_key, &cfg) {
             return;
         }
         let new_gen = with_app(|app| {
             app.generation += 1;
             app.mode = Mode::Pinned;
-            app.cur_ocr = key.clone();
+            if is_fixed {
+                app.cur_ocr = selected_key.clone();
+            } else {
+                app.cur_ocr = "llm".to_string();
+                app.cfg.active_api_profile = selected_key.clone();
+            }
+            app.cfg.save();
             app.status = Some("再認識中…".into());
             app.busy = true;
             sync_overlay(app);
@@ -514,30 +541,58 @@ pub fn handle_chip(id: usize) {
         .unwrap_or(0);
         let cfg2 = Config::load();
         crate::worker::reocr(
-            new_gen, capture_id, last_img, last_focus, origin.x, origin.y, target, key, cur_tr, cfg2,
+            new_gen, capture_id, last_img, last_focus, origin.x, origin.y, target, target_ocr, cur_tr, cfg2,
             main, anchor, held_app_title, held_app_exe, held_uia_path, held_uia_nodes, held_control_type,
         );
-    } else if id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_TR_BASE + engine::TR_KEYS.len() {
+    } else if id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_COPY {
         // 翻訳エンジン切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)
-        let key = engine::TR_KEYS[id - overlay::CHIP_TR_BASE].to_string();
+        let mut keys = Vec::new();
+        for k in engine::TR_KEYS.iter() {
+            if *k != "llm" {
+                keys.push(k.to_string());
+            }
+        }
+        for prof in &cfg.api_profiles {
+            keys.push(prof.name.clone());
+        }
+        let idx = id - overlay::CHIP_TR_BASE;
+        if idx >= keys.len() {
+            return;
+        }
+        let selected_key = keys[idx].clone();
+        let is_fixed = engine::TR_KEYS.iter().any(|k| *k == selected_key && *k != "llm");
+        let target_tr = if is_fixed { selected_key.clone() } else { "llm".to_string() };
+
         if source.is_empty() {
             return;
         }
-        if !cfg.engine_available(&key) {
+        let available = if is_fixed {
+            cfg.engine_available(&selected_key)
+        } else {
+            cfg.api_profiles.iter().find(|p| p.name == selected_key).is_some_and(|p| p.is_ready())
+        };
+        if !available {
             with_app(|app| {
-                app.status = Some(engine_unavailable_msg(&key));
+                app.status = Some(engine_unavailable_msg(&selected_key));
                 sync_overlay(app);
             });
             return;
         }
-        if !ensure_consent(&key, &cfg) {
+        if is_fixed && !ensure_consent(&selected_key, &cfg) {
             return;
         }
+
         let new_gen = with_app(|app| {
             app.generation += 1;
             app.mode = Mode::Pinned;
-            app.cur_tr = key.clone();
-            let engine_name = engine::tr_display_name(&key, &app.cfg);
+            if is_fixed {
+                app.cur_tr = selected_key.clone();
+            } else {
+                app.cur_tr = "llm".to_string();
+                app.cfg.active_api_profile = selected_key.clone();
+            }
+            app.cfg.save();
+            let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
             app.status = Some(format!("{} で翻訳中…", engine_name));
             app.translation = None;
             app.busy = true;
@@ -547,7 +602,7 @@ pub fn handle_chip(id: usize) {
         .unwrap_or(0);
         let cfg2 = Config::load();
         let pc = prompt_ctx_from_app(&source);
-        crate::worker::retranslate(new_gen, key, cfg2, source, main, recog_id, pc);
+        crate::worker::retranslate(new_gen, target_tr, cfg2, source, main, recog_id, pc);
     } else if id >= overlay::CHIP_UIA_NODE_BASE {
         // UIAパスノード選択: そのノードのテキストを原文として採用し再翻訳
         let idx = id - overlay::CHIP_UIA_NODE_BASE;

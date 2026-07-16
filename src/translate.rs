@@ -1,14 +1,15 @@
 // 翻訳エンジン群 (SPEC §7.2)
 // - local:  ローカルONNX翻訳(既定)。モデル未導入時はエラーを返す。
-// - deepl / google / llm: クラウドREST。失敗時は local へフォールバック。
+// - deepl / google / llm: クラウドREST。失敗時は local へフォールバックしない (誤って
+//   別エンジンの翻訳結果を表示すると利用者が気づけないため、エラーをそのまま提示する)。
 // 結果はメモリ内キャッシュ (SPEC: キャッシュヒット時 100〜200ms台)。
 // ログDB用に送受信JSON・トークン・言語・実際に使ったエンジンも返す。
 use crate::config::Config;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// キャッシュキー: (エンジン, 訳先言語, 原文)
-type CacheKey = (String, String, String);
+/// キャッシュキー: (エンジン, プロファイル, 訳先言語, 原文)
+type CacheKey = (String, Option<String>, String, String);
 static CACHE: Mutex<Option<HashMap<CacheKey, String>>> = Mutex::new(None);
 const CACHE_MAX: usize = 500;
 
@@ -21,18 +22,18 @@ pub struct TransDetail {
     pub tokens_out: Option<i64>,
 }
 
-/// 訳文と補足バッジ(フォールバック発生時など)+ ログ用メタ情報を返す
+/// 訳文と補足バッジ+ ログ用メタ情報を返す
+#[derive(Clone)]
 pub struct Translated {
     pub text: String,
     pub badge: Option<String>,
-    /// 実際に使ったエンジン(クラウド失敗時は "local" に変わる)
+    /// 実際に使ったエンジン
     pub engine: String,
     pub source_lang: String,
     pub target_lang: String,
     pub cache_hit: bool,
     pub detail: TransDetail,
-    /// DBキャッシュ(同一request_json)ヒット時、キャッシュ元のrecognition_id
-    /// (SPECv0.4.8追補: worker.rs側で親を跨いだ追記ログの要否判定に使う)
+    /// DBのログ上で再利用された場合に元の recognition_id を保持する
     pub db_cache_recog_id: Option<i64>,
 }
 
@@ -66,11 +67,11 @@ fn is_japanese_char(c: char) -> bool {
 
 /// 同一 request_json の翻訳結果がDBログに既にあれば (text, recognition_id) を返す。
 /// ログ機能OFF時はDBに触れず常に None (未初期化DBファイルを不用意に作らないため)。
-fn check_db_cache(cfg: &Config, request_json: &str) -> Option<(String, i64)> {
+fn check_db_cache(cfg: &Config, engine: &str, profile: Option<&str>, request_json: &str) -> Option<(String, i64)> {
     if !cfg.log_enabled {
         return None;
     }
-    crate::logdb::find_cached_translation(request_json).map(|(rid, text)| (text, rid))
+    crate::logdb::find_cached_translation(engine, profile, request_json).map(|(rid, text)| (text, rid))
 }
 
 /// 翻訳方向 (source, target) を決める。常に設定通り(cfg.source_lang → cfg.target_lang)に固定し、
@@ -92,7 +93,8 @@ pub(crate) fn mask_keys(cfg: &Config, s: &str) -> String {
     out
 }
 
-/// 指定エンジンで翻訳。クラウド失敗時は local へフォールバック (SPEC §11)。
+/// 指定エンジンで翻訳。失敗時は他エンジンへフォールバックせずエラーをそのまま返す
+/// (別エンジンの結果を無言で表示すると利用者が気づけないため)。
 /// ctx はLLM翻訳プロンプトのプレースホルダ置換に使う (SPECv0.4 §7.1)。
 /// 翻訳プロンプト実行時点では translated_text / tr_engine は常に空文字とする。
 pub fn translate(
@@ -107,7 +109,8 @@ pub fn translate(
     ctx.tr_engine.clear();
     let ctx = &ctx;
     let (source, target) = (cfg.source_lang.clone(), cfg.target_lang.clone());
-    let key = (engine.to_string(), target.clone(), text.to_string());
+    let profile = if engine == "llm" { Some(cfg.active_api_profile.clone()) } else { None };
+    let key = (engine.to_string(), profile, target.clone(), text.to_string());
 
     // キャッシュ確認
     {
@@ -147,22 +150,6 @@ pub fn translate(
                 detail,
                 db_cache_recog_id: db_rid,
             })
-        }
-        Err(e) if engine != "local" => {
-            // クラウド翻訳失敗 → ローカルへフォールバックし local バッジ表示
-            match translate_once("local", cfg, text, &target, ctx) {
-                Ok((t, detail, db_rid)) => Ok(Translated {
-                    text: t,
-                    badge: Some("local".into()),
-                    engine: "local".into(),
-                    source_lang: source,
-                    target_lang: target,
-                    cache_hit: false,
-                    detail,
-                    db_cache_recog_id: db_rid,
-                }),
-                Err(_) => Err(e),
-            }
         }
         Err(e) => Err(e),
     }
@@ -205,7 +192,7 @@ fn translate_deepl(cfg: &Config, text: &str, target: &str) -> Result<(String, Tr
     let req_json = mask_keys(cfg, &body.to_string());
     // 送信前にDBキャッシュを検索し、同一request_jsonの成功済み翻訳があればAPIを呼ばない
     // (SPECv0.4.8追補: 別の親であっても検索対象)。
-    if let Some((cached_text, rid)) = check_db_cache(cfg, &req_json) {
+    if let Some((cached_text, rid)) = check_db_cache(cfg, "deepl", None, &req_json) {
         let detail = TransDetail { request_json: Some(req_json), ..Default::default() };
         return Ok((cached_text, detail, Some(rid)));
     }
@@ -235,7 +222,7 @@ fn translate_google(cfg: &Config, text: &str, target: &str) -> Result<(String, T
     let url = format!("https://translation.googleapis.com/language/translate/v2?key={key}");
     let body = serde_json::json!({ "q": text, "target": target, "format": "text" });
     let req_json = mask_keys(cfg, &body.to_string());
-    if let Some((cached_text, rid)) = check_db_cache(cfg, &req_json) {
+    if let Some((cached_text, rid)) = check_db_cache(cfg, "google", None, &req_json) {
         let detail = TransDetail { request_json: Some(req_json), ..Default::default() };
         return Ok((cached_text, detail, Some(rid)));
     }
@@ -265,7 +252,7 @@ fn translate_llm(
     let prompt = cfg.fill_prompt(&prof.translate_prompt, ctx);
     let req = crate::llm_api::LlmRequest::text(&prompt);
     let req_json = mask_keys(cfg, &crate::llm_api::build_request_json(prof, &req));
-    if let Some((cached_text, rid)) = check_db_cache(cfg, &req_json) {
+    if let Some((cached_text, rid)) = check_db_cache(cfg, "llm", Some(&prof.name), &req_json) {
         let detail = TransDetail { request_json: Some(req_json), ..Default::default() };
         return Ok((cached_text, detail, Some(rid)));
     }
