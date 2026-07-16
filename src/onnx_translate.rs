@@ -247,6 +247,24 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // 一時的な調査用: 日本語入力を en→ja モデルに通したときの挙動を確認する
+    fn fugu_mt_direction_probe() {
+        let _guard = env_lock();
+        if !crate::onnx_translate_install::installed() {
+            eprintln!("モデル未導入のためスキップ");
+            return;
+        }
+        let ja_text = "Rustの reqwest や、一部のPythonクライアントでは、通信先の証明書を厳格に検証するオプションが用意されています。これにより、偽の証明書を挟み込んだ通信傍受を検知し、通信を強制的に遮断してAPIキーを守ることができます。";
+        let en_text = "In Rust's reqwest and some Python clients, there is an option to strictly verify the certificate of the destination. This makes it possible to detect interception using a forged certificate, forcibly cut the connection, and protect the API key.";
+        println!("--- 日本語入力を en→ja モデルへ (ユーザー報告の再現) ---");
+        println!("{}", translate(ja_text, true).unwrap_or_else(|e| format!("ERR: {e}")));
+        println!("--- 同じ日本語入力を ja→en モデルへ (正しい方向) ---");
+        println!("{}", translate(ja_text, false).unwrap_or_else(|e| format!("ERR: {e}")));
+        println!("--- 英語入力を en→ja モデルへ (本来の用途) ---");
+        println!("{}", translate(en_text, true).unwrap_or_else(|e| format!("ERR: {e}")));
+    }
+
+    #[test]
     fn fugu_mt_smoke() {
         let _guard = env_lock();
         if !crate::onnx_translate_install::installed() {

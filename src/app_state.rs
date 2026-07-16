@@ -405,6 +405,11 @@ fn start_cycle_params(app: &mut App) -> Option<(u64, i32, i32, isize, Config, is
     app.mode = Mode::Recognizing;
     app.origin = pt;
     app.target = target;
+    // 既定値の適用はこの右Ctrl起動時のみ。現在エンジン/プロファイルを既定へリセットしてから
+    // 認識サイクルを開始する (設定画面での既定変更が現行オーバーレイに波及しないのはこのため)。
+    app.cur_ocr = app.cfg.default_ocr.clone();
+    app.cur_tr = app.cfg.default_translator.clone();
+    app.cfg.active_api_profile = app.cfg.default_api_profile.clone();
     Some((app.generation, pt.x, pt.y, target, app.cfg.clone(), app.main.0 as isize))
 }
 
@@ -492,6 +497,9 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 sync_overlay(app);
             }
             worker::WorkerMsg::TranslationFailed { msg, engine: _ } => {
+                // 見出し・エンジン切替チップは残したいので translation を None にはしない。
+                // 本文だけ空にし、エラー内容はシステムメッセージ行 (status) へ出す。
+                app.translation = Some(String::new());
                 app.status = Some(msg);
                 sync_overlay(app);
             }
@@ -530,6 +538,10 @@ pub fn handle_region(rect: RECT) {
         app.generation += 1;
         app.mode = Mode::Recognizing;
         app.origin = POINT { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 };
+        // 範囲指定も起動経路なので、既定エンジン/プロファイルをこの時点で適用する。
+        app.cur_ocr = app.cfg.default_ocr.clone();
+        app.cur_tr = app.cfg.default_translator.clone();
+        app.cfg.active_api_profile = app.cfg.default_api_profile.clone();
         (app.generation, app.cfg.clone(), app.main.0 as isize)
     }) else {
         return;
@@ -539,9 +551,12 @@ pub fn handle_region(rect: RECT) {
 
 pub fn reload_config(hwnd: HWND) {
     with_app(|app| {
+        // 既定エンジン/プロファイルの変更は現行オーバーレイへ波及させない。既定値は
+        // 右Ctrl起動時 (start_cycle_params) にのみ適用される役割なので、ここでは
+        // セッションで使用中のエンジン (cur_ocr/cur_tr) とアクティブプロファイルを据え置く。
+        let keep_profile = app.cfg.active_api_profile.clone();
         app.cfg = Config::load();
-        app.cur_ocr = app.cfg.default_ocr.clone();
-        app.cur_tr = app.cfg.default_translator.clone();
+        app.cfg.active_api_profile = keep_profile;
         unsafe {
             let _ = KillTimer(Some(hwnd), TIMER_POLL);
             SetTimer(Some(hwnd), TIMER_POLL, app.cfg.poll_ms, None);
@@ -562,13 +577,35 @@ pub fn reload_config(hwnd: HWND) {
 
 /// App の状態をオーバーレイへ反映
 pub fn sync_overlay(app: &mut App) {
-    let mut ocr_enabled = [false; engine::OCR_KEYS.len()];
+    let mut ocr_keys = Vec::new();
+    let mut ocr_labels = Vec::new();
+    let mut ocr_enabled = Vec::new();
     for (i, k) in engine::OCR_KEYS.iter().enumerate() {
-        ocr_enabled[i] = app.cfg.engine_available(k);
+        if *k != "llm" {
+            ocr_keys.push(k.to_string());
+            ocr_labels.push(engine::OCR_LABELS[i].to_string());
+            ocr_enabled.push(app.cfg.engine_available(k));
+        }
     }
-    let mut tr_enabled = [false; engine::TR_KEYS.len()];
+    for prof in &app.cfg.api_profiles {
+        ocr_keys.push(prof.name.clone());
+        ocr_labels.push(prof.name.clone());
+        ocr_enabled.push(prof.is_ready());
+    }
+    let mut tr_keys = Vec::new();
+    let mut tr_labels = Vec::new();
+    let mut tr_enabled = Vec::new();
     for (i, k) in engine::TR_KEYS.iter().enumerate() {
-        tr_enabled[i] = app.cfg.engine_available(k);
+        if *k != "llm" {
+            tr_keys.push(k.to_string());
+            tr_labels.push(engine::TR_LABELS[i].to_string());
+            tr_enabled.push(app.cfg.engine_available(k));
+        }
+    }
+    for prof in &app.cfg.api_profiles {
+        tr_keys.push(prof.name.clone());
+        tr_labels.push(prof.name.clone());
+        tr_enabled.push(prof.is_ready());
     }
     let content = OverlayContent {
         main_hwnd: app.main.0 as isize,
@@ -587,14 +624,16 @@ pub fn sync_overlay(app: &mut App) {
         } else {
             None
         },
-        explain_engine: app
-            .cfg
-            .active_profile()
-            .map(|p| p.api_type.label().to_string())
-            .unwrap_or_default(),
+        explain_engine: app.cfg.active_profile().map(|p| p.name.clone()).unwrap_or_default(),
         via_uia: app.via_uia,
+        ocr_keys,
+        ocr_labels,
         ocr_enabled,
+        cur_ocr_chip_key: if app.cur_ocr == "llm" { app.cfg.active_api_profile.clone() } else { app.cur_ocr.clone() },
+        tr_keys,
+        tr_labels,
         tr_enabled,
+        cur_tr_chip_key: if app.cur_tr == "llm" { app.cfg.active_api_profile.clone() } else { app.cur_tr.clone() },
         explanation: app.explanation.clone(),
         explaining: app.explaining,
         error_only: app.error_only,

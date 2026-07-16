@@ -279,14 +279,14 @@ pub fn find_cached_recognition(image_hash: &str, engine: &str) -> Option<(i64, S
 /// 同一 request_json (APIキーはマスク済み) の成功済み翻訳結果があれば、その
 /// (recognition_id, translated_text) を返す (SPECv0.4.8追補: 翻訳APIキャッシュ)。
 /// 対象は request_json を記録するエンジン(deepl/google/llm)のみ。最新のものを優先する。
-pub fn find_cached_translation(request_json: &str) -> Option<(i64, String)> {
+pub fn find_cached_translation(engine: &str, profile: Option<&str>, request_json: &str) -> Option<(i64, String)> {
     with_conn_opt(|guard| {
         guard
             .query_row(
                 "SELECT recognition_id, translated_text FROM translations
-                 WHERE request_json = ?1 AND success = 1 AND translated_text IS NOT NULL
+                 WHERE request_json = ?1 AND engine = ?2 AND (llm_profile = ?3 OR (?3 IS NULL AND llm_profile IS NULL)) AND success = 1 AND translated_text IS NOT NULL
                  ORDER BY ts_ms DESC LIMIT 1",
-                rusqlite::params![request_json],
+                rusqlite::params![request_json, engine, profile],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .ok()
@@ -842,11 +842,11 @@ mod tests {
 
         // 翻訳・解説のDBキャッシュ検索 (SPECv0.4.8追補: API消費回避)
         assert_eq!(
-            find_cached_translation("{\"req\":1}"),
+            find_cached_translation("llm", Some("prof1"), "{\"req\":1}"),
             Some((rid, "こんにちは".to_string())),
             "同一request_jsonの成功済み翻訳がヒットする"
         );
-        assert_eq!(find_cached_translation("{\"req\":no-match}"), None);
+        assert_eq!(find_cached_translation("llm", Some("prof1"), "{\"req\":no-match}"), None);
         assert_eq!(
             find_cached_explanation("prompt text"),
             Some((rid, "prof1".to_string(), "解説文".to_string())),

@@ -4,7 +4,7 @@
 // - 余白部分は WM_NCHITTEST で HTTRANSPARENT を返し背面へクリック透過
 // - レイアウト計算は overlay_layout モジュールに委譲
 use crate::capture::Captured;
-use crate::engine;
+
 use crate::image_edit;
 use crate::overlay_layout::{self, Item, Layout};
 use std::cell::RefCell;
@@ -160,14 +160,20 @@ pub struct OverlayContent {
     /// 現在の翻訳方向 (翻訳結果ブロックの反転ボタン表示用)
     pub source_lang: String,
     pub target_lang: String,
-    /// LLM翻訳時の詳細(プロファイル名とモデル名)。例: "Gemini Default gemini-3.5-flash"
+    /// LLM翻訳時の詳細(プロファイル名とモデル名)。例: "Gemini gemini-3.5-flash"
     pub tr_engine_detail: Option<String>,
     /// 解説を生成するLLMの表示名 (解説結果ブロックの見出し用。例: "Gemini")
     pub explain_engine: String,
     /// 直近の認識が UIA 経路(OCR不要)で得られたか
     pub via_uia: bool,
-    pub ocr_enabled: [bool; engine::OCR_KEYS.len()],
-    pub tr_enabled: [bool; engine::TR_KEYS.len()],
+    pub ocr_keys: Vec<String>,
+    pub ocr_labels: Vec<String>,
+    pub ocr_enabled: Vec<bool>,
+    pub cur_ocr_chip_key: String,
+    pub tr_keys: Vec<String>,
+    pub tr_labels: Vec<String>,
+    pub tr_enabled: Vec<bool>,
+    pub cur_tr_chip_key: String,
     pub explanation: Option<String>,
     pub explaining: bool,
     pub error_only: bool,
