@@ -149,10 +149,11 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
         // HD (1280x720) のワークエリアに収まるサイズとする。
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
         let (win_y, win_h) = (10, 656.min(screen_h - 40));
+        let title_w = crate::util::to_wide(&format!("{} 設定", crate::util::APP_DISPLAY_NAME));
         if let Ok(h) = CreateWindowExW(
             WS_EX_TOPMOST,
             class,
-            w!("Focus Translator 設定"),
+            PCWSTR(title_w.as_ptr()),
             WS_CAPTION | WS_SYSMENU,
             CW_USEDEFAULT,
             win_y,
@@ -586,7 +587,7 @@ fn handle_install_done(h: HWND, wparam: WPARAM, lparam: LPARAM, refresh: fn(HWND
             MessageBoxW(
                 Some(h),
                 PCWSTR(wide.as_ptr()),
-                w!("Focus Translator"),
+                crate::util::display_name_pcwstr(),
                 MB_OK | MB_ICONINFORMATION,
             );
         }
@@ -729,7 +730,7 @@ fn open_prompt_editor(h: HWND, kind: crate::prompt_edit::PromptKind) {
             MessageBoxW(
                 Some(h),
                 w!("プロファイルが保存されていません。保存してからプロンプト編集を開きますか?"),
-                w!("Focus Translator"),
+                crate::util::display_name_pcwstr(),
                 MB_YESNO,
             )
         };
@@ -952,7 +953,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         MessageBoxW(
                             Some(h),
                             w!("外部送信の同意状態をリセットしました。"),
-                            w!("Focus Translator"),
+                            crate::util::display_name_pcwstr(),
                             MB_OK | MB_ICONINFORMATION,
                         );
                     }

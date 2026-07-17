@@ -24,7 +24,7 @@ fn make_nid(hwnd: HWND) -> NOTIFYICONDATAW {
         ..Default::default()
     };
     nid.hIcon = crate::app_state::app_icon();
-    let tip: Vec<u16> = "Focus Translator".encode_utf16().collect();
+    let tip: Vec<u16> = crate::util::APP_DISPLAY_NAME.encode_utf16().collect();
     nid.szTip[..tip.len()].copy_from_slice(&tip);
     nid
 }

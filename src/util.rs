@@ -18,6 +18,17 @@ pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// アプリの表示名。ウィンドウタイトル・MessageBox・トレイ等のユーザー向け表記に使う。
+/// 内部名 (ウィンドウクラス名・ミューテックス名・データフォルダ等) は FocusTranslator のまま。
+pub const APP_DISPLAY_NAME: &str = "なにこれ？（Focus Translator）";
+
+static DISPLAY_NAME_W: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+
+/// 表示名の PCWSTR。静的領域を指すのでそのまま API に渡してよい。
+pub fn display_name_pcwstr() -> windows::core::PCWSTR {
+    windows::core::PCWSTR(DISPLAY_NAME_W.get_or_init(|| to_wide(APP_DISPLAY_NAME)).as_ptr())
+}
+
 /// テスト用の直列化ロック。FOCUSTRANSLATOR_DATA_DIR を切り替えるテスト(logdb)と、
 /// 実データディレクトリのモデルを参照するテスト(onnx_translate)がプロセス内で
 /// 並行実行されると config_dir() の解決先が途中で変わるため、両者はこのロックを取る。

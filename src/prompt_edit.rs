@@ -143,7 +143,7 @@ fn confirm_discard_template(h: HWND) -> bool {
         MessageBoxW(
             Some(h),
             w!("テンプレートの変更が保存されていません。破棄しますか?"),
-            w!("Focus Translator"),
+            crate::util::display_name_pcwstr(),
             MB_YESNO | MB_ICONQUESTION,
         )
     };
@@ -631,7 +631,7 @@ fn handle_save(h: HWND) {
             MessageBoxW(
                 Some(h),
                 w!("該当プロファイルが見つからないため保存できませんでした。\n設定画面で削除された可能性があります。"),
-                w!("Focus Translator"),
+                crate::util::display_name_pcwstr(),
                 MB_OK,
             );
         }
@@ -646,7 +646,7 @@ fn handle_regen(h: HWND) {
             MessageBoxW(
                 Some(h),
                 w!("送信内容への編集は破棄されます。テンプレートから再生成しますか?"),
-                w!("Focus Translator"),
+                crate::util::display_name_pcwstr(),
                 MB_YESNO | MB_ICONQUESTION,
             )
         };
