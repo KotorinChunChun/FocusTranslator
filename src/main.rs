@@ -144,7 +144,7 @@ fn main() {
             MessageBoxW(
                 Some(main),
                 w!("範囲指定ホットキーを登録できませんでした。他のアプリと衝突しています。設定画面で変更してください。"),
-                w!("Focus Translator"),
+                util::display_name_pcwstr(),
                 MB_OK | MB_ICONWARNING,
             );
         }
@@ -154,7 +154,8 @@ fn main() {
     if !cfg.first_launch_done {
         unsafe {
             let msg = windows::core::HSTRING::from("初回起動です。\n高精度な画面認識(PaddleOCR)と、ONNX翻訳モデルをダウンロードしますか？\n（※画面認識は標準でOneOCR(Windows 11内蔵)を使用します。ONNXを導入しないとローカル翻訳ができません）");
-            let title = w!("Focus Translator - 初回セットアップ");
+            let title_w = util::to_wide(&format!("{} - 初回セットアップ", util::APP_DISPLAY_NAME));
+            let title = windows::core::PCWSTR(title_w.as_ptr());
             let result = MessageBoxW(Some(main), &msg, title, windows::Win32::UI::WindowsAndMessaging::MB_YESNO | windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION);
             if result == windows::Win32::UI::WindowsAndMessaging::IDYES {
                 settings::open(instance, main);

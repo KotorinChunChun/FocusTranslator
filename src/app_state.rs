@@ -566,7 +566,7 @@ pub fn reload_config(hwnd: HWND) {
                 MessageBoxW(
                     Some(hwnd),
                     w!("範囲指定ホットキーを登録できませんでした。他のアプリと衝突しています。"),
-                    w!("Focus Translator"),
+                    crate::util::display_name_pcwstr(),
                     MB_OK | MB_ICONWARNING,
                 );
             }

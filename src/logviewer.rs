@@ -178,10 +178,11 @@ pub fn open(instance: HINSTANCE) {
                 *r.borrow_mut() = true;
             }
         });
+        let title_w = crate::util::to_wide(&format!("{} ログビューア", crate::util::APP_DISPLAY_NAME));
         if let Ok(h) = CreateWindowExW(
             WS_EX_TOPMOST,
             class,
-            w!("Focus Translator ログビューア"),
+            PCWSTR(title_w.as_ptr()),
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -1883,7 +1884,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         logdb::clear_all();
                         reload();
                         unsafe {
-                            MessageBoxW(Some(h), w!("ログを削除しました。"), w!("Focus Translator"), MB_OK);
+                            MessageBoxW(Some(h), w!("ログを削除しました。"), crate::util::display_name_pcwstr(), MB_OK);
                         }
                     }
                 }
