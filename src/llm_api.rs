@@ -37,8 +37,9 @@ pub struct LlmResponse {
 /// 応答本文テキストとトークン数を取り出す。
 pub fn call(prof: &ApiProfile, req: &LlmRequest) -> Result<LlmResponse, String> {
     let key = prof.get_key();
-    let is_local = prof.api_url.contains("localhost") || prof.api_url.contains("127.0.0.1");
-    if key.is_empty() && !is_local {
+    // APIキー要否はチップ表示判定 (ApiProfile::is_ready) と同一基準に統一する。
+    // localhost判定だと、LAN上のサーバ等がチップ有効なのに呼び出しで失敗する齟齬が生じる。
+    if key.is_empty() && prof.requires_key() {
         return Err(format!("APIキーが未設定です ({})", prof.name));
     }
     match prof.api_type {

@@ -203,10 +203,10 @@ pub fn get_window_context(hwnd: HWND) -> (Option<String>, Option<String>) {
         let len = GetWindowTextLengthW(hwnd);
         if len > 0 {
             let mut buf = vec![0u16; (len + 1) as usize];
-            if GetWindowTextW(hwnd, &mut buf) > 0 {
-                if let Some(pos) = buf.iter().position(|&c| c == 0) {
-                    title = String::from_utf16(&buf[..pos]).ok();
-                }
+            if GetWindowTextW(hwnd, &mut buf) > 0
+                && let Some(pos) = buf.iter().position(|&c| c == 0)
+            {
+                title = String::from_utf16(&buf[..pos]).ok();
             }
         }
 
@@ -214,18 +214,18 @@ pub fn get_window_context(hwnd: HWND) -> (Option<String>, Option<String>) {
         let mut exe = None;
         let mut pid = 0;
         let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid > 0 {
-            if let Ok(hprocess) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
-                let mut path = vec![0u16; MAX_PATH as usize];
-                let mut size = MAX_PATH;
-                if QueryFullProcessImageNameW(hprocess, windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0), windows::core::PWSTR(path.as_mut_ptr()), &mut size).is_ok() {
-                    let full_path = String::from_utf16_lossy(&path[..size as usize]);
-                    if let Some(file_name) = std::path::Path::new(&full_path).file_name().and_then(|n| n.to_str()) {
-                        exe = Some(file_name.to_string());
-                    }
+        if pid > 0
+            && let Ok(hprocess) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+        {
+            let mut path = vec![0u16; MAX_PATH as usize];
+            let mut size = MAX_PATH;
+            if QueryFullProcessImageNameW(hprocess, windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0), windows::core::PWSTR(path.as_mut_ptr()), &mut size).is_ok() {
+                let full_path = String::from_utf16_lossy(&path[..size as usize]);
+                if let Some(file_name) = std::path::Path::new(&full_path).file_name().and_then(|n| n.to_str()) {
+                    exe = Some(file_name.to_string());
                 }
-                let _ = CloseHandle(hprocess);
             }
+            let _ = CloseHandle(hprocess);
         }
 
         (exe, title)

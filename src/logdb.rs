@@ -584,7 +584,7 @@ pub fn get_capture(id: i64) -> Option<CaptureRow> {
             .query_row(
                 &format!("SELECT {CAPTURE_COLS} FROM captures WHERE id=?1"),
                 rusqlite::params![id],
-                |r| map_capture_row(r),
+                map_capture_row,
             )
             .ok()
     })

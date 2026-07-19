@@ -1130,10 +1130,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             profiles.remove(sel);
                             // 既定プロファイルを削除した場合は残りの先頭へ繰り上げる (宙に浮いた
                             // default_api_profile 参照によるLLM機能の全停止を防ぐ)。
-                            if DEFAULT_PROFILE.with(|d| *d.borrow() == removed_name) {
-                                if let Some(first) = profiles.first() {
-                                    DEFAULT_PROFILE.with(|d| *d.borrow_mut() = first.name.clone());
-                                }
+                            if DEFAULT_PROFILE.with(|d| *d.borrow() == removed_name)
+                                && let Some(first) = profiles.first()
+                            {
+                                DEFAULT_PROFILE.with(|d| *d.borrow_mut() = first.name.clone());
                             }
                             true
                         } else {

@@ -213,8 +213,6 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         let mut swap_btn: Option<(String, i32, i32)> = None;
         // 【アプリケーション】行の右端ボタン (キャプチャ画像幅(0なら無し), 選択中の文字列幅, 上端Y)。
         let mut app_row_cap_btn: Option<(i32, i32, i32)> = None;
-        // システムメッセージ行の右端ボタン (設定ボタン幅, ログを開く幅, 上端Y)。
-        let sys_msg_btns: Option<(i32, i32, i32)>;
 
         if content.error_only {
             let msg = match &content.status {
@@ -363,7 +361,8 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             });
         }
         let sys_row_h = row_h.max(sys_text_h);
-        sys_msg_btns = Some((set_w, log_w, y + (sys_row_h - CHIP_H) / 2));
+        // システムメッセージ行の右端ボタン (設定ボタン幅, ログを開く幅, 上端Y)。
+        let sys_msg_btns = Some((set_w, log_w, y + (sys_row_h - CHIP_H) / 2));
         need_w = need_w.max(PAD + sys_text_w + 10 + sys_btns_w + PAD);
         y += sys_row_h + 8;
 
@@ -616,7 +615,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
 
         // 【解説】ブロック
         let block_start = y;
-        let heading = if let Some(_) = &content.explanation {
+        let heading = if content.explanation.is_some() {
             if content.explain_engine.is_empty() {
                 "【解説結果】".to_string()
             } else {
@@ -841,7 +840,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 let screen_h = wa.bottom - wa.top;
                 let mw = screen_w - w - PANEL_MARGIN * 2 - 10 - PAD * 2;
                 let mh = screen_h - PAD * 2 - (CHIP_H + 8) - (CHIP_H + PAD) - 10;
-                (mw.max(EDIT_PREVIEW_MAX_W).min(4000), mh.max(EDIT_PREVIEW_MAX_H).min(4000))
+                (mw.clamp(EDIT_PREVIEW_MAX_W, 4000), mh.clamp(EDIT_PREVIEW_MAX_H, 4000))
             };
 
             // 基準スケール: 拡大はせず(zoom=1.0時)最大サイズに収める。ズーム倍率を掛けた上で、

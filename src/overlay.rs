@@ -393,7 +393,7 @@ pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
             ..Default::default()
         };
         RegisterClassW(&wc);
-        let hwnd = CreateWindowExW(
+        CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::WS_EX_TRANSPARENT,
             class,
             w!("FocusTranslator"),
@@ -406,8 +406,7 @@ pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
             None,
             Some(instance),
             None,
-        ).unwrap_or_default();
-        hwnd
+        ).unwrap_or_default()
     }
 }
 

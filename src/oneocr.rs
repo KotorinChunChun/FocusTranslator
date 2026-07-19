@@ -189,7 +189,7 @@ fn get_proc(module: HMODULE, name: &CStr) -> Result<unsafe extern "system" fn() 
 macro_rules! proc_as {
     ($module:expr, $name:literal, $ty:ty) => {{
         let p = get_proc($module, $name)?;
-        unsafe { std::mem::transmute::<_, $ty>(p) }
+        unsafe { std::mem::transmute::<unsafe extern "system" fn() -> isize, $ty>(p) }
     }};
 }
 
