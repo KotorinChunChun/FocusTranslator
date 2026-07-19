@@ -51,7 +51,7 @@ fn adopt_text_and_retranslate(text: String, cur_tr: String, recog_id: Option<i64
 /// 「選択範囲を残す/消す」「元に戻す」は編集セッション内(overlay.rs)で完結し、
 /// OCR/翻訳の再実行はここ(編集終了時)でのみ行う。
 fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
-    let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe, uia_path, uia_nodes, control_type, selected_text)) =
+    let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, held_ctx)) =
         with_app(|app| {
             app.last_img = Some(new_img.clone());
             app.generation += 1;
@@ -66,12 +66,7 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
                 app.cfg.clone(),
                 app.main.0 as isize,
                 app.anchor,
-                app.app_title.clone(),
-                app.app_exe.clone(),
-                app.uia_path.clone(),
-                app.uia_nodes.clone(),
-                app.control_type.clone(),
-                app.selected_text.clone(),
+                app.held_ctx(),
             )
         })
     else {
@@ -83,10 +78,24 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
         crate::logdb::replace_capture_image(cid, &new_img);
     }
     let new_gen = with_app(|app| app.generation).unwrap_or(0);
-    crate::worker::reocr_edited(
-        new_gen, cap_id, new_img, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe,
-        uia_path, uia_nodes, control_type, selected_text,
-    );
+    // クロップ済みの新しい画像が対象のため、行/段落の絞り込みは行わず全体をOCRする
+    crate::worker::reocr(crate::worker::ReocrJob {
+        generation: new_gen,
+        capture_id: cap_id,
+        img: Some(new_img),
+        focus: crate::ocr::Focus::All,
+        x: 0,
+        y: 0,
+        target: 0,
+        ocr_engine,
+        tr_engine: cur_tr2,
+        cfg: cfg2,
+        main: main2,
+        anchor: anchor2,
+        ctx: held_ctx,
+        force_pin: true,
+        perf_label: "reocr_edited",
+    });
 }
 
 /// 画像編集のUndo履歴を1段階巻き戻す(編集セッション内で完結、OCRは再実行しない)。
@@ -149,19 +158,14 @@ pub fn handle_chip(id: usize) {
             app.cur_tr.clone(),
             app.recog_id,
             app.capture_id,
-            app.app_title.clone(),
-            app.app_exe.clone(),
-            app.uia_path.clone(),
-            app.uia_nodes.clone(),
-            app.control_type.clone(),
-            app.selected_text.clone(),
+            app.held_ctx(),
         )
     }) else {
         return;
     };
     let (
         cfg, source, last_img, last_focus, origin, target, main, anchor, cur_tr, recog_id, capture_id,
-        held_app_title, held_app_exe, held_uia_path, held_uia_nodes, held_control_type, held_selected_text,
+        held_ctx,
     ) = info;
 
     match id {
@@ -573,11 +577,23 @@ pub fn handle_chip(id: usize) {
         })
         .unwrap_or(0);
         let cfg2 = Config::load();
-        crate::worker::reocr(
-            new_gen, capture_id, last_img, last_focus, origin.x, origin.y, target, target_ocr, cur_tr, cfg2,
-            main, anchor, held_app_title, held_app_exe, held_uia_path, held_uia_nodes, held_control_type,
-            held_selected_text,
-        );
+        crate::worker::reocr(crate::worker::ReocrJob {
+            generation: new_gen,
+            capture_id,
+            img: last_img,
+            focus: last_focus,
+            x: origin.x,
+            y: origin.y,
+            target,
+            ocr_engine: target_ocr,
+            tr_engine: cur_tr,
+            cfg: cfg2,
+            main,
+            anchor,
+            ctx: held_ctx,
+            force_pin: false,
+            perf_label: "reocr",
+        });
     } else if (overlay::CHIP_TR_BASE..overlay::CHIP_COPY).contains(&id) {
         // 翻訳エンジン切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)
         let mut keys = Vec::new();

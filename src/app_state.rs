@@ -111,6 +111,21 @@ pub struct App {
     pub hold_start: Option<std::time::Instant>,
 }
 
+impl App {
+    /// 保持中の対象アプリ情報からキャプチャ時点の AppContext を復元する
+    /// (再認識ジョブへ渡す用。exe は空文字を None として扱う)。
+    pub fn held_ctx(&self) -> worker::AppContext {
+        worker::AppContext {
+            exe: if self.app_exe.is_empty() { None } else { Some(self.app_exe.clone()) },
+            title: self.app_title.clone(),
+            uia_path: self.uia_path.clone(),
+            uia_nodes: self.uia_nodes.clone(),
+            control_type: self.control_type.clone(),
+            selected_text: self.selected_text.clone(),
+        }
+    }
+}
+
 thread_local! {
     static APP: RefCell<Option<App>> = const { RefCell::new(None) };
     static MAIN_HWND: RefCell<isize> = const { RefCell::new(0) };
@@ -463,7 +478,8 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
         }
         app.busy = false;
         match msg {
-            worker::WorkerMsg::Source { text, method, engine, img, pin, anchor, focus, ms, capture_id, recog_id, app_title, app_exe, uia_path, uia_nodes, control_type, selected_text } => {
+            worker::WorkerMsg::Source(src) => {
+                let worker::SourceMsg { text, method, engine, img, pin, anchor, focus, ms, capture_id, recog_id, ctx } = *src;
                 if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
                     return;
                 }
@@ -484,12 +500,12 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.anchor = anchor;
                 app.capture_id = capture_id;
                 app.recog_id = recog_id;
-                app.app_title = app_title;
-                app.app_exe = app_exe;
-                app.uia_path = uia_path;
-                app.uia_nodes = uia_nodes;
-                app.control_type = control_type;
-                app.selected_text = selected_text;
+                app.app_title = ctx.title;
+                app.app_exe = ctx.exe.unwrap_or_default();
+                app.uia_path = ctx.uia_path;
+                app.uia_nodes = ctx.uia_nodes;
+                app.control_type = ctx.control_type;
+                app.selected_text = ctx.selected_text;
                 app.scroll_y = 0;
                 // キャプチャ内容が変わったら解説を初期化する (SPECv0.4.8追補: 開く度に解説をリセット)
                 app.explanation = None;
@@ -518,14 +534,14 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.error_only = false;
                 sync_overlay(app);
             }
-            worker::WorkerMsg::TranslationFailed { msg, engine: _ } => {
+            worker::WorkerMsg::TranslationFailed { msg } => {
                 // 見出し・エンジン切替チップは残したいので translation を None にはしない。
                 // 本文だけ空にし、エラー内容はシステムメッセージ行 (status) へ出す。
                 app.translation = Some(String::new());
                 app.status = Some(msg);
                 sync_overlay(app);
             }
-            worker::WorkerMsg::Error { msg, anchor, engine: _ } => {
+            worker::WorkerMsg::Error { msg, anchor } => {
                 app.explaining = false;
                 if !app.source.is_empty() {
                     app.status = Some(msg);
