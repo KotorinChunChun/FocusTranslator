@@ -105,6 +105,7 @@ fn main() {
         HINSTANCE(GetModuleHandleW(None).map(|m| m.0).unwrap_or(std::ptr::null_mut()))
     };
     let mut cfg = Config::load();
+    overlay_layout::apply_theme(&cfg.overlay_theme);
 
     // メイン(非表示)ウィンドウ
     let main = unsafe {

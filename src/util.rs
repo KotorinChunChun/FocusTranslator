@@ -22,6 +22,10 @@ pub fn to_wide(s: &str) -> Vec<u16> {
 /// 内部名 (ウィンドウクラス名・ミューテックス名・データフォルダ等) は FocusTranslator のまま。
 pub const APP_DISPLAY_NAME: &str = "なにこれ？（Focus Translator）";
 
+/// アプリの短縮表示名。オーバーレイのシステムメッセージ行など、常時表示する
+/// タイトルとして使う (括弧書きの英語名までは表示しない)。
+pub const APP_SHORT_NAME: &str = "なにこれ？";
+
 static DISPLAY_NAME_W: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
 
 /// 表示名の PCWSTR。静的領域を指すのでそのまま API に渡してよい。
@@ -129,6 +133,28 @@ pub fn truncate_chars(s: &str, max_chars: usize) -> String {
     } else {
         let t: String = s.chars().take(max_chars).collect();
         format!("{t}…")
+    }
+}
+
+/// Windowsのアプリモード (設定 > 個人用設定 > 色) がライトモードか。
+/// レジストリ AppsUseLightTheme (1=ライト / 0=ダーク) を読む。読めない環境はダーク扱い。
+pub fn system_apps_light_theme() -> bool {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    use windows::core::w;
+    let mut data: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut data as *mut u32 as *mut _),
+            Some(&mut size),
+        )
+        .is_ok()
+            && data != 0
     }
 }
 

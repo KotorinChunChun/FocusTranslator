@@ -151,6 +151,8 @@ pub struct Config {
     pub log_max_records: u32,
     /// 初回起動時のセットアップ提案ダイアログを表示済みか
     pub first_launch_done: bool,
+    /// オーバーレイの配色テーマ: "system" (Windowsのアプリモードに追従) | "light" | "dark"
+    pub overlay_theme: String,
 }
 
 /// 翻訳プロンプトの既定値
@@ -246,6 +248,7 @@ impl Default for Config {
             preview_detect_enabled: false,
             log_max_records: 5000,
             first_launch_done: false,
+            overlay_theme: "system".into(),
         }
     }
 }

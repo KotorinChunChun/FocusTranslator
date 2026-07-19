@@ -18,29 +18,110 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::core::w;
 
-// 配色定数
-pub const COL_BG: u32 = 0x00221E1C;
-pub const COL_BORDER: u32 = 0x00524A46;
-// 本文テキスト (アプリ名行・UIA/OCR結果・訳文) は視認性のため純白 (SPECv0.4 §6)
-pub const COL_TEXT: u32 = 0x00FFFFFF;
-pub const COL_STATUS: u32 = 0x0050C8FF;
-pub const COL_CHIP: u32 = 0x003F3833;
-pub const COL_CHIP_ACTIVE: u32 = 0x00D28C3C;
-/// ホバー中のチップ背景色 (COL_CHIPより明るいグレー。フォーカス可視化用)
-pub const COL_CHIP_HOVER: u32 = 0x00554C44;
-/// ホバー中のアクティブチップ背景色 (COL_CHIP_ACTIVEより明るいオレンジ)
-pub const COL_CHIP_ACTIVE_HOVER: u32 = 0x00E6A356;
-pub const COL_CHIP_TEXT: u32 = 0x00E8E4E0;
-pub const COL_CHIP_DISABLED: u32 = 0x00787068;
-pub const COL_LABEL: u32 = 0x00908A84;
-pub const COL_PANEL_BG: u32 = 0x002B2723;
-pub const COL_PANEL_BORDER: u32 = 0x00423C37;
-pub const COL_ACCENT_INFO: u32 = 0x0050B4FF;
-pub const COL_ACCENT_OCR: u32 = 0x007864FF;
-pub const COL_ACCENT_TR: u32 = 0x00C850DC;
-pub const COL_ACCENT_EXPLAIN: u32 = 0x00FF5082;
-pub const COL_UIA_BADGE: u32 = 0x0080D0A0;
-pub const COL_CLOSE_HOVER: u32 = 0x003C3CD6;
+/// オーバーレイの配色一式。config.overlay_theme ("system" | "light" | "dark") に応じて
+/// apply_theme() で THEME_DARK / THEME_LIGHT を切り替える。色値は COLORREF (0x00BBGGRR)。
+#[derive(Clone, Copy, PartialEq)]
+pub struct Theme {
+    pub bg: u32,
+    pub border: u32,
+    /// 本文テキスト (アプリ名行・UIA/OCR結果・訳文) は背景と最大コントラストにする (SPECv0.4 §6)
+    pub text: u32,
+    pub status: u32,
+    pub chip: u32,
+    pub chip_active: u32,
+    /// ホバー中のチップ背景色 (chip より明るいグレー。フォーカス可視化用)
+    pub chip_hover: u32,
+    /// ホバー中のアクティブチップ背景色 (chip_active より明るい同系色)
+    pub chip_active_hover: u32,
+    pub chip_text: u32,
+    /// アクティブなチップ (chip_active/chip_active_hover 背景) の文字色。
+    /// chip_active の橙背景は明背景でも読みやすいよう、両テーマ共通で白系にする。
+    pub chip_active_text: u32,
+    pub chip_disabled: u32,
+    pub label: u32,
+    pub panel_bg: u32,
+    pub panel_border: u32,
+    pub accent_info: u32,
+    pub accent_tr: u32,
+    pub accent_explain: u32,
+    pub uia_badge: u32,
+    pub close_hover: u32,
+}
+
+/// ダークテーマ (従来配色)
+const THEME_DARK: Theme = Theme {
+    bg: 0x00221E1C,
+    border: 0x00524A46,
+    text: 0x00FFFFFF,
+    status: 0x0050C8FF,
+    chip: 0x003F3833,
+    chip_active: 0x00D28C3C,
+    chip_hover: 0x00554C44,
+    chip_active_hover: 0x00E6A356,
+    chip_text: 0x00E8E4E0,
+    chip_active_text: 0x00FFFFFF,
+    chip_disabled: 0x00787068,
+    label: 0x00908A84,
+    panel_bg: 0x002B2723,
+    panel_border: 0x00423C37,
+    accent_info: 0x0050B4FF,
+    accent_tr: 0x00C850DC,
+    // 元の紫 (0x00FF5082) は暗背景で沈んで読みづらかったため、輝度の高いラベンダーへ調整。
+    accent_explain: 0x00FFA8D8,
+    uia_badge: 0x0080D0A0,
+    close_hover: 0x003C3CD6,
+};
+
+/// ライトテーマ: ダークと同じ色相構成を明背景向けに調整する。
+/// 背景は温かみのある白、カードは純白、本文は濃色。テキストとして使うアクセント色
+/// (status / label / accent_info / accent_explain / uia_badge) は白地で読めるよう暗めに補正する。
+const THEME_LIGHT: Theme = Theme {
+    bg: 0x00F7F4F1,
+    border: 0x00BFB8B3,
+    text: 0x00201C1A,
+    status: 0x002C6E8C,
+    chip: 0x00E9E4DF,
+    chip_active: 0x00D28C3C,
+    chip_hover: 0x00D9D2CB,
+    chip_active_hover: 0x00E6A356,
+    chip_text: 0x003B3531,
+    chip_active_text: 0x00FFFFFF,
+    chip_disabled: 0x00ABA49E,
+    label: 0x00706962,
+    panel_bg: 0x00FFFFFF,
+    panel_border: 0x00D9D3CE,
+    accent_info: 0x0032709E,
+    accent_tr: 0x00903A9E,
+    // ダーク側と同じ色相 (ラベンダー) を白背景向けの明度に調整。
+    accent_explain: 0x00C45A8E,
+    uia_badge: 0x00467258,
+    close_hover: 0x00A8A8E8,
+};
+
+thread_local! {
+    static THEME_IS_LIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 現在のテーマ (オーバーレイのレイアウト計算・描画から参照する)
+pub fn theme() -> &'static Theme {
+    if THEME_IS_LIGHT.with(|c| c.get()) { &THEME_LIGHT } else { &THEME_DARK }
+}
+
+/// 設定値 ("system" | "light" | "dark") から現在テーマを確定する。
+/// "system" は Windows のアプリモード (AppsUseLightTheme) に追従する。
+/// テーマが実際に切り替わったときのみ true を返す (呼び出し側の再描画判定用)。
+pub fn apply_theme(mode: &str) -> bool {
+    let light = match mode {
+        "light" => true,
+        "dark" => false,
+        _ => crate::util::system_apps_light_theme(),
+    };
+    THEME_IS_LIGHT.with(|c| {
+        let changed = c.get() != light;
+        c.set(light);
+        changed
+    })
+}
 
 pub const PAD: i32 = 12;
 pub const PANEL_MARGIN: i32 = 6;
@@ -121,6 +202,7 @@ pub fn measure(hdc: HDC, text: &str, size: i32, bold: bool, maxw: i32) -> (i32, 
 
 pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
     unsafe {
+        let thm = theme();
         let hdc = GetDC(Some(hwnd));
         let mut items: Vec<Item> = Vec::new();
         let mut panel_spans: Vec<(i32, i32, u32)> = Vec::new();
@@ -134,13 +216,16 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         let sys_msg_btns: Option<(i32, i32, i32)>;
 
         if content.error_only {
-            let msg = content.status.clone().unwrap_or_default();
+            let msg = match &content.status {
+                Some(s) if !s.is_empty() => format!("{} - {}", crate::util::APP_SHORT_NAME, s),
+                _ => crate::util::APP_SHORT_NAME.to_string(),
+            };
             let (tw, th) = measure(hdc, &msg, FONT_HEADING, false, MAXW);
             items.push(Item::Text {
                 rect: RECT { left: PAD, top: y, right: PAD + tw + 4, bottom: y + th },
                 text: msg,
                 size: FONT_HEADING,
-                color: COL_STATUS,
+                color: thm.status,
                 bold: false,
             });
             y += th + PAD;
@@ -221,27 +306,35 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         };
 
         // システムメッセージ行 (テキスト ＋ 右端に[設定][ログを開く])
+        // アプリ名 (APP_SHORT_NAME) を常時タイトルとして表示し、状態メッセージがあれば
+        // 「なにこれ？ - キャプチャしました。」のように続けて表示する。
         // 進行中メッセージ(末尾が「…」)はドットをアニメーションし、エラー等はそのまま出す。
-        let mut sys_disp = String::new();
+        let mut msg_part = String::new();
         if let Some(s) = &content.status {
             let is_progress = s.ends_with('…');
-            sys_disp = s.clone();
+            msg_part = s.clone();
             if is_progress {
                 let millis = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis();
                 let count = (millis / 300) % 4;
-                sys_disp = sys_disp.replace("…", "");
-                sys_disp.push_str(&".".repeat(count as usize));
+                msg_part = msg_part.replace("…", "");
+                msg_part.push_str(&".".repeat(count as usize));
             }
         }
 
         if let Some(b) = &content.badge {
-            if !sys_disp.is_empty() {
-                sys_disp.push_str("  ");
+            if !msg_part.is_empty() {
+                msg_part.push_str("  ");
             }
-            sys_disp.push_str(&format!("[{}]", b));
+            msg_part.push_str(&format!("[{}]", b));
+        }
+
+        let mut sys_disp = crate::util::APP_SHORT_NAME.to_string();
+        if !msg_part.is_empty() {
+            sys_disp.push_str(" - ");
+            sys_disp.push_str(&msg_part);
         }
 
         // ボタンの幅計算
@@ -264,7 +357,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 rect: RECT { left: PAD, top: text_y, right: PAD + tw + 4, bottom: text_y + th },
                 text: sys_disp,
                 size: FONT_HEADING,
-                color: COL_STATUS,
+                color: thm.status,
                 bold: false,
             });
         }
@@ -280,7 +373,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 &mut items,
                 y,
                 "【入力内容】",
-                COL_LABEL,
+                thm.accent_info,
                 &[("📋", CHIP_COPY_INFO, true)],
                 &mut need_w,
             );
@@ -312,7 +405,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                     rect: RECT { left: PAD, top: text_y, right: PAD + tw + 4, bottom: text_y + th },
                     text: info,
                     size: FONT_INFO,
-                    color: COL_TEXT,
+                    color: thm.text,
                     bold: false,
                 });
                 app_row_cap_btn = Some((cap_w, y));
@@ -353,7 +446,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                             rect: RECT { left: x, top: sy, right: x + sep_w, bottom: sy + sep_h },
                             text: sep.to_string(),
                             size: FONT_CHIP,
-                            color: COL_LABEL,
+                            color: thm.label,
                             bold: false,
                         });
                         x += sep_w + 6;
@@ -381,13 +474,13 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                     rect: RECT { left: PAD, top: y, right: PAD + cw + 20, bottom: y + CHIP_H },
                     label: lab.to_string(),
                     id: CHIP_IMAGE,
-                    active: false,
+                    active: content.edit.is_some(),
                     enabled: true,
                 });
                 y += CHIP_H + 4;
             }
             y += 4;
-            panel_spans.push((block_start, y, COL_ACCENT_INFO));
+            panel_spans.push((block_start, y, thm.accent_info));
             y += 6;
         }
 
@@ -399,7 +492,8 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             } else {
                 format!("【OCR結果 ({})】", engine::ocr_label(&content.cur_ocr))
             };
-            let heading_color = if content.via_uia { COL_UIA_BADGE } else { COL_LABEL };
+            // OCR結果もUIA取得結果も同じ配色にする (取得経路による区別は見出し文言のみで示す)
+            let heading_color = thm.uia_badge;
             let hh = heading_row(
                 &mut items,
                 y,
@@ -417,7 +511,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 rect,
                 text: content.source.clone(),
                 size: FONT_BODY,
-                color: COL_TEXT,
+                color: thm.text,
                 bold: false,
             });
             y += text_h + 6;
@@ -435,7 +529,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 CHIP_OCR_BASE,
                 &mut need_w,
             );
-            let accent = if content.via_uia { COL_UIA_BADGE } else { COL_ACCENT_OCR };
+            let accent = thm.uia_badge;
             panel_spans.push((block_start, y, accent));
             y += 6;
         }
@@ -462,7 +556,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 &mut items,
                 y,
                 &heading,
-                COL_LABEL,
+                thm.accent_tr,
                 &[("📋", CHIP_COPY_TR, true), ("✏️", CHIP_EDIT_TR, true)],
                 &mut need_w,
             );
@@ -475,7 +569,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 rect,
                 text: t.clone(),
                 size: FONT_BODY,
-                color: COL_TEXT,
+                color: thm.text,
                 bold: true,
             });
             y += text_h + 8;
@@ -494,7 +588,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             if let Some((_, _, ref mut by)) = swap_btn {
                 *by = y - CHIP_H;
             }
-            panel_spans.push((block_start, y, COL_ACCENT_TR));
+            panel_spans.push((block_start, y, thm.accent_tr));
             y += 6;
         }
 
@@ -516,7 +610,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             &mut items,
             y,
             &heading,
-            COL_ACCENT_EXPLAIN,
+            thm.accent_explain,
             copy_btns,
             &mut need_w,
         );
@@ -528,7 +622,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
                 text: "解説を取得中...".to_string(),
                 size: FONT_HEADING,
-                color: COL_STATUS,
+                color: thm.status,
                 bold: false,
             });
             y += th + 8;
@@ -541,7 +635,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 rect,
                 text: expl.clone(),
                 size: FONT_BODY,
-                color: COL_TEXT,
+                color: thm.text,
                 bold: false,
             });
             y += text_h + 8;
@@ -569,7 +663,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         need_w = need_w.max(x + PAD - 6);
         y += CHIP_H + 6;
 
-        panel_spans.push((block_start, y, COL_ACCENT_EXPLAIN));
+        panel_spans.push((block_start, y, thm.accent_explain));
         y += 6;
 
         let w = need_w.min(MAXW + PAD * 2);
@@ -674,7 +768,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                     rect: RECT { left: cap_left, top: ty, right: cap_right, bottom: ty + CHIP_H },
                     label: "キャプチャ画像".to_string(),
                     id: CHIP_IMAGE,
-                    active: false,
+                    active: content.edit.is_some(),
                     enabled: !content.busy,
                 });
             }
