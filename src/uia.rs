@@ -8,7 +8,8 @@ use windows::Win32::System::Ole::{
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern,
-    IUIAutomationTextRange, TextUnit_Line, TextUnit_Paragraph, UIA_TextPatternId,
+    IUIAutomationTextRange, IUIAutomationTextRangeArray, IUIAutomationValuePattern,
+    TextUnit_Line, TextUnit_Paragraph, UIA_TextPatternId, UIA_ValuePatternId,
     UIA_DocumentControlTypeId, UIA_EditControlTypeId,
     UIA_AppBarControlTypeId, UIA_ButtonControlTypeId, UIA_CalendarControlTypeId,
     UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId,
@@ -25,6 +26,35 @@ use windows::Win32::UI::Accessibility::{
     UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_WindowControlTypeId,
 };
 use windows::core::Interface;
+
+/// UIA由来テキストに混入する不可視文字か (U+FFFC: 埋め込みオブジェクトの代替文字。
+/// Teams等のリッチテキストではアイコン/アバター1個につき1文字入り、大量に混入することがある。
+/// ゼロ幅文字・BOMも同様に翻訳対象として無意味なため除去する)
+fn is_invisible_char(c: char) -> bool {
+    matches!(c, '\u{FFFC}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}')
+}
+
+/// カーソル位置の段落/行が特定できない場合に、UIA全文をそのまま採用してよい上限文字数。
+/// これを超える場合は誤って長文全体を読み取り結果にしてしまう(段落特定に失敗しているだけ
+/// かもしれない)リスクが高いため、従来通りOCRへフォールバックする。
+const UIA_FULLTEXT_MAX: usize = 200;
+
+/// 段落/行が特定できない全文を、カーソル位置の特定を待たずそのままUIA経路のテキストとして
+/// 採用してよいか (UIA_FULLTEXT_MAX 以下か)。
+fn should_adopt_fulltext(char_count: usize) -> bool {
+    char_count <= UIA_FULLTEXT_MAX
+}
+
+/// UIAから取得したテキストの不可視文字を除去する。除去跡が単語同士の連結にならないよう
+/// 一旦空白へ置換してから、行を保ったまま連続する空白を1つに畳む。
+fn sanitize_uia_text(s: &str) -> String {
+    let replaced: String = s.chars().map(|c| if is_invisible_char(c) { ' ' } else { c }).collect();
+    replaced
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// TextPattern 探索の結果: テキストが見つかった要素と、その行(または文書)範囲
 struct TextHit {
@@ -51,24 +81,29 @@ fn find_text_hit(auto: &IUIAutomation, el: IUIAutomationElement, pt: POINT) -> O
                 }
             }
 
+            let ctrl_type = e.CurrentControlType().unwrap_or(windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(0));
+            let is_edit = ctrl_type == UIA_EditControlTypeId || ctrl_type == UIA_DocumentControlTypeId;
+
             if let Ok(unk) = e.GetCurrentPattern(UIA_TextPatternId)
                 && let Ok(tp) = unk.cast::<IUIAutomationTextPattern>() {
 
-                    let ctrl_type = e.CurrentControlType().unwrap_or(windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(0));
-                    let is_edit = ctrl_type == UIA_EditControlTypeId || ctrl_type == UIA_DocumentControlTypeId;
+                    // 複数行Edit/Documentで、後段のRangeFromPointによる段落/行特定が
+                    // 失敗した場合の最終フォールバック候補。単一行なら従来通り即採用する。
+                    let mut fulltext_fallback: Option<(IUIAutomationTextRange, String)> = None;
 
-                    if is_edit {
-                        if let Ok(doc_range) = tp.DocumentRange() {
-                            if let Ok(full_text) = doc_range.GetText(-1) {
-                                let full_str = full_text.to_string();
-                                let is_multiline = full_str.contains('\n') || full_str.contains('\r');
-                                if !is_multiline {
-                                    let line = full_str.trim().to_string();
-                                    if !line.is_empty() {
-                                        return Some(TextHit { element: e, range: Some(doc_range), text: line });
-                                    }
-                                }
+                    if is_edit
+                        && let Ok(doc_range) = tp.DocumentRange()
+                        && let Ok(full_text) = doc_range.GetText(-1)
+                    {
+                        let full_str = sanitize_uia_text(&full_text.to_string());
+                        let is_multiline = full_str.contains('\n') || full_str.contains('\r');
+                        let line = full_str.trim().to_string();
+                        if !is_multiline {
+                            if !line.is_empty() {
+                                return Some(TextHit { element: e, range: Some(doc_range), text: line });
                             }
+                        } else if !line.is_empty() {
+                            fulltext_fallback = Some((doc_range, line));
                         }
                     }
 
@@ -79,7 +114,7 @@ fn find_text_hit(auto: &IUIAutomation, el: IUIAutomationElement, pt: POINT) -> O
                         if let Ok(para) = range.Clone() {
                             let _ = para.ExpandToEnclosingUnit(TextUnit_Paragraph);
                             if let Ok(t) = para.GetText(1200) {
-                                let s = t.to_string();
+                                let s = sanitize_uia_text(&t.to_string());
                                 let lines: Vec<String> =
                                     s.lines().map(|l| l.trim().to_string()).collect();
                                 let joined = crate::ocr::join_paragraph(&lines);
@@ -90,17 +125,76 @@ fn find_text_hit(auto: &IUIAutomation, el: IUIAutomationElement, pt: POINT) -> O
                         }
                         let _ = range.ExpandToEnclosingUnit(TextUnit_Line);
                         if let Ok(text) = range.GetText(512) {
-                            let s = text.to_string();
+                            let s = sanitize_uia_text(&text.to_string());
                             let line = first_meaningful_line(&s);
                             if !line.is_empty() {
                                 return Some(TextHit { element: e, range: Some(range), text: line });
                             }
                         }
                     }
+
+                    // 段落/行が特定できなかった。全文が短ければ(UIA_FULLTEXT_MAX以下)
+                    // OCRへ落とさずそのまま採用する (SPECv0.5追補: UIA優先強化)。
+                    if let Some((range, text)) = fulltext_fallback
+                        && should_adopt_fulltext(text.chars().count()) {
+                            return Some(TextHit { element: e, range: Some(range), text });
+                        }
                 }
+
+            // Win32 EDIT 等 TextPattern 非対応のコントロールでは上のTextPattern経路が
+            // 何も返さない (ヒットテストは正しく命中しているが GetCurrentPattern が失敗する)。
+            // ValuePattern は多くの環境で全文を返すため、OCRへ落とす前にここで試す。
+            if is_edit
+                && let Ok(unk) = e.GetCurrentPattern(UIA_ValuePatternId)
+                && let Ok(vp) = unk.cast::<IUIAutomationValuePattern>()
+                && let Ok(val) = vp.CurrentValue()
+            {
+                let line = sanitize_uia_text(&val.to_string()).trim().to_string();
+                if !line.is_empty() {
+                    return Some(TextHit { element: e, range: None, text: line });
+                }
+            }
             cur = walker.GetParentElement(&e).ok();
         }
         None
+    }
+}
+
+/// 選択範囲テキストとして扱う上限文字数 (段落全文と同じ基準)
+const SELECTED_TEXT_MAX: usize = 800;
+
+/// 要素のTextPatternから現在選択中のテキストを取得する。選択が無い(長さ0)、
+/// TextPattern非対応、全選択範囲が空白のみの場合は None。
+fn selected_text_of(e: &IUIAutomationElement) -> Option<String> {
+    unsafe {
+        let unk = e.GetCurrentPattern(UIA_TextPatternId).ok()?;
+        let tp = unk.cast::<IUIAutomationTextPattern>().ok()?;
+        let sel: IUIAutomationTextRangeArray = tp.GetSelection().ok()?;
+        let len = sel.Length().ok()?;
+        if len <= 0 {
+            return None;
+        }
+        let mut parts = Vec::new();
+        let mut budget = SELECTED_TEXT_MAX;
+        for i in 0..len {
+            if budget == 0 {
+                break;
+            }
+            if let Ok(range) = sel.GetElement(i)
+                && let Ok(t) = range.GetText(budget as i32)
+            {
+                let s = sanitize_uia_text(&t.to_string());
+                let s = s.trim();
+                if !s.is_empty() {
+                    budget = budget.saturating_sub(s.chars().count());
+                    parts.push(s.to_string());
+                }
+            }
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        Some(parts.join(" "))
     }
 }
 
@@ -120,6 +214,9 @@ pub struct UiaProbe {
     /// ブラウザ等ではテキストブロックの内容が入るため、OCRしたカーソル行を
     /// この中から検索して正確な1段落を復元するのに使う (worker::paragraph_from_text)。
     pub hover_text: Option<String>,
+    /// カーソル位置要素で現在選択されているテキスト (SPECv0.5追補)。
+    /// 選択が無い/TextPattern非対応なら None。認識サイクルではこれが最優先で採用される。
+    pub selected_text: Option<String>,
 }
 
 /// カーソル位置で line_at_point と同じ探索を行い、検出領域の矩形を返す (領域検出モード)。
@@ -132,6 +229,7 @@ pub fn probe_at_point(x: i32, y: i32) -> UiaProbe {
         node: String::new(),
         text: None,
         hover_text: None,
+        selected_text: None,
     };
     unsafe {
         let Ok(auto) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {
@@ -149,13 +247,22 @@ pub fn probe_at_point(x: i32, y: i32) -> UiaProbe {
             if let Some(r) = &hit.range {
                 p.line_rects = range_rects(r);
             }
+            p.selected_text = selected_text_of(&hit.element);
             p.text = Some(hit.text);
         } else if let Ok(name) = el.CurrentName() {
+            p.selected_text = selected_text_of(&el);
             // TextPattern なし: Name に要素の全テキストが入っていれば段落復元に使う
-            let s = name.to_string();
+            let s = sanitize_uia_text(&name.to_string());
             let t = s.trim();
             if t.chars().count() >= 8 && t.chars().count() <= 10000 {
-                p.hover_text = Some(t.to_string());
+                // 全文がUIA_FULLTEXT_MAX以下なら、カーソル位置の段落特定を待たず
+                // このままUIA経路のテキストとして確定させる (SPECv0.5追補: UIA優先強化)。
+                // 超える場合は従来通りOCR結果の段落復元用に保持する。
+                if should_adopt_fulltext(t.chars().count()) {
+                    p.text = Some(t.to_string());
+                } else {
+                    p.hover_text = Some(t.to_string());
+                }
             }
         }
     }
@@ -267,20 +374,31 @@ pub fn path_nodes_at_point(x: i32, y: i32) -> Vec<UiaPathNode> {
     }
 }
 
-/// 要素自身のテキストを抽出する。TextPattern があれば全文、無ければ Name を使う。
+/// 要素自身のテキストを抽出する。TextPattern があれば全文、無ければ ValuePattern、
+/// それも無ければ Name を使う (Win32 EDIT 等はTextPatternが無く、Nameはラベルの
+/// 流用になっていることがあるため ValuePattern を優先する)。
 fn element_own_text(e: &IUIAutomationElement) -> String {
     unsafe {
         if let Ok(unk) = e.GetCurrentPattern(UIA_TextPatternId)
             && let Ok(tp) = unk.cast::<IUIAutomationTextPattern>()
             && let Ok(doc) = tp.DocumentRange()
             && let Ok(t) = doc.GetText(4000) {
-                let s = t.to_string();
-                let s = s.trim();
-                if !s.is_empty() {
-                    return s.to_string();
+                let s = sanitize_uia_text(&t.to_string());
+                if !s.trim().is_empty() {
+                    return s.trim().to_string();
                 }
             }
-        e.CurrentName().map(|n| n.to_string().trim().to_string()).unwrap_or_default()
+        if let Ok(unk) = e.GetCurrentPattern(UIA_ValuePatternId)
+            && let Ok(vp) = unk.cast::<IUIAutomationValuePattern>()
+            && let Ok(val) = vp.CurrentValue() {
+                let s = sanitize_uia_text(&val.to_string());
+                if !s.trim().is_empty() {
+                    return s.trim().to_string();
+                }
+            }
+        e.CurrentName()
+            .map(|n| sanitize_uia_text(&n.to_string()).trim().to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -408,5 +526,47 @@ fn element_node_name(e: &windows::Win32::UI::Accessibility::IUIAutomationElement
             Ok(ctrl) => format!("Type{}", ctrl.0),
             Err(_) => String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UIA_FULLTEXT_MAX, sanitize_uia_text, should_adopt_fulltext};
+
+    #[test]
+    fn adopts_fulltext_at_or_below_threshold() {
+        assert!(should_adopt_fulltext(0));
+        assert!(should_adopt_fulltext(UIA_FULLTEXT_MAX));
+        assert!(!should_adopt_fulltext(UIA_FULLTEXT_MAX + 1));
+    }
+
+    #[test]
+    fn removes_scattered_object_replacement_chars() {
+        let s = "Lists all the teams in Microsoft Teams that you are a member of \u{FFFC} \u{FFFC} \u{FFFC}";
+        assert_eq!(sanitize_uia_text(s), "Lists all the teams in Microsoft Teams that you are a member of");
+    }
+
+    #[test]
+    fn removes_adjacent_object_replacement_chars_without_merging_words() {
+        let s = "word\u{FFFC}\u{FFFC}\u{FFFC}word";
+        assert_eq!(sanitize_uia_text(s), "word word");
+    }
+
+    #[test]
+    fn removes_zero_width_and_bom_chars() {
+        let s = "hello\u{200B}\u{FEFF}world";
+        assert_eq!(sanitize_uia_text(s), "hello world");
+    }
+
+    #[test]
+    fn preserves_line_breaks_while_collapsing_internal_spaces() {
+        let s = "first  line\u{FFFC}\nsecond\u{FFFC} line";
+        assert_eq!(sanitize_uia_text(s), "first line\nsecond line");
+    }
+
+    #[test]
+    fn leaves_normal_text_untouched() {
+        let s = "Hello, world!";
+        assert_eq!(sanitize_uia_text(s), "Hello, world!");
     }
 }

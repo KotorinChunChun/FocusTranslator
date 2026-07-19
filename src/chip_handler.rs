@@ -25,12 +25,33 @@ fn prompt_ctx_from_app(original: &str) -> crate::config::PromptContext {
     .unwrap_or_default()
 }
 
+/// テキストを原文として採用し再翻訳する共通処理。UIAパスノードチップと「選択中の文字列」
+/// チップのどちらも、OCRを介さずテキストをそのまま採用する点で同じ形になるため共用する。
+fn adopt_text_and_retranslate(text: String, cur_tr: String, recog_id: Option<i64>, main: isize) {
+    let new_gen = with_app(|app| {
+        app.generation += 1;
+        app.mode = Mode::Pinned;
+        app.source = text.clone();
+        app.via_uia = true;
+        app.translation = None;
+        let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
+        app.status = Some(format!("{} で翻訳中…", engine_name));
+        app.busy = true;
+        sync_overlay(app);
+        app.generation
+    })
+    .unwrap_or(0);
+    let cfg2 = Config::load();
+    let pc = prompt_ctx_from_app(&text);
+    crate::worker::retranslate(new_gen, cur_tr, cfg2, text, main, recog_id, pc);
+}
+
 /// 画像編集モードの「編集終了」確定処理: 編集セッション中に確定した最終画像を
 /// App/DBへ反映し、同一capture配下で再認識する (SPECv0.4 §4-3, §8.2.1)。
 /// 「選択範囲を残す/消す」「元に戻す」は編集セッション内(overlay.rs)で完結し、
 /// OCR/翻訳の再実行はここ(編集終了時)でのみ行う。
 fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
-    let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe, uia_path, uia_nodes, control_type)) =
+    let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe, uia_path, uia_nodes, control_type, selected_text)) =
         with_app(|app| {
             app.last_img = Some(new_img.clone());
             app.generation += 1;
@@ -50,6 +71,7 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
                 app.uia_path.clone(),
                 app.uia_nodes.clone(),
                 app.control_type.clone(),
+                app.selected_text.clone(),
             )
         })
     else {
@@ -63,7 +85,7 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
     let new_gen = with_app(|app| app.generation).unwrap_or(0);
     crate::worker::reocr_edited(
         new_gen, cap_id, new_img, ocr_engine, cur_tr2, cfg2, main2, anchor2, app_title, app_exe,
-        uia_path, uia_nodes, control_type,
+        uia_path, uia_nodes, control_type, selected_text,
     );
 }
 
@@ -102,6 +124,7 @@ fn forbidden_while_editing(id: usize) -> bool {
                 | overlay::CHIP_EDIT_SRC
                 | overlay::CHIP_EDIT_TR
                 | overlay::CHIP_EDIT_EXP
+                | overlay::CHIP_SELECTED_TEXT
         )
         || id >= overlay::CHIP_UIA_NODE_BASE
 }
@@ -131,13 +154,14 @@ pub fn handle_chip(id: usize) {
             app.uia_path.clone(),
             app.uia_nodes.clone(),
             app.control_type.clone(),
+            app.selected_text.clone(),
         )
     }) else {
         return;
     };
     let (
         cfg, source, last_img, last_focus, origin, target, main, anchor, cur_tr, recog_id, capture_id,
-        held_app_title, held_app_exe, held_uia_path, held_uia_nodes, held_control_type,
+        held_app_title, held_app_exe, held_uia_path, held_uia_nodes, held_control_type, held_selected_text,
     ) = info;
 
     match id {
@@ -506,7 +530,7 @@ pub fn handle_chip(id: usize) {
                 keys.push(k.to_string());
             }
         }
-        for prof in &cfg.api_profiles {
+        for prof in cfg.ready_api_profiles() {
             keys.push(prof.name.clone());
         }
         let idx = id - overlay::CHIP_OCR_BASE;
@@ -552,6 +576,7 @@ pub fn handle_chip(id: usize) {
         crate::worker::reocr(
             new_gen, capture_id, last_img, last_focus, origin.x, origin.y, target, target_ocr, cur_tr, cfg2,
             main, anchor, held_app_title, held_app_exe, held_uia_path, held_uia_nodes, held_control_type,
+            held_selected_text,
         );
     } else if id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_COPY {
         // 翻訳エンジン切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)
@@ -561,7 +586,7 @@ pub fn handle_chip(id: usize) {
                 keys.push(k.to_string());
             }
         }
-        for prof in &cfg.api_profiles {
+        for prof in cfg.ready_api_profiles() {
             keys.push(prof.name.clone());
         }
         let idx = id - overlay::CHIP_TR_BASE;
@@ -612,6 +637,16 @@ pub fn handle_chip(id: usize) {
         let cfg2 = Config::load();
         let pc = prompt_ctx_from_app(&source);
         crate::worker::retranslate(new_gen, target_tr, cfg2, source, main, recog_id, pc);
+    } else if id == overlay::CHIP_SELECTED_TEXT {
+        // 選択中の文字列を(再)採用: 検出済みの選択テキストを原文として採用し再翻訳
+        let Some(text) = with_app(|app| app.selected_text.clone())
+            .flatten()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+        else {
+            return;
+        };
+        adopt_text_and_retranslate(text, cur_tr, recog_id, main);
     } else if id >= overlay::CHIP_UIA_NODE_BASE {
         // UIAパスノード選択: そのノードのテキストを原文として採用し再翻訳
         let idx = id - overlay::CHIP_UIA_NODE_BASE;
@@ -621,22 +656,7 @@ pub fn handle_chip(id: usize) {
         else {
             return;
         };
-        let new_gen = with_app(|app| {
-            app.generation += 1;
-            app.mode = Mode::Pinned;
-            app.source = text.clone();
-            app.via_uia = true;
-            app.translation = None;
-            let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
-            app.status = Some(format!("{} で翻訳中…", engine_name));
-            app.busy = true;
-            sync_overlay(app);
-            app.generation
-        })
-        .unwrap_or(0);
-        let cfg2 = Config::load();
-        let pc = prompt_ctx_from_app(&text);
-        crate::worker::retranslate(new_gen, cur_tr, cfg2, text, main, recog_id, pc);
+        adopt_text_and_retranslate(text, cur_tr, recog_id, main);
     }
 }
 

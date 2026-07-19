@@ -359,6 +359,13 @@ impl Config {
         self.api_profiles.iter().find(|p| p.name == self.active_api_profile)
     }
 
+    /// オーバーレイのOCR/翻訳チップに出すプロファイル一覧。呼び出しても必ず失敗すると
+    /// 分かっているもの(is_ready()==false、主にAPIキー未設定の公式API)はチップ自体を
+    /// 出さない (SPECv0.5追補: 従来はグレーアウト表示だったが非表示に変更)。
+    pub fn ready_api_profiles(&self) -> impl Iterator<Item = &ApiProfile> {
+        self.api_profiles.iter().filter(|p| p.is_ready())
+    }
+
     /// プロンプトテンプレートのプレースホルダ置換 (SPECv0.4 §7.1)
     pub fn fill_prompt(&self, tmpl: &str, ctx: &PromptContext) -> String {
         // 旧バージョンのテンプレートに残る {{glossary}} は空文字へ畳む(用語集機能は廃止)
