@@ -892,9 +892,10 @@ fn paint(hwnd: HWND) {
         let bmp = CreateCompatibleBitmap(hdc, w, h);
         let oldbmp = SelectObject(mem, HGDIOBJ(bmp.0));
 
-        let bg = CreateSolidBrush(COLORREF(overlay_layout::COL_BG));
+        let th = overlay_layout::theme();
+        let bg = CreateSolidBrush(COLORREF(th.bg));
         FillRect(mem, &rect, bg);
-        let border = CreateSolidBrush(COLORREF(overlay_layout::COL_BORDER));
+        let border = CreateSolidBrush(COLORREF(th.border));
         FrameRect(mem, &rect, border);
         SetBkMode(mem, TRANSPARENT);
 
@@ -906,8 +907,8 @@ fn paint(hwnd: HWND) {
                 let mut r = panel.rect;
                 r.top -= sy;
                 r.bottom -= sy;
-                let panel_bg = CreateSolidBrush(COLORREF(overlay_layout::COL_PANEL_BG));
-                let panel_pen = CreatePen(PS_SOLID, 1, COLORREF(overlay_layout::COL_PANEL_BORDER));
+                let panel_bg = CreateSolidBrush(COLORREF(th.panel_bg));
+                let panel_pen = CreatePen(PS_SOLID, 1, COLORREF(th.panel_border));
                 let old_brush = SelectObject(mem, HGDIOBJ(panel_bg.0));
                 let old_pen = SelectObject(mem, HGDIOBJ(panel_pen.0));
                 let _ = RoundRect(mem, r.left, r.top, r.right, r.bottom, overlay_layout::PANEL_RADIUS, overlay_layout::PANEL_RADIUS);
@@ -953,33 +954,45 @@ fn paint(hwnd: HWND) {
                         r.bottom -= off;
                         let hovered = *enabled && HOVER_ID.with(|h| *h.borrow() == Some(*id));
                         let outlined = *id == CHIP_IMAGE;
+                        // 展開中(画像編集モード中)は文字と背景の色を反転して「開いている」ことを示す
+                        let inverted = outlined && *active;
                         let text_col = if !*enabled {
-                            overlay_layout::COL_CHIP_DISABLED
+                            th.chip_disabled
+                        } else if inverted {
+                            th.panel_bg
                         } else if outlined {
-                            overlay_layout::COL_ACCENT_INFO
+                            th.accent_info
+                        } else if *active {
+                            th.chip_active_text
                         } else {
-                            overlay_layout::COL_CHIP_TEXT
+                            th.chip_text
                         };
                         if outlined {
-                            let fill_col = if hovered { overlay_layout::COL_CHIP_HOVER } else { overlay_layout::COL_PANEL_BG };
+                            let fill_col = if inverted {
+                                th.accent_info
+                            } else if hovered {
+                                th.chip_hover
+                            } else {
+                                th.panel_bg
+                            };
                             let fill = CreateSolidBrush(COLORREF(fill_col));
                             FillRect(mem, &r, fill);
                             let _ = DeleteObject(HGDIOBJ(fill.0));
-                            let border = CreateSolidBrush(COLORREF(overlay_layout::COL_ACCENT_INFO));
+                            let border = CreateSolidBrush(COLORREF(th.accent_info));
                             FrameRect(mem, &r, border);
                             let _ = DeleteObject(HGDIOBJ(border.0));
                         } else {
                             // 全チップ共通: ホバー中はボタンの色を変えてフォーカス可視化する
                             let bgc = if *id == CHIP_CLOSE && hovered {
-                                overlay_layout::COL_CLOSE_HOVER
+                                th.close_hover
                             } else if *active && hovered {
-                                overlay_layout::COL_CHIP_ACTIVE_HOVER
+                                th.chip_active_hover
                             } else if *active {
-                                overlay_layout::COL_CHIP_ACTIVE
+                                th.chip_active
                             } else if hovered {
-                                overlay_layout::COL_CHIP_HOVER
+                                th.chip_hover
                             } else {
-                                overlay_layout::COL_CHIP
+                                th.chip
                             };
                             let brush = CreateSolidBrush(COLORREF(bgc));
                             FillRect(mem, &r, brush);

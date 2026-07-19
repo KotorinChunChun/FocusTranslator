@@ -215,6 +215,15 @@ pub fn handle_chip(id: usize) {
             return;
         }
         overlay::CHIP_IMAGE => {
+            // 展開中(画像編集モード中)に再度押した場合は「編集終了」と同じ扱いにする。
+            if overlay::is_editing_image() {
+                if let Some(final_img) = overlay::finish_edit_session() {
+                    commit_edited_image(final_img);
+                } else {
+                    with_app(sync_overlay);
+                }
+                return;
+            }
             // キャプチャ画像のインライン編集モードを開始する (SPECv0.4 §1-§2)
             // 編集中はホールドキーを離してもオーバーレイが閉じないよう、ピン留め状態へ移行する。
             let img = with_app(|app| app.last_img.clone()).flatten();

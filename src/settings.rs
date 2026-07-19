@@ -71,6 +71,10 @@ const IDC_TR_EXP: i32 = 156;
 /// LLMプロファイル設定グループ側に配置する)
 const IDC_PROF_SET_DEFAULT: i32 = 157;
 const IDC_RESET_SETTINGS: i32 = 158;
+/// オーバーレイの配色テーマ (Windows既定/ライト/ダーク)
+const IDC_OVERLAY_THEME: i32 = 159;
+/// OneOCRが現PCで使用可能かの判定結果表示
+const IDC_ONEOCR_STATUS: i32 = 160;
 
 /// エディットコントロールの通知コード (windows クレートに定義がないもの)
 const EN_KILLFOCUS: u32 = 0x0200;
@@ -86,7 +90,7 @@ const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials"
 const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
 const OCR_KEYS: [&str; 4] = ["oneocr", "win", "paddle", "llm"];
 const OCR_DISP: [&str; 4] = [
-    "OneOCR (oneocr.dll・既定)",
+    "OneOCR (oneocr.dll)",
     "Windows.Media.Ocr.dll",
     "PaddleOCR",
     "LLM(プロファイル)",
@@ -94,6 +98,8 @@ const OCR_DISP: [&str; 4] = [
 const TR_KEYS: [&str; 4] = ["local", "deepl", "google", "llm"];
 const TR_DISP: [&str; 4] = ["ローカルONNX", "DeepL", "Google", "LLM(プロファイル)"];
 const LANGS: [&str; 2] = ["ja", "en"];
+const THEME_KEYS: [&str; 3] = ["system", "light", "dark"];
+const THEME_DISP: [&str; 3] = ["Windows既定", "ライト", "ダーク"];
 
 thread_local! {
     static WND: RefCell<isize> = const { RefCell::new(0) };
@@ -145,19 +151,32 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
                 *r.borrow_mut() = true;
             }
         });
-        // 3列レイアウト (SPECv0.4 §5): 幅1280px以下・高さ660px以下で
-        // HD (1280x720) のワークエリアに収まるサイズとする。
+        // 3列レイアウト (SPECv0.4 §5): グループボックスの実サイズ(LAYOUT_CLIENT_W/H)から
+        // AdjustWindowRectEx で過不足のないウィンドウサイズを算出する (無駄な余白を残さない)。
+        let style = WS_CAPTION | WS_SYSMENU;
+        let ex_style = WS_EX_TOPMOST;
+        let mut rect = windows::Win32::Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: LAYOUT_CLIENT_W,
+            bottom: LAYOUT_CLIENT_H,
+        };
+        let _ = windows::Win32::UI::WindowsAndMessaging::AdjustWindowRectEx(
+            &mut rect, style, false, ex_style,
+        );
+        let (win_w, win_h) = (rect.right - rect.left, rect.bottom - rect.top);
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let (win_y, win_h) = (10, 656.min(screen_h - 40));
+        let win_y = 10;
+        let win_h = win_h.min(screen_h - 40);
         let title_w = crate::util::to_wide(&format!("{} 設定", crate::util::APP_DISPLAY_NAME));
         if let Ok(h) = CreateWindowExW(
-            WS_EX_TOPMOST,
+            ex_style,
             class,
             PCWSTR(title_w.as_ptr()),
-            WS_CAPTION | WS_SYSMENU,
+            style,
             CW_USEDEFAULT,
             win_y,
-            1280,
+            win_w,
             win_h,
             None,
             None,
@@ -173,6 +192,43 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
     }
 }
 
+// レイアウト定数 (SPECv0.4 §5.1 3列レイアウト): グループ1・3 (各列の上段) は高さを揃え、
+// グループ2・4 (各列の下段) も高さを揃えて、枠線の下端が列間でぴたり一致するようにする。
+// これらの数値から必要な最小ウィンドウサイズを算出し (LAYOUT_CLIENT_W/H)、open() で
+// AdjustWindowRectEx により過不足のないウィンドウサイズへ変換する。
+const PAD: i32 = 10;
+const COL_W: i32 = 408;
+const STEP: i32 = 30;
+const GTOP: i32 = 22; // グループ枠タイトル分のオフセット
+const LAYOUT_COL_X: [i32; 3] = [PAD, PAD * 2 + COL_W, PAD * 3 + COL_W * 2];
+const GROUP_GAP: i32 = 8; // 同列内でグループを縦に並べる際の間隔
+
+const GROUP1_Y: i32 = 8;
+const GROUP1_H: i32 = 178; // 5行 (最終行はEDIT高22) + 下余白14
+const GROUP3_Y: i32 = GROUP1_Y;
+const GROUP3_H: i32 = GROUP1_H; // グループ1と下端を揃える (OCR設定は内容的にはやや短い)
+
+const GROUP2_Y: i32 = GROUP1_Y + GROUP1_H + GROUP_GAP;
+const GROUP2_H: i32 = 242; // 7行 (最終行はボタン高26) + 下余白14
+const GROUP4_Y: i32 = GROUP3_Y + GROUP3_H + GROUP_GAP;
+const GROUP4_H: i32 = GROUP2_H; // グループ2と下端を揃える (翻訳設定は内容的にはやや短い)
+
+const GROUP5_Y: i32 = 8;
+const GROUP5_H: i32 = 242; // 7行 (最終行はボタン高26) + 下余白14。偶然グループ2/4と同高
+
+/// 全列の下端のうち最も低い位置 (この直下に閉じるボタン行を置く)
+const LAYOUT_CONTENT_BOTTOM: i32 = {
+    let left = GROUP2_Y + GROUP2_H;
+    let mid = GROUP4_Y + GROUP4_H;
+    let right = GROUP5_Y + GROUP5_H;
+    let m = if left > mid { left } else { mid };
+    if m > right { m } else { right }
+};
+const LAYOUT_BTN_Y: i32 = LAYOUT_CONTENT_BOTTOM + 16;
+const LAYOUT_BTN_H: i32 = 26;
+const LAYOUT_CLIENT_W: i32 = LAYOUT_COL_X[2] + COL_W + PAD;
+const LAYOUT_CLIENT_H: i32 = LAYOUT_BTN_Y + LAYOUT_BTN_H + 14;
+
 /// BS_GROUPBOX でカテゴリ枠を作る (SPECv0.4 §5.1)
 fn group(h: HWND, inst: HINSTANCE, text: &str, x: i32, y: i32, w: i32, ht: i32) {
     const BS_GROUPBOX: u32 = 0x0000_0007;
@@ -181,11 +237,10 @@ fn group(h: HWND, inst: HINSTANCE, text: &str, x: i32, y: i32, w: i32, ht: i32) 
 
 fn build_controls(h: HWND, inst: HINSTANCE) {
     // 3列レイアウト (SPECv0.4 §5.1): 左=操作/OCR、中=翻訳/その他、右=LLMプロファイル
-    const PAD: i32 = 10;
-    const COL_W: i32 = 408;
-    const STEP: i32 = 30;
-    const GTOP: i32 = 22; // グループ枠タイトル分のオフセット
-    let col_x = [PAD, PAD * 2 + COL_W, PAD * 3 + COL_W * 2];
+    // グループ1・3 (各列の上段) は高さを揃えて下端を一致させ、グループ2・4 (各列の下段)
+    // も高さを揃えて下端を一致させる。ウィンドウサイズは open() 側でこの下端に合わせて
+    // 計算する (AdjustWindowRectEx) ため、ここでの数値がそのまま余白の詰まり具合を決める。
+    let col_x = LAYOUT_COL_X;
     let inner = |cx: i32| cx + 12; // グループ内の左端
     let key_w = 160;
 
@@ -194,8 +249,8 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let gx = col_x[0];
         let lx = inner(gx);
         let cx = gx + 152;
-        group(h, inst, "1. 操作", gx, 8, COL_W, 184);
-        let mut y = 8 + GTOP;
+        group(h, inst, "1. 操作", gx, GROUP1_Y, COL_W, GROUP1_H);
+        let mut y = GROUP1_Y + GTOP;
         label(h, inst, "キャプチャキー", lx, y + 2, 130);
         combo(h, inst, cx, y, 90, IDC_HOLDKEY);
         checkbox(h, inst, "領域表示", cx + 98, y + 2, 88, IDC_DETECT_MODE);
@@ -218,8 +273,8 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     {
         let gx = col_x[0];
         let lx = inner(gx);
-        group(h, inst, "2. システム設定", gx, 200, COL_W, 216); // リセットボタン追加で高さ216に拡張
-        let mut y = 200 + GTOP;
+        group(h, inst, "2. システム設定", gx, GROUP2_Y, COL_W, GROUP2_H);
+        let mut y = GROUP2_Y + GTOP;
         checkbox(h, inst, "起動時に常駐する", lx, y, 170, IDC_AUTOSTART);
         checkbox(h, inst, "計測ログを有効化", lx + 180, y, 160, IDC_PERFLOG);
         y += STEP;
@@ -231,6 +286,9 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         edit(h, inst, lx + 66, y, 70, IDC_LOG_MAX);
         button(h, inst, "ログビューアを開く", lx + 150, y - 2, 130, IDC_OPEN_LOG);
         y += STEP;
+        label(h, inst, "オーバーレイテーマ", lx, y + 2, 130);
+        combo(h, inst, lx + 140, y, 130, IDC_OVERLAY_THEME);
+        y += STEP;
         button(h, inst, "外部送信の同意状態をリセット", lx, y, 220, IDC_CONSENT_RESET);
         y += STEP;
         button(h, inst, "設定をリセット (アプリ再起動)", lx, y, 220, IDC_RESET_SETTINGS);
@@ -241,13 +299,16 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let gx = col_x[1];
         let lx = inner(gx);
         let cx = gx + 152;
-        group(h, inst, "3. OCR設定", gx, 8, COL_W, 170); // 高さを170に拡張して解説用スペース確保
-        let mut y = 8 + GTOP;
+        group(h, inst, "3. OCR設定", gx, GROUP3_Y, COL_W, GROUP3_H);
+        let mut y = GROUP3_Y + GTOP;
         label(h, inst, "既定OCRエンジン", lx, y + 2, 130);
         combo(h, inst, cx, y, 170, IDC_OCR);
         y += STEP;
         ctl(h, inst, w!("STATIC"), "", WINDOW_STYLE(0), lx, y, COL_W - 24, 40, IDC_OCR_EXP); // 解説表示
         y += 44;
+        label(h, inst, "OneOCR", lx, y + 2, 130);
+        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 140, 20, IDC_ONEOCR_STATUS);
+        y += STEP;
         label(h, inst, "PaddleOCR", lx, y + 2, 130);
         ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 100, 20, IDC_PADDLE_STATUS);
         button(h, inst, "インストール", cx + 106, y - 2, 104, IDC_PADDLE_INSTALL);
@@ -258,13 +319,14 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let gx = col_x[1];
         let lx = inner(gx);
         let cx = gx + 152;
-        group(h, inst, "4. 翻訳設定", gx, 186, COL_W, 250); // y=186から配置
-        let mut y = 186 + GTOP;
+        group(h, inst, "4. 翻訳設定", gx, GROUP4_Y, COL_W, GROUP4_H);
+        let mut y = GROUP4_Y + GTOP;
         label(h, inst, "既定翻訳エンジン", lx, y + 2, 130);
         combo(h, inst, cx, y, 170, IDC_TR);
         y += STEP;
-        ctl(h, inst, w!("STATIC"), "", WINDOW_STYLE(0), lx, y, COL_W - 24, 60, IDC_TR_EXP); // 解説表示
-        y += 64;
+        // 解説表示: OCR設定側と同じ高さ(40px)に揃える (旧60pxは1行分の余白が無駄だった)
+        ctl(h, inst, w!("STATIC"), "", WINDOW_STYLE(0), lx, y, COL_W - 24, 40, IDC_TR_EXP);
+        y += 44;
         label(h, inst, "ローカルONNX翻訳 (FuguMT)", lx, y + 2, 150);
         ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 100, 20, IDC_ONNX_STATUS);
         button(h, inst, "インストール", cx + 106, y - 2, 104, IDC_ONNX_INSTALL);
@@ -288,8 +350,8 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let gx = col_x[2];
         let lx = inner(gx);
         let cx = gx + 100;
-        group(h, inst, "5. LLMプロファイル設定", gx, 8, COL_W, 230); // 既定プロファイルは翻訳設定へ移動、高さ230に縮小
-        let mut y = 8 + GTOP;
+        group(h, inst, "5. LLMプロファイル設定", gx, GROUP5_Y, COL_W, GROUP5_H);
+        let mut y = GROUP5_Y + GTOP;
         label(h, inst, "プロファイル編集", lx, y + 2, 90);
         combo(h, inst, lx + 96, y, 150, IDC_PROF_LIST);
         y += STEP;
@@ -322,9 +384,8 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
 
     // ---- 下部ボタン領域 (右下; SPECv0.4 §5.2)
     // 設定は変更時に即座に保存されるため【閉じる】のみ (SPECv0.4.7 改)
-    let btn_y = 570;
-    let right = PAD * 3 + COL_W * 3;
-    button(h, inst, "閉じる", right - 86, btn_y, 80, IDC_CLOSE);
+    let right = col_x[2] + COL_W;
+    button(h, inst, "閉じる", right - 86, LAYOUT_BTN_Y, 80, IDC_CLOSE);
 
     // フォント設定
     unsafe {
@@ -437,10 +498,25 @@ fn populate(h: HWND) {
         HOLD_KEYS.iter().position(|k| *k == cfg.detect_key).unwrap_or(1), // 既定 LCtrl
     );
     check_set(h, IDC_PREVIEW_DETECT_MODE, cfg.preview_detect_enabled);
+    combo_fill(
+        h,
+        IDC_OVERLAY_THEME,
+        &THEME_DISP,
+        THEME_KEYS.iter().position(|k| *k == cfg.overlay_theme).unwrap_or(0),
+    );
     set_ctl_text(h, IDC_LOG_MAX, &cfg.log_max_records.to_string());
+    refresh_oneocr_status(h);
     refresh_paddle_status(h);
     refresh_onnx_status(h);
     update_explanations(h);
+}
+
+/// OneOCRがこのPCで使用可能かの判定結果 (config::engine_available("oneocr") と同じ判定) を表示する。
+/// PaddleOCRと異なり利用者が能動的に導入する手段が無い (Snipping Toolからの検出/自動コピー) ため、
+/// インストールボタンは設けず判定結果のみ示す。
+fn refresh_oneocr_status(h: HWND) {
+    let available = crate::oneocr::available();
+    set_ctl_text(h, IDC_ONEOCR_STATUS, if available { "利用可能です" } else { "利用できません" });
 }
 
 /// PaddleOCRの導入状況をステータス欄・ボタンに反映する
@@ -838,6 +914,7 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.detect_enabled = check_get(h, IDC_DETECT_MODE);
     cfg.detect_key = HOLD_KEYS[combo_sel(h, IDC_DETECT_KEY).min(HOLD_KEYS.len() - 1)].to_string();
     cfg.preview_detect_enabled = check_get(h, IDC_PREVIEW_DETECT_MODE);
+    cfg.overlay_theme = THEME_KEYS[combo_sel(h, IDC_OVERLAY_THEME).min(THEME_KEYS.len() - 1)].to_string();
     cfg.log_max_records = get_ctl_text(h, IDC_LOG_MAX).trim().parse().unwrap_or(5000).clamp(100, 100000);
 
     // 既定エンジンがクラウド/外部送信を伴う場合の同意確認 (SPEC §9)。
@@ -907,7 +984,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             // クリック時、エディットはフォーカス喪失時に自動保存する。
             // プロファイル編集欄 (名前/種別/URL/キー/モデル) は【保存】ボタンで確定するため対象外。
             match id {
-                IDC_HOLDKEY | IDC_DETECT_KEY | IDC_SRCLANG | IDC_LANG
+                IDC_HOLDKEY | IDC_DETECT_KEY | IDC_SRCLANG | IDC_LANG | IDC_OVERLAY_THEME
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE =>
                 {
                     auto_save(h, false);
@@ -1038,6 +1115,16 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             return false;
                         }
                         let sel = combo_sel(h, IDC_PROF_LIST);
+                        if let Some(target) = profiles.get(sel) {
+                            let msg = to_wide(&format!("プロファイル「{}」を削除しますか?", target.name));
+                            let r = unsafe {
+                                MessageBoxW(Some(h), PCWSTR(msg.as_ptr()), w!("プロファイルの削除"), MB_YESNO | MB_ICONWARNING)
+                            };
+                            if r.0 != 6 {
+                                // IDYES 以外は削除しない
+                                return false;
+                            }
+                        }
                         if sel < profiles.len() {
                             let removed_name = profiles[sel].name.clone();
                             profiles.remove(sel);

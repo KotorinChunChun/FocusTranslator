@@ -213,6 +213,21 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             reload_config(hwnd);
             LRESULT(0)
         }
+        windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE => {
+            // Windowsのライト/ダークモード切替に追従する
+            // (テーマ設定が「Windows既定」のときだけ apply_theme の結果が変わる)。
+            with_app(|app| {
+                if crate::overlay_layout::apply_theme(&app.cfg.overlay_theme)
+                    && unsafe {
+                        windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(app.overlay)
+                    }
+                    .as_bool()
+                {
+                    overlay::refresh(app.overlay);
+                }
+            });
+            unsafe { windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_APP_DETECT => {
             let info = unsafe { Box::from_raw(lparam.0 as *mut detect::DetectInfo) };
             let showing = with_app(|app| {
@@ -533,6 +548,9 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
 
 /// 範囲指定の選択結果 (SPEC §3.2)
 pub fn handle_region(rect: RECT) {
+    // 画像編集画面を開いたまま範囲指定した場合も、ホールドキー起動時と同様に
+    // 古い編集セッションを破棄してから開始する (展開したまま前の画像が残るのを防ぐ)。
+    overlay::exit_edit_mode();
     let Some((generation, cfg, main)) = with_app(|app| {
         overlay::hide(app.overlay);
         app.generation += 1;
@@ -557,6 +575,8 @@ pub fn reload_config(hwnd: HWND) {
         let keep_profile = app.cfg.active_api_profile.clone();
         app.cfg = Config::load();
         app.cfg.active_api_profile = keep_profile;
+        // オーバーレイのテーマ設定を反映する (sync_overlay の再描画で配色が切り替わる)
+        crate::overlay_layout::apply_theme(&app.cfg.overlay_theme);
         unsafe {
             let _ = KillTimer(Some(hwnd), TIMER_POLL);
             SetTimer(Some(hwnd), TIMER_POLL, app.cfg.poll_ms, None);

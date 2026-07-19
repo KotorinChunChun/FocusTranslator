@@ -85,6 +85,7 @@ public static class WinTestHA {
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
     [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     public struct RECT { public int L, T, R, B; }
     public struct POINT { public int X, Y; }
 }
@@ -143,6 +144,9 @@ Write-Host "text set via WM_SETTEXT (フォーカス不要)"
 
 # 4) 狭い幅へ移動し、必ず GetWindowRect で実測する(想定座標を信じない)
 [WinTestHA]::MoveWindow($hwnd, $WindowX, $WindowY, $WindowWidth, $WindowHeight, $true) | Out-Null
+# 他ウィンドウに覆われているとカーソル直下検証(手順6)が失敗するため、フォーカスを
+# 奪わずに最前面へ上げる (HWND_TOPMOST=-1, SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE=0x13)。
+[WinTestHA]::SetWindowPos($hwnd, [IntPtr]::new(-1), 0, 0, 0, 0, 0x13) | Out-Null
 Start-Sleep -Milliseconds 300
 $rect = New-Object WinTestHA+RECT
 [WinTestHA]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
