@@ -12,12 +12,9 @@ use crate::overlay::{
 };
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK,
-    DEFAULT_CHARSET, DEFAULT_PITCH, DeleteObject, DrawTextW, FONT_OUTPUT_PRECISION, FW_BOLD,
-    FW_NORMAL, GetDC, GetMonitorInfoW, HDC, HFONT, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK, DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, HDC, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint, ReleaseDC, SelectObject,
 };
-use windows::core::w;
 
 /// オーバーレイの配色一式。config.overlay_theme ("system" | "light" | "dark") に応じて
 /// apply_theme() で THEME_DARK / THEME_LIGHT を切り替える。色値は COLORREF (0x00BBGGRR)。
@@ -164,26 +161,7 @@ pub struct Layout {
 const EDIT_PREVIEW_MAX_W: i32 = 480;
 const EDIT_PREVIEW_MAX_H: i32 = 460;
 
-pub fn make_font(size: i32, bold: bool) -> HFONT {
-    unsafe {
-        CreateFontW(
-            -size,
-            0,
-            0,
-            0,
-            if bold { FW_BOLD.0 as i32 } else { FW_NORMAL.0 as i32 },
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            FONT_OUTPUT_PRECISION(0),
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            DEFAULT_PITCH.0.into(),
-            w!("Yu Gothic UI"),
-        )
-    }
-}
+pub use crate::ui_helpers::make_font;
 
 pub fn measure(hdc: HDC, text: &str, size: i32, bold: bool, maxw: i32) -> (i32, i32) {
     unsafe {

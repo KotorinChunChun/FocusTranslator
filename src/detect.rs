@@ -8,8 +8,7 @@ use crate::{capture, capture_plan, uia};
 use std::cell::RefCell;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreateSolidBrush,
-    DEFAULT_CHARSET, DEFAULT_PITCH, DeleteObject, EndPaint, FONT_OUTPUT_PRECISION, FW_NORMAL,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint,
     FillRect, FrameRect, GetTextExtentPoint32W, HGDIOBJ, InvalidateRect, PAINTSTRUCT,
     SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
 };
@@ -256,11 +255,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
                     // カーソル近傍に説明ラベル (濃灰の下地 + 白文字)
                     if !info.label.is_empty() {
-                        let font = CreateFontW(
-                            -14, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-                            DEFAULT_CHARSET, FONT_OUTPUT_PRECISION(0), CLIP_DEFAULT_PRECIS,
-                            CLEARTYPE_QUALITY, DEFAULT_PITCH.0.into(), w!("Yu Gothic UI"),
-                        );
+                        let font = crate::ui_helpers::make_font(14, false);
                         let old = SelectObject(hdc, HGDIOBJ(font.0));
                         let wide: Vec<u16> = info.label.encode_utf16().collect();
                         let mut size = SIZE::default();

@@ -5,8 +5,7 @@ use crate::ui_helpers::*;
 use std::cell::RefCell;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, CreateFontW, DEFAULT_CHARSET,
-    DEFAULT_PITCH, FONT_OUTPUT_PRECISION, FW_NORMAL, HFONT,
+    COLOR_BTNFACE, HFONT,
 };
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
@@ -14,12 +13,10 @@ use windows::Win32::System::Registry::{
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK,
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DestroyWindow, GetSystemMetrics,
     IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
-    MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL,
-    SendMessageW, SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
     WM_DESTROY, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
 };
 use windows::core::{PCWSTR, w};
@@ -389,55 +386,13 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
 
     // フォント設定
     unsafe {
-        let font: HFONT = CreateFontW(
-            -13,
-            0,
-            0,
-            0,
-            FW_NORMAL.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            FONT_OUTPUT_PRECISION(0),
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            DEFAULT_PITCH.0.into(),
-            w!("Yu Gothic UI"),
-        );
+        let font: HFONT = make_font(13, false);
         FONT.with(|f| *f.borrow_mut() = font.0 as isize);
         let _ = windows::Win32::UI::WindowsAndMessaging::EnumChildWindows(
             Some(h),
             Some(set_font_proc),
             LPARAM(font.0 as isize),
         );
-    }
-}
-
-fn combo_fill(h: HWND, id: i32, items: &[&str], selected: usize) {
-    let cb = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default() };
-    for item in items {
-        combo_add_item(cb, item);
-    }
-    combo_set_sel(cb, selected);
-}
-
-fn combo_sel(h: HWND, id: i32) -> usize {
-    let cb = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default() };
-    combo_get_sel(cb)
-}
-
-fn check_set(h: HWND, id: i32, checked: bool) {
-    unsafe {
-        let ctl = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default();
-        SendMessageW(ctl, BM_SETCHECK, Some(WPARAM(if checked { 1 } else { 0 })), Some(LPARAM(0)));
-    }
-}
-
-fn check_get(h: HWND, id: i32) -> bool {
-    unsafe {
-        let ctl = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default();
-        SendMessageW(ctl, BM_GETCHECK, Some(WPARAM(0)), Some(LPARAM(0))).0 == 1
     }
 }
 
@@ -574,14 +529,6 @@ fn api_type_index(t: &crate::config::ApiType) -> usize {
 }
 
 /// コンボの内容を全消去する
-fn combo_reset(h: HWND, id: i32) {
-    combo_reset_content(unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default() });
-}
-
-fn combo_select(h: HWND, id: i32, idx: usize) {
-    combo_set_sel(unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id).unwrap_or_default() }, idx);
-}
-
 /// PROFILES の内容でプロファイル一覧コンボを再構築する。既定LLMプロファイルには
 /// 末尾に「(既定)」を併記する (表示のみ。名前そのものやconfig.jsonには付与しない)。
 fn refill_profile_combo(h: HWND, sel: usize) {
