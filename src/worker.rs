@@ -10,34 +10,29 @@ use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
+/// 認識結果の通知内容 (WorkerMsg::Source のペイロード)。
+/// フィールド数が多く他のバリアントとのサイズ差が大きいため Box で運ぶ。
+pub struct SourceMsg {
+    pub text: String,
+    pub method: &'static str,
+    /// 実際に使ったOCRエンジンキー (UIA経路では None)
+    pub engine: Option<String>,
+    pub img: Option<Arc<Captured>>,
+    pub pin: bool,
+    pub anchor: (i32, i32),
+    /// 保持画像の行選択モード (再OCR時に同じモードで認識する)
+    pub focus: ocr::Focus,
+    pub ms: u128,
+    pub capture_id: Option<i64>,
+    pub recog_id: Option<i64>,
+    /// キャプチャ時点の対象アプリコンテキスト (exe名/タイトル/UIAパス/選択文字列)
+    pub ctx: AppContext,
+}
+
 /// ワーカーからメインスレッド（ウィンドウプロシージャ）への通知。
 /// バックグラウンド処理の完了や進捗をメインスレッドに伝えます。
-#[allow(dead_code)]
 pub enum WorkerMsg {
-    Source {
-        text: String,
-        method: &'static str,
-        /// 実際に使ったOCRエンジンキー (UIA経路では None)
-        engine: Option<String>,
-        img: Option<Arc<Captured>>,
-        pin: bool,
-        anchor: (i32, i32),
-        /// 保持画像の行選択モード (再OCR時に同じモードで認識する)
-        focus: ocr::Focus,
-        ms: u128,
-        capture_id: Option<i64>,
-        recog_id: Option<i64>,
-        app_title: String,
-        app_exe: String,
-        uia_path: String,
-        /// UIAパスの各ノード (ボタン化してオーバーレイに表示。クリックでOCRの代わりに採用)
-        uia_nodes: Vec<uia::UiaPathNode>,
-        /// カーソル位置要素のUIA ControlType名 (入力内容ログ用; SPECv0.4.8追補)
-        control_type: Option<String>,
-        /// カーソル位置要素で選択中のテキスト (SPECv0.5追補)。
-        /// 「選択中の文字列」チップの活性判定・全文ツールチップ・手動再採用に使う。
-        selected_text: Option<String>,
-    },
+    Source(Box<SourceMsg>),
     Translation {
         text: String,
         badge: Option<String>,
@@ -49,12 +44,10 @@ pub enum WorkerMsg {
     },
     TranslationFailed {
         msg: String,
-        engine: String,
     },
     Error {
         msg: String,
         anchor: (i32, i32),
-        engine: Option<String>,
     },
     Explanation {
         text: String,
@@ -80,19 +73,20 @@ fn init_com() {
 }
 
 /// 翻訳対象アプリのコンテキスト (exe名 / ウィンドウタイトル / UIA要素パス; SPEC v0.3 §2.3.1)
-struct AppContext {
-    exe: Option<String>,
-    title: String,
+#[derive(Clone)]
+pub struct AppContext {
+    pub exe: Option<String>,
+    pub title: String,
     /// ログ・コピー・解説プロンプト用のパス文字列。子孫連結ノードがあれば全文を追記する
     /// (ボタン表示は10文字程度に切り詰めるが、ログには常に全文を残すため)。
-    uia_path: String,
+    pub uia_path: String,
     /// UIAパスの各ノード (ボタン化してオーバーレイに表示。クリックでOCRの代わりに採用)
-    uia_nodes: Vec<uia::UiaPathNode>,
+    pub uia_nodes: Vec<uia::UiaPathNode>,
     /// カーソル位置要素のUIA ControlType名 (入力内容ログ用; SPECv0.4.8追補)
-    control_type: Option<String>,
+    pub control_type: Option<String>,
     /// カーソル位置要素で選択中のテキスト (SPECv0.5追補)。
     /// 「選択中の文字列」チップの活性判定・全文ツールチップに使う。
-    selected_text: Option<String>,
+    pub selected_text: Option<String>,
 }
 
 impl AppContext {
@@ -127,7 +121,7 @@ impl AppContext {
         capture_id: Option<i64>,
         recog_id: Option<i64>,
     ) -> WorkerMsg {
-        WorkerMsg::Source {
+        WorkerMsg::Source(Box::new(SourceMsg {
             text,
             method,
             engine,
@@ -138,13 +132,8 @@ impl AppContext {
             ms,
             capture_id,
             recog_id,
-            app_title: self.title.clone(),
-            app_exe: self.exe.clone().unwrap_or_default(),
-            uia_path: self.uia_path.clone(),
-            uia_nodes: self.uia_nodes.clone(),
-            control_type: self.control_type.clone(),
-            selected_text: self.selected_text.clone(),
-        }
+            ctx: self.clone(),
+        }))
     }
 }
 
@@ -453,7 +442,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
             Err(e) => {
                 let capture_id = log_cap(&cfg, "hold", &ctx, None);
                 log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
-                post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), engine: None });
+                post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y) });
                 return;
             }
         };
@@ -497,7 +486,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
             Err(e) => {
                 let capture_id = log_cap(&cfg, "hold", &ctx, None);
                 log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
-                post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), engine: Some(engine) });
+                post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y) });
             }
         }
     });
@@ -536,39 +525,50 @@ fn translate(
             }
             Err(e) => {
                 log_trans_err(&cfg, recog_id, &engine, t0.elapsed().as_millis(), &e);
-                post(main, generation, WorkerMsg::TranslationFailed { msg: e, engine });
+                post(main, generation, WorkerMsg::TranslationFailed { msg: e });
             }
         }
     });
 }
 
-/// OCRチップ切替: 保持画像(無ければ再キャプチャ)で選択エンジンOCR→再翻訳 (SPEC §8)。
+/// 再認識ジョブ (reocr の引数一式)。OCRチップ切替と画像編集後の再認識で共用する。
+pub struct ReocrJob {
+    pub generation: u64,
+    pub capture_id: Option<i64>,
+    /// Some: 保持画像を再認識 (再キャプチャ・UIA再プローブなし)。None: カーソル位置を再キャプチャ。
+    pub img: Option<Arc<Captured>>,
+    /// 保持画像の行選択モード (画像編集後の再認識はクロップ済みのため Focus::All を渡す)
+    pub focus: ocr::Focus,
+    /// 再キャプチャ時 (img=None) に使うカーソル座標と対象ウィンドウ
+    pub x: i32,
+    pub y: i32,
+    pub target: isize,
+    pub ocr_engine: String,
+    pub tr_engine: String,
+    pub cfg: Config,
+    pub main: isize,
+    pub anchor: (i32, i32),
+    /// キャプチャ時点のUIAコンテキスト (保持画像がある場合に使用)
+    pub ctx: AppContext,
+    /// true: 常にピン留め (画像編集後の再認識)。false: 結果が複数行のときのみピン留め
+    pub force_pin: bool,
+    /// パフォーマンスログの表示名 ("reocr" / "reocr_edited")
+    pub perf_label: &'static str,
+}
+
+/// 再認識: 保持画像(無ければ再キャプチャ)で選択エンジンOCR→再翻訳 (SPEC §8)。
 /// 保持画像がある場合は同じ capture_id を引き継ぎ、新しいcaptureは作らず読み取り結果を
 /// 追記する (SPECv0.4追補)。同一画像+同一エンジンの認識が既にログにあれば、再OCRせず
 /// その結果を再利用する (切替操作の記録としてrecognition行は追記する)。
-#[allow(clippy::too_many_arguments)]
-pub fn reocr(
-    generation: u64,
-    capture_id: Option<i64>,
-    img: Option<Arc<Captured>>,
-    focus: ocr::Focus,
-    x: i32,
-    y: i32,
-    target: isize,
-    ocr_engine: String,
-    tr_engine: String,
-    cfg: Config,
-    main: isize,
-    anchor: (i32, i32),
-    app_title: String,
-    app_exe: String,
-    uia_path: String,
-    uia_nodes: Vec<uia::UiaPathNode>,
-    control_type: Option<String>,
-    selected_text: Option<String>,
-) {
+/// 画像編集(トリミング)適用後の再認識 (SPECv0.4 §4-3, §8.2.1) もここを通る
+/// (img=Some, focus=All, force_pin=true)。
+pub fn reocr(job: ReocrJob) {
     std::thread::spawn(move || {
         init_com();
+        let ReocrJob {
+            generation, capture_id, img, focus, x, y, target, ocr_engine, tr_engine, cfg, main,
+            anchor, ctx: held_ctx, force_pin, perf_label,
+        } = job;
         let t0 = Instant::now();
         let mut hover_text: Option<String> = None;
         let mut fresh_selected_text: Option<String> = None;
@@ -587,7 +587,7 @@ pub fn reocr(
                         (Arc::new(b.img), f)
                     }
                     Err(e) => {
-                        post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: None });
+                        post(main, generation, WorkerMsg::Error { msg: e, anchor });
                         return;
                     }
                 }
@@ -598,21 +598,14 @@ pub fn reocr(
         // 要素のUIA情報を拾ってしまう (SPECv0.4.8追補: {{uia_path}} 誤り修正)。
         // 保持画像が無い(=対象が変わりうる)場合のみ従来通り再取得する。
         let ctx = if held {
-            AppContext {
-                exe: if app_exe.is_empty() { None } else { Some(app_exe) },
-                title: app_title,
-                uia_path,
-                uia_nodes,
-                control_type,
-                selected_text,
-            }
+            held_ctx
         } else {
             let mut c = AppContext::capture(x, y, HWND(target as *mut _));
             c.selected_text = fresh_selected_text;
             c
         };
         let pc = prompt_ctx(&ctx, &ocr_engine);
-        // ログにはOCR対象領域だけを保存する
+        // ログにはOCR対象領域だけを保存する (Focus::All なら全体のまま)
         let log_img = ocr::crop_for_focus(&image, focus);
         let hash = crate::capture::hash_hex(&log_img);
 
@@ -625,11 +618,11 @@ pub fn reocr(
         // 操作の記録としてrecognition行は追記する (SPECv0.4.9追補: 切替操作をログに残す)
         if let Some((cached_rid, text)) = crate::logdb::find_cached_recognition(&hash, &ocr_engine) {
             let ms = t0.elapsed().as_millis();
-            util::perf_log(cfg.perf_log, &format!("reocr {ocr_engine} {ms}ms (cached)"));
+            util::perf_log(cfg.perf_log, &format!("{perf_label} {ocr_engine} {ms}ms (cached)"));
             let use_capture_id = capture_with_img();
             let rid = log_recog(&cfg, use_capture_id, "ocr", &ocr_engine, ms, Some(&text), None, Some(&hash))
                 .or(Some(cached_rid));
-            let pin = text.contains('\n');
+            let pin = force_pin || text.contains('\n');
             post(main, generation, ctx.source_msg(
                 text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), pin, anchor, focus, ms,
                 use_capture_id, rid,
@@ -650,10 +643,10 @@ pub fn reocr(
         match result {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
-                util::perf_log(cfg.perf_log, &format!("reocr {ocr_engine} {ms}ms"));
+                util::perf_log(cfg.perf_log, &format!("{perf_label} {ocr_engine} {ms}ms"));
                 let use_capture_id = capture_with_img();
                 let recog_id = log_recog(&cfg, use_capture_id, "ocr", &ocr_engine, ms, Some(&o.text), None, Some(&hash));
-                let pin = o.text.contains('\n');
+                let pin = force_pin || o.text.contains('\n');
                 post(main, generation, ctx.source_msg(
                     o.text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), pin, anchor, focus,
                     ms, use_capture_id, recog_id,
@@ -663,79 +656,7 @@ pub fn reocr(
             Err(e) => {
                 let use_capture_id = if held { capture_id } else { log_cap(&cfg, "chip", &ctx, None) };
                 log_recog(&cfg, use_capture_id, "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e), Some(&hash));
-                post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: Some(ocr_engine) });
-            }
-        }
-    });
-}
-
-/// 画像編集(トリミング)適用後の再認識 (SPECv0.4 §4-3, §8.2.1):
-/// 新しい capture は作らず、同じ capture の下に認識行を追加する。
-/// 同一画像+同一エンジンの認識が既にログにあれば、再OCRせずその結果を再利用する
-/// (切替操作の記録としてrecognition行は追記する) (SPECv0.4追補)。
-#[allow(clippy::too_many_arguments)]
-pub fn reocr_edited(
-    generation: u64,
-    capture_id: Option<i64>,
-    image: Arc<Captured>,
-    ocr_engine: String,
-    tr_engine: String,
-    cfg: Config,
-    main: isize,
-    anchor: (i32, i32),
-    app_title: String,
-    app_exe: String,
-    uia_path: String,
-    uia_nodes: Vec<uia::UiaPathNode>,
-    control_type: Option<String>,
-    selected_text: Option<String>,
-) {
-    std::thread::spawn(move || {
-        init_com();
-        let t0 = Instant::now();
-        let ctx = AppContext {
-            exe: if app_exe.is_empty() { None } else { Some(app_exe) },
-            title: app_title,
-            uia_path,
-            uia_nodes,
-            control_type,
-            selected_text,
-        };
-        let pc = prompt_ctx(&ctx, &ocr_engine);
-        let hash = crate::capture::hash_hex(&image);
-
-        // 同一画像+同一エンジンの既存認識結果があれば再OCRせず再利用する。
-        // 操作の記録としてrecognition行は追記する (SPECv0.4.9追補: 切替操作をログに残す)
-        if let Some((cached_rid, text)) = crate::logdb::find_cached_recognition(&hash, &ocr_engine) {
-            let ms = t0.elapsed().as_millis();
-            util::perf_log(cfg.perf_log, &format!("reocr_edited {ocr_engine} {ms}ms (cached)"));
-            let rid = log_recog(&cfg, capture_id, "ocr", &ocr_engine, ms, Some(&text), None, Some(&hash))
-                .or(Some(cached_rid));
-            post(main, generation, ctx.source_msg(
-                text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), true, anchor,
-                ocr::Focus::All, ms, capture_id, rid,
-            ));
-            let o = ocr::OcrOutput { text, ..Default::default() };
-            dispatch_translation(generation, cfg, o, tr_engine, main, rid, pc, &t0);
-            return;
-        }
-
-        // クロップ済みの新しい画像を対象とするため、行/段落の絞り込みは行わず全体をOCRする
-        let result = ocr::run(&ocr_engine, &cfg, &image, ocr::Focus::All, &pc);
-        match result {
-            Ok(o) => {
-                let ms = t0.elapsed().as_millis();
-                util::perf_log(cfg.perf_log, &format!("reocr_edited {ocr_engine} {ms}ms"));
-                let recog_id = log_recog(&cfg, capture_id, "ocr", &ocr_engine, ms, Some(&o.text), None, Some(&hash));
-                post(main, generation, ctx.source_msg(
-                    o.text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), true, anchor,
-                    ocr::Focus::All, ms, capture_id, recog_id,
-                ));
-                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
-            }
-            Err(e) => {
-                log_recog(&cfg, capture_id, "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e), Some(&hash));
-                post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: Some(ocr_engine) });
+                post(main, generation, WorkerMsg::Error { msg: e, anchor });
             }
         }
     });
@@ -780,14 +701,13 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
             post(main, generation, WorkerMsg::Error {
                 msg: "このウィンドウは取得できません".into(),
                 anchor,
-                engine: None,
             });
             return;
         }
         let full = match crate::capture::capture_window(root) {
             Ok(f) => f,
             Err(e) => {
-                post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: None });
+                post(main, generation, WorkerMsg::Error { msg: e, anchor });
                 return;
             }
         };
@@ -807,7 +727,6 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
             post(main, generation, WorkerMsg::Error {
                 msg: "選択範囲を切り出せませんでした".into(),
                 anchor,
-                engine: None,
             });
             return;
         };
@@ -832,7 +751,7 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
             Err(e) => {
                 let capture_id = log_cap(&cfg, "region", &ctx, None);
                 log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
-                post(main, generation, WorkerMsg::Error { msg: e, anchor, engine: Some(engine) });
+                post(main, generation, WorkerMsg::Error { msg: e, anchor });
             }
         }
     });
@@ -873,7 +792,6 @@ pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, prof
             post(main, generation, WorkerMsg::Error {
                 msg: "解説の取得に失敗しました: LLM APIプロファイルが設定されていません".into(),
                 anchor: (0, 0),
-                engine: None,
             });
             return;
         };
@@ -898,7 +816,6 @@ pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, prof
                 post(main, generation, WorkerMsg::Error {
                     msg: format!("解説の取得に失敗しました: {e}"),
                     anchor: (0, 0),
-                    engine: None,
                 });
             }
         }
