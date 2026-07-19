@@ -93,6 +93,9 @@ pub struct App {
     pub uia_nodes: Vec<crate::uia::UiaPathNode>,
     /// カーソル位置要素のUIA ControlType名 (入力内容ログ用; SPECv0.4.8追補)
     pub control_type: Option<String>,
+    /// カーソル位置要素で選択中のテキスト (SPECv0.5追補)。
+    /// 「選択中の文字列」チップの活性判定・ツールチップ・手動再採用に使う。
+    pub selected_text: Option<String>,
     /// 直近の認識が UIA 経路で得られたか
     pub via_uia: bool,
     pub scroll_y: i32,
@@ -162,6 +165,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             uia_path: String::new(),
             uia_nodes: Vec::new(),
             control_type: None,
+            selected_text: None,
             via_uia: false,
             scroll_y: 0,
             detect_on: false,
@@ -446,6 +450,7 @@ pub fn close_overlay(app: &mut App) {
     app.busy = false;
     app.via_uia = false;
     app.control_type = None;
+    app.selected_text = None;
 }
 
 /// ワーカー結果の受信 (世代番号が古いものは破棄; SPEC §6.4)
@@ -457,7 +462,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
         }
         app.busy = false;
         match msg {
-            worker::WorkerMsg::Source { text, method, engine, img, pin, anchor, focus, ms, capture_id, recog_id, app_title, app_exe, uia_path, uia_nodes, control_type } => {
+            worker::WorkerMsg::Source { text, method, engine, img, pin, anchor, focus, ms, capture_id, recog_id, app_title, app_exe, uia_path, uia_nodes, control_type, selected_text } => {
                 if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
                     return;
                 }
@@ -483,6 +488,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.uia_path = uia_path;
                 app.uia_nodes = uia_nodes;
                 app.control_type = control_type;
+                app.selected_text = selected_text;
                 app.scroll_y = 0;
                 // キャプチャ内容が変わったら解説を初期化する (SPECv0.4.8追補: 開く度に解説をリセット)
                 app.explanation = None;
@@ -607,10 +613,10 @@ pub fn sync_overlay(app: &mut App) {
             ocr_enabled.push(app.cfg.engine_available(k));
         }
     }
-    for prof in &app.cfg.api_profiles {
+    for prof in app.cfg.ready_api_profiles() {
         ocr_keys.push(prof.name.clone());
         ocr_labels.push(prof.name.clone());
-        ocr_enabled.push(prof.is_ready());
+        ocr_enabled.push(true);
     }
     let mut tr_keys = Vec::new();
     let mut tr_labels = Vec::new();
@@ -622,10 +628,10 @@ pub fn sync_overlay(app: &mut App) {
             tr_enabled.push(app.cfg.engine_available(k));
         }
     }
-    for prof in &app.cfg.api_profiles {
+    for prof in app.cfg.ready_api_profiles() {
         tr_keys.push(prof.name.clone());
         tr_labels.push(prof.name.clone());
-        tr_enabled.push(prof.is_ready());
+        tr_enabled.push(true);
     }
     let content = OverlayContent {
         main_hwnd: app.main.0 as isize,
@@ -661,6 +667,7 @@ pub fn sync_overlay(app: &mut App) {
         uia_nodes: app.uia_nodes.clone(),
         scroll_y: app.scroll_y,
         has_image: app.last_img.is_some(),
+        selected_text: app.selected_text.clone(),
         busy: app.busy,
         // overlay::update 内で EDIT (overlay.rs内) の実データから都度上書きされる
         edit: None,

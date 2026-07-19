@@ -34,6 +34,9 @@ pub enum WorkerMsg {
         uia_nodes: Vec<uia::UiaPathNode>,
         /// カーソル位置要素のUIA ControlType名 (入力内容ログ用; SPECv0.4.8追補)
         control_type: Option<String>,
+        /// カーソル位置要素で選択中のテキスト (SPECv0.5追補)。
+        /// 「選択中の文字列」チップの活性判定・全文ツールチップ・手動再採用に使う。
+        selected_text: Option<String>,
     },
     Translation {
         text: String,
@@ -87,6 +90,9 @@ struct AppContext {
     uia_nodes: Vec<uia::UiaPathNode>,
     /// カーソル位置要素のUIA ControlType名 (入力内容ログ用; SPECv0.4.8追補)
     control_type: Option<String>,
+    /// カーソル位置要素で選択中のテキスト (SPECv0.5追補)。
+    /// 「選択中の文字列」チップの活性判定・全文ツールチップに使う。
+    selected_text: Option<String>,
 }
 
 impl AppContext {
@@ -100,6 +106,7 @@ impl AppContext {
             uia_path: build_uia_path_log(&uia_nodes),
             uia_nodes,
             control_type,
+            selected_text: None,
         }
     }
 
@@ -136,6 +143,7 @@ impl AppContext {
             uia_path: self.uia_path.clone(),
             uia_nodes: self.uia_nodes.clone(),
             control_type: self.control_type.clone(),
+            selected_text: self.selected_text.clone(),
         }
     }
 }
@@ -373,41 +381,68 @@ fn dispatch_translation(
     }
 }
 
-/// ホールドモードの認識サイクル: UIA優先 → WGCキャプチャOCR (SPEC §6.4)
+/// UIA経路(選択文字列/カーソル位置テキスト)の採用結果を記録・送信・翻訳する共通処理。
+/// 選択文字列(経路S)とカーソル位置テキスト(経路A)のどちらも、OCRを行わず同じ形で
+/// 扱えるため recognize_cycle から共用する。
+#[allow(clippy::too_many_arguments)]
+fn adopt_uia_text(
+    generation: u64,
+    cfg: Config,
+    text: String,
+    tr_engine: String,
+    main: isize,
+    x: i32,
+    y: i32,
+    target: isize,
+    ctx: &AppContext,
+    probe: &uia::UiaProbe,
+    t0: &Instant,
+) {
+    let ms = t0.elapsed().as_millis();
+    util::perf_log(cfg.perf_log, &format!("source UIA {ms}ms"));
+
+    // OCRは行っていないが、後でOCRエンジンへ切り替えた際に再キャプチャ不要で使えるよう、
+    // また認識ログにも紐づけられるよう、この時点で検出領域の画像を撮影しておく。
+    let cap = capture_plan::capture_probe(x, y, target, probe).ok();
+    let focus = cap
+        .as_ref()
+        .map(|(b, kind)| capture_plan::focus_for(*kind, b.focus_y))
+        .unwrap_or(ocr::Focus::All);
+    let log_img: Option<Captured> =
+        cap.as_ref().map(|(b, _)| ocr::crop_for_focus(&b.img, focus).into_owned());
+    let img = cap.map(|(b, _)| Arc::new(b.img));
+
+    let capture_id = log_cap(&cfg, "hold", ctx, log_img.as_ref());
+    let hash = log_img.as_ref().map(crate::capture::hash_hex);
+    let recog_id = log_recog(&cfg, capture_id, "uia", "uia", ms, Some(&text), None, hash.as_deref());
+    post(main, generation, ctx.source_msg(
+        text.clone(), "UIA", None, img, false, (x, y), focus, ms, capture_id, recog_id,
+    ));
+    // UIA経路なので ocr_engine は空文字 (SPECv0.4 §7.1)
+    let pc = prompt_ctx(ctx, "");
+    translate(generation, cfg, text, tr_engine, main, recog_id, pc, false);
+}
+
+/// ホールドモードの認識サイクル: 選択文字列 → UIA → WGCキャプチャOCR (SPEC §6.4, SPECv0.5追補)
 /// キャプチャ領域は UIA検出結果 (行矩形/要素/直下要素) を優先し、無ければ既定帯。
 pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Config, main: isize) {
     std::thread::spawn(move || {
         let tr_engine = effective_translator(&cfg);
         init_com();
         let t0 = Instant::now();
-        let ctx = AppContext::capture(x, y, HWND(target as *mut _));
+        let mut ctx = AppContext::capture(x, y, HWND(target as *mut _));
         let probe = uia::probe_at_point(x, y);
+        ctx.selected_text = probe.selected_text.clone();
+
+        // 経路S: 選択中の文字列 (最優先。OCRはもちろん、カーソル位置のUIAテキストよりも優先)
+        if let Some(sel) = probe.selected_text.clone() {
+            adopt_uia_text(generation, cfg, sel, tr_engine, main, x, y, target, &ctx, &probe, &t0);
+            return;
+        }
 
         // 経路A: UIA
         if let Some(text) = probe.text.clone() {
-            let ms = t0.elapsed().as_millis();
-            util::perf_log(cfg.perf_log, &format!("source UIA {ms}ms"));
-
-            // OCRは行っていないが、後でOCRエンジンへ切り替えた際に再キャプチャ不要で使えるよう、
-            // また認識ログにも紐づけられるよう、この時点で検出領域の画像を撮影しておく。
-            let cap = capture_plan::capture_probe(x, y, target, &probe).ok();
-            let focus = cap
-                .as_ref()
-                .map(|(b, kind)| capture_plan::focus_for(*kind, b.focus_y))
-                .unwrap_or(ocr::Focus::All);
-            let log_img: Option<Captured> =
-                cap.as_ref().map(|(b, _)| ocr::crop_for_focus(&b.img, focus).into_owned());
-            let img = cap.map(|(b, _)| Arc::new(b.img));
-
-            let capture_id = log_cap(&cfg, "hold", &ctx, log_img.as_ref());
-            let hash = log_img.as_ref().map(crate::capture::hash_hex);
-            let recog_id = log_recog(&cfg, capture_id, "uia", "uia", ms, Some(&text), None, hash.as_deref());
-            post(main, generation, ctx.source_msg(
-                text.clone(), "UIA", None, img, false, (x, y), focus, ms, capture_id, recog_id,
-            ));
-            // UIA経路なので ocr_engine は空文字 (SPECv0.4 §7.1)
-            let pc = prompt_ctx(&ctx, "");
-            translate(generation, cfg, text, tr_engine, main, recog_id, pc, false);
+            adopt_uia_text(generation, cfg, text, tr_engine, main, x, y, target, &ctx, &probe, &t0);
             return;
         }
 
@@ -530,11 +565,13 @@ pub fn reocr(
     uia_path: String,
     uia_nodes: Vec<uia::UiaPathNode>,
     control_type: Option<String>,
+    selected_text: Option<String>,
 ) {
     std::thread::spawn(move || {
         init_com();
         let t0 = Instant::now();
         let mut hover_text: Option<String> = None;
+        let mut fresh_selected_text: Option<String> = None;
         let held = img.is_some();
         let (image, focus) = match img {
             Some(i) => (i, focus),
@@ -546,6 +583,7 @@ pub fn reocr(
                     Ok((b, kind)) => {
                         let f = capture_plan::focus_for(kind, b.focus_y);
                         hover_text = probe.hover_text;
+                        fresh_selected_text = probe.selected_text;
                         (Arc::new(b.img), f)
                     }
                     Err(e) => {
@@ -566,9 +604,12 @@ pub fn reocr(
                 uia_path,
                 uia_nodes,
                 control_type,
+                selected_text,
             }
         } else {
-            AppContext::capture(x, y, HWND(target as *mut _))
+            let mut c = AppContext::capture(x, y, HWND(target as *mut _));
+            c.selected_text = fresh_selected_text;
+            c
         };
         let pc = prompt_ctx(&ctx, &ocr_engine);
         // ログにはOCR対象領域だけを保存する
@@ -647,6 +688,7 @@ pub fn reocr_edited(
     uia_path: String,
     uia_nodes: Vec<uia::UiaPathNode>,
     control_type: Option<String>,
+    selected_text: Option<String>,
 ) {
     std::thread::spawn(move || {
         init_com();
@@ -657,6 +699,7 @@ pub fn reocr_edited(
             uia_path,
             uia_nodes,
             control_type,
+            selected_text,
         };
         let pc = prompt_ctx(&ctx, &ocr_engine);
         let hash = crate::capture::hash_hex(&image);

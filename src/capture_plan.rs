@@ -19,6 +19,10 @@ const HOVER_MAX_H: i32 = 320;
 const PARA_BAND_H: i32 = 320;
 /// 採用した矩形に付ける余白 (px)。文字の欠けを防ぐ。
 const CAP_PAD: i32 = 6;
+/// OCRへ渡す画像の最小高さ (px)。UIA直下要素の矩形 (例: 1行のEDIT) はこれより
+/// 低いことがあり、OneOCRは極端に低い画像で実行自体に失敗することがあるため、
+/// カーソル位置を中心に上下へ広げてこの高さを確保する。
+const MIN_OCR_H: i32 = 48;
 
 /// キャプチャ矩形の由来 (plan_capture_rect の決定結果)
 #[derive(Clone, Copy, PartialEq)]
@@ -70,14 +74,32 @@ fn merge_rects(rects: &[RECT]) -> RECT {
     m
 }
 
-/// 余白を付けてウィンドウ矩形へクランプ
+/// 余白を付けてウィンドウ矩形へクランプし、極端に低い矩形はOCR失敗を避けるため
+/// 最小高さまで(カーソルYを中心に)上下へ広げる。
 fn pad_clamp(r: &RECT, win: &RECT) -> RECT {
-    RECT {
+    let padded = RECT {
         left: (r.left - CAP_PAD).max(win.left),
         top: (r.top - CAP_PAD).max(win.top),
         right: (r.right + CAP_PAD).min(win.right),
         bottom: (r.bottom + CAP_PAD).min(win.bottom),
+    };
+    let h = padded.bottom - padded.top;
+    if h >= MIN_OCR_H || h <= 0 {
+        return padded;
     }
+    let cy = (padded.top + padded.bottom) / 2;
+    let half = MIN_OCR_H / 2;
+    let mut top = cy - half;
+    let mut bottom = cy + half;
+    if top < win.top {
+        bottom += win.top - top;
+        top = win.top;
+    }
+    if bottom > win.bottom {
+        top -= bottom - win.bottom;
+        bottom = win.bottom;
+    }
+    RECT { left: padded.left, top: top.max(win.top), right: padded.right, bottom: bottom.min(win.bottom) }
 }
 
 /// UIA検出結果からキャプチャすべきスクリーン矩形を決める。

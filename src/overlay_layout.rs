@@ -8,6 +8,7 @@ use crate::overlay::{
     CHIP_EDIT_LASSO, CHIP_EDIT_RECT, CHIP_EDIT_RESET, CHIP_EDIT_UNDO, CHIP_EXPLAIN,
     CHIP_EXPLAIN_QUICK, CHIP_IMAGE, CHIP_OCR_BASE, CHIP_OPEN_LOG, CHIP_PIN, CHIP_SETTINGS,
     CHIP_SWAP_LANG, CHIP_TR_BASE, CHIP_UIA_NODE_BASE, CHIP_EDIT_SRC, CHIP_EDIT_TR, CHIP_EDIT_EXP,
+    CHIP_SELECTED_TEXT,
 };
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -210,8 +211,8 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         let mut need_w = 240i32;
         // 翻訳結果ブロックの言語反転ボタン (ラベル, 幅, 見出しY)。最終幅の確定後に右端へ置く。
         let mut swap_btn: Option<(String, i32, i32)> = None;
-        // 【アプリケーション】行の右端ボタン (キャプチャ画像幅(0なら無し), 上端Y)。
-        let mut app_row_cap_btn: Option<(i32, i32)> = None;
+        // 【アプリケーション】行の右端ボタン (キャプチャ画像幅(0なら無し), 選択中の文字列幅, 上端Y)。
+        let mut app_row_cap_btn: Option<(i32, i32, i32)> = None;
         // システムメッセージ行の右端ボタン (設定ボタン幅, ログを開く幅, 上端Y)。
         let sys_msg_btns: Option<(i32, i32, i32)>;
 
@@ -367,7 +368,8 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         y += sys_row_h + 8;
 
         // 【入力内容】: 対象アプリ情報 + UIAパスノードボタン + OCR対象画像ボタン。コピーは見出しラベルの左端。
-        if !content.app_title.is_empty() || content.has_image || !content.uia_nodes.is_empty() {
+        if !content.app_title.is_empty() || content.has_image || !content.uia_nodes.is_empty()
+            || content.selected_text.is_some() {
             let block_start = y;
             let hh = heading_row(
                 &mut items,
@@ -387,7 +389,9 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 } else {
                     0
                 };
-                let btns_w = if content.has_image { cap_w + 6 } else { 0 };
+                let (sel_cw, _) = measure(hdc, "選択中の文字列", FONT_CHIP, false, 200);
+                let sel_w = sel_cw + 20;
+                let btns_w = sel_w + 6 + if cap_w > 0 { cap_w + 6 } else { 0 };
                 let reserve = btns_w + 12 + CLOSE_SIZE * 2 + 14;
                 let avail = (MAXW - reserve).max(80);
                 let mut info = format!("アプリケーション：{}", content.app_title);
@@ -408,7 +412,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                     color: thm.text,
                     bold: false,
                 });
-                app_row_cap_btn = Some((cap_w, y));
+                app_row_cap_btn = Some((cap_w, sel_w, y));
                 need_w = need_w.max(PAD + tw + 12 + btns_w + PANEL_MARGIN + 6);
                 y += row_h + 4;
             }
@@ -467,16 +471,34 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             }
 
             // アプリ名が無い場合のフォールバック
-            if content.has_image && content.app_title.is_empty() {
-                let lab = "キャプチャ画像";
-                let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
-                items.push(Item::Chip {
-                    rect: RECT { left: PAD, top: y, right: PAD + cw + 20, bottom: y + CHIP_H },
-                    label: lab.to_string(),
-                    id: CHIP_IMAGE,
-                    active: content.edit.is_some(),
-                    enabled: true,
-                });
+            if content.app_title.is_empty() && (content.has_image || content.selected_text.is_some()) {
+                let mut x = PAD;
+                let has_selection = content.selected_text.as_deref().is_some_and(|s| !s.trim().is_empty());
+                if content.selected_text.is_some() {
+                    let lab = "選択中の文字列";
+                    let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
+                    let chip_w = cw + 20;
+                    items.push(Item::Chip {
+                        rect: RECT { left: x, top: y, right: x + chip_w, bottom: y + CHIP_H },
+                        label: lab.to_string(),
+                        id: CHIP_SELECTED_TEXT,
+                        active: has_selection
+                            && content.selected_text.as_deref().map(str::trim) == Some(content.source.trim()),
+                        enabled: has_selection && !content.busy,
+                    });
+                    x += chip_w + 6;
+                }
+                if content.has_image {
+                    let lab = "キャプチャ画像";
+                    let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
+                    items.push(Item::Chip {
+                        rect: RECT { left: x, top: y, right: x + cw + 20, bottom: y + CHIP_H },
+                        label: lab.to_string(),
+                        id: CHIP_IMAGE,
+                        active: content.edit.is_some(),
+                        enabled: true,
+                    });
+                }
                 y += CHIP_H + 4;
             }
             y += 4;
@@ -690,7 +712,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                         || matches!(
                             *id,
                             CHIP_EXPLAIN | CHIP_EXPLAIN_QUICK | CHIP_SWAP_LANG
-                                | CHIP_EDIT_SRC | CHIP_EDIT_TR | CHIP_EDIT_EXP
+                                | CHIP_EDIT_SRC | CHIP_EDIT_TR | CHIP_EDIT_EXP | CHIP_SELECTED_TEXT
                         )
                         || *id >= CHIP_UIA_NODE_BASE;
                     if forbidden {
@@ -759,19 +781,31 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             });
         }
 
-        // 【アプリケーション】行の右端に [キャプチャ画像] を配置する。
-        if let Some((cap_w, ty)) = app_row_cap_btn {
+        // 【アプリケーション】行の右端に [選択中の文字列][キャプチャ画像] を配置する
+        // (キャプチャ画像が右端、選択中の文字列がその左)。
+        if let Some((cap_w, sel_w, ty)) = app_row_cap_btn {
+            let mut right_edge = w - PANEL_MARGIN - 6;
             if cap_w > 0 {
-                let cap_right = w - PANEL_MARGIN - 6;
-                let cap_left = cap_right - cap_w;
+                let cap_left = right_edge - cap_w;
                 items.push(Item::Chip {
-                    rect: RECT { left: cap_left, top: ty, right: cap_right, bottom: ty + CHIP_H },
+                    rect: RECT { left: cap_left, top: ty, right: right_edge, bottom: ty + CHIP_H },
                     label: "キャプチャ画像".to_string(),
                     id: CHIP_IMAGE,
                     active: content.edit.is_some(),
                     enabled: !content.busy,
                 });
+                right_edge = cap_left - 6;
             }
+            let sel_left = right_edge - sel_w;
+            let has_selection = content.selected_text.as_deref().is_some_and(|s| !s.trim().is_empty());
+            items.push(Item::Chip {
+                rect: RECT { left: sel_left, top: ty, right: right_edge, bottom: ty + CHIP_H },
+                label: "選択中の文字列".to_string(),
+                id: CHIP_SELECTED_TEXT,
+                active: has_selection
+                    && content.selected_text.as_deref().map(str::trim) == Some(content.source.trim()),
+                enabled: has_selection && !content.busy,
+            });
         }
 
         // ブロック(カード)の背景

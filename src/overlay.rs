@@ -81,6 +81,9 @@ pub const CHIP_EDIT_EXP: usize = 123;
 #[allow(dead_code)]
 pub const CHIP_SAVE_EXP: usize = 124;
 pub const CHIP_FORCE_PIN: usize = 125;
+/// 選択中の文字列を読み取り結果として(再)採用する (SPECv0.5追補)。
+/// 「キャプチャ画像」チップの左に配置。選択が検出できていないときは無効。
+pub const CHIP_SELECTED_TEXT: usize = 126;
 
 /// テキストのインライン編集対象ブロック
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -183,6 +186,9 @@ pub struct OverlayContent {
     pub scroll_y: i32,
     /// OCR対象画像を保持しているか (「OCR対象画像」ボタンの表示条件)
     pub has_image: bool,
+    /// カーソル位置要素で選択中のテキスト (SPECv0.5追補)。
+    /// 「選択中の文字列」チップの活性判定・全文ツールチップに使う。
+    pub selected_text: Option<String>,
     /// 時間のかかる処理(再認識・再翻訳・解説取得)の実行中。
     pub busy: bool,
     /// 画像編集モードの要約 (overlay::update 内で EDIT の内容から自動的に設定される。
@@ -194,12 +200,22 @@ pub struct OverlayContent {
 
 const TIMER_AUTOHIDE: usize = 7;
 const TIMER_ANIMATION: usize = 8;
+/// UIAパスチップの全文ツールチップ表示用ワンショットタイマー
+const TIMER_TOOLTIP: usize = 9;
+/// ホバー開始からツールチップを出すまでの遅延 (ms)
+const TOOLTIP_DELAY_MS: u32 = 450;
 
 thread_local! {
     static CONTENT: RefCell<OverlayContent> = RefCell::new(OverlayContent::default());
     static LAYOUT: RefCell<Layout> = const { RefCell::new(Layout { w: 0, h: 0, content_h: 0, items: Vec::new(), panels: Vec::new(), edit_preview: None }) };
     /// マウスカーソルが乗っているチップID (✕ボタンのホバー強調に使用)
     static HOVER_ID: RefCell<Option<usize>> = const { RefCell::new(None) };
+    /// 直近のマウス座標 (クライアント座標)。ツールチップの表示位置決定に使う。
+    static MOUSE_POS: RefCell<(i32, i32)> = const { RefCell::new((0, 0)) };
+    /// タイマー発火待ちのツールチップ対象チップID (ホバーが変わったら破棄する)
+    static TOOLTIP_PENDING: RefCell<Option<usize>> = const { RefCell::new(None) };
+    /// 表示中のツールチップ (チップID, 表示位置)。None なら非表示。
+    static TOOLTIP_SHOWN: RefCell<Option<(usize, i32, i32)>> = const { RefCell::new(None) };
     /// 直近に表示したアンカー。同一アンカーでの再描画では実際のウィンドウ位置を維持する。
     static LAST_ANCHOR: RefCell<Option<(i32, i32)>> = const { RefCell::new(None) };
     /// 画像編集モードの実データ (SPECv0.4 §1-§4)。None のとき編集モード無効。
@@ -420,6 +436,12 @@ pub fn update(hwnd: HWND, mut content: OverlayContent) {
     
     let anchor = content.anchor;
     CONTENT.with(|c| *c.borrow_mut() = content);
+    // UIAパスノードの並びが変わりうるため、古いチップIDに対するツールチップ状態は破棄する
+    unsafe {
+        let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP);
+    }
+    TOOLTIP_PENDING.with(|t| *t.borrow_mut() = None);
+    TOOLTIP_SHOWN.with(|t| *t.borrow_mut() = None);
 
     let same_session = LAST_ANCHOR.with(|a| *a.borrow() == Some(anchor));
     let kept = if same_session {
@@ -472,6 +494,11 @@ pub fn hide(hwnd: HWND) {
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
     LAST_ANCHOR.with(|a| *a.borrow_mut() = None);
+    unsafe {
+        let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP);
+    }
+    TOOLTIP_PENDING.with(|t| *t.borrow_mut() = None);
+    TOOLTIP_SHOWN.with(|t| *t.borrow_mut() = None);
 }
 
 /// 表示位置を決める
@@ -698,6 +725,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_MOUSEMOVE => {
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            MOUSE_POS.with(|p| *p.borrow_mut() = (x, y));
             let hit = hit_test_chip(x, y);
             let changed = HOVER_ID.with(|h| {
                 let mut h = h.borrow_mut();
@@ -708,6 +736,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     false
                 }
             });
+            // ホバー対象が変わったらツールチップの表示/待機タイマーを立て直す。
+            // UIAパスチップ(全文が省略表示されうる)のときのみ遅延後に表示する。
+            if changed {
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP);
+                }
+                let had_shown = TOOLTIP_SHOWN.with(|t| t.borrow_mut().take().is_some());
+                match hit {
+                    Some(id) if id >= CHIP_UIA_NODE_BASE || id == CHIP_SELECTED_TEXT => {
+                        TOOLTIP_PENDING.with(|t| *t.borrow_mut() = Some(id));
+                        unsafe {
+                            SetTimer(Some(hwnd), TIMER_TOOLTIP, TOOLTIP_DELAY_MS, None);
+                        }
+                    }
+                    _ => {
+                        TOOLTIP_PENDING.with(|t| *t.borrow_mut() = None);
+                    }
+                }
+                if had_shown {
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                }
+            }
             // 画像編集: ドラッグ中は矩形の終点更新/投げ輪の軌跡追加のみ行う(レイアウト再計算はしない)
             let dragged = EDIT.with(|e| {
                 let mut g = e.borrow_mut();
@@ -769,7 +821,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     false
                 }
             });
-            if changed {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP);
+            }
+            TOOLTIP_PENDING.with(|t| *t.borrow_mut() = None);
+            let had_tooltip = TOOLTIP_SHOWN.with(|t| t.borrow_mut().take().is_some());
+            if changed || had_tooltip {
                 unsafe {
                     let _ = InvalidateRect(Some(hwnd), None, true);
                 }
@@ -870,6 +927,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             } else if wparam.0 == TIMER_ANIMATION {
                 unsafe {
                     let _ = InvalidateRect(Some(hwnd), None, true);
+                }
+            } else if wparam.0 == TIMER_TOOLTIP {
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP);
+                }
+                let pending = TOOLTIP_PENDING.with(|t| *t.borrow());
+                // 待機開始後もまだ同じチップにホバーしたままなら表示する
+                if let Some(id) = pending
+                    && HOVER_ID.with(|h| *h.borrow()) == Some(id)
+                {
+                    let (mx, my) = MOUSE_POS.with(|p| *p.borrow());
+                    TOOLTIP_SHOWN.with(|t| *t.borrow_mut() = Some((id, mx, my)));
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
                 }
             }
             LRESULT(0)
@@ -1023,6 +1095,8 @@ fn paint(hwnd: HWND) {
             }
         });
 
+        draw_tooltip(mem, w, h);
+
         windows::Win32::Graphics::Gdi::BitBlt(
             hdc,
             0,
@@ -1042,6 +1116,66 @@ fn paint(hwnd: HWND) {
         let _ = DeleteObject(HGDIOBJ(bg.0));
         let _ = DeleteObject(HGDIOBJ(border.0));
         let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+/// UIAパスチップの全文ツールチップ。ホバー中のチップの省略前テキストを
+/// マウス位置の近くにポップアップ表示する (SPECv0.5追補: 長いUIAテキストの視認性向上)。
+const TOOLTIP_MAX_W: i32 = 360;
+const TOOLTIP_PAD: i32 = 8;
+
+fn draw_tooltip(mem: HDC, win_w: i32, win_h: i32) {
+    let shown = TOOLTIP_SHOWN.with(|t| *t.borrow());
+    let Some((id, mx, my)) = shown else { return };
+    let text = CONTENT.with(|c| {
+        let c = c.borrow();
+        if id == CHIP_SELECTED_TEXT {
+            c.selected_text.clone()
+        } else {
+            c.uia_nodes.get(id.wrapping_sub(CHIP_UIA_NODE_BASE)).map(|n| n.text.clone())
+        }
+    });
+    let Some(text) = text else { return };
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    unsafe {
+        let th = overlay_layout::theme();
+        let (tw, th_h) = overlay_layout::measure(mem, text, overlay_layout::FONT_INFO, false, TOOLTIP_MAX_W);
+        let box_w = tw + TOOLTIP_PAD * 2;
+        let box_h = th_h + TOOLTIP_PAD * 2;
+
+        let mut left = mx + 12;
+        let mut top = my + 20;
+        if left + box_w > win_w - 4 {
+            left = (win_w - 4 - box_w).max(4);
+        }
+        if top + box_h > win_h - 4 {
+            // 下に収まらなければカーソルの上へ出す
+            top = (my - 8 - box_h).max(4);
+        }
+        let r = RECT { left, top, right: left + box_w, bottom: top + box_h };
+
+        let bg = CreateSolidBrush(COLORREF(th.panel_bg));
+        FillRect(mem, &r, bg);
+        let _ = DeleteObject(HGDIOBJ(bg.0));
+        let border = CreatePen(PS_SOLID, 1, COLORREF(th.panel_border));
+        let old_pen = SelectObject(mem, HGDIOBJ(border.0));
+        let old_brush = SelectObject(mem, HGDIOBJ(windows::Win32::Graphics::Gdi::GetStockObject(windows::Win32::Graphics::Gdi::NULL_BRUSH).0));
+        let _ = windows::Win32::Graphics::Gdi::Rectangle(mem, r.left, r.top, r.right, r.bottom);
+        SelectObject(mem, old_brush);
+        SelectObject(mem, old_pen);
+        let _ = DeleteObject(HGDIOBJ(border.0));
+
+        let mut text_r = RECT { left: r.left + TOOLTIP_PAD, top: r.top + TOOLTIP_PAD, right: r.right - TOOLTIP_PAD, bottom: r.bottom - TOOLTIP_PAD };
+        let font = overlay_layout::make_font(overlay_layout::FONT_INFO, false);
+        let old_font = SelectObject(mem, HGDIOBJ(font.0));
+        SetTextColor(mem, COLORREF(th.text));
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        DrawTextW(mem, &mut wide, &mut text_r, DT_WORDBREAK | DT_NOPREFIX);
+        SelectObject(mem, old_font);
+        let _ = DeleteObject(HGDIOBJ(font.0));
     }
 }
 
