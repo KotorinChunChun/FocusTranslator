@@ -8,8 +8,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, COLOR_WINDOW, CreateFontW, DEFAULT_CHARSET,
-    DEFAULT_PITCH, FONT_OUTPUT_PRECISION, FW_NORMAL, HBRUSH,
+    COLOR_WINDOW, HBRUSH,
 };
 use windows::Win32::UI::Controls::{
     INITCOMMONCONTROLSEX, InitCommonControlsEx, ICC_LISTVIEW_CLASSES, LVCF_SUBITEM, LVCF_TEXT,
@@ -523,10 +522,7 @@ fn build_controls(h: HWND, inst: HINSTANCE, mode_b: bool) {
             ctls.extend([lbl3, prev, regen, submit]);
         }
 
-        let font = CreateFontW(
-            -14, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0, DEFAULT_CHARSET, FONT_OUTPUT_PRECISION(0),
-            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH.0.into(), w!("Yu Gothic UI"),
-        );
+        let font = crate::ui_helpers::make_font(14, false);
         for ctl in ctls {
             let _ = SendMessageW(ctl, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(0)));
         }

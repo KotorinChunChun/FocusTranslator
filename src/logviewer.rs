@@ -9,8 +9,7 @@ use crate::util::to_wide;
 use std::cell::RefCell;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLOR_BTNFACE, CreateFontW, DEFAULT_CHARSET,
-    DEFAULT_PITCH, DIB_RGB_COLORS, FF_DONTCARE, FW_NORMAL, GetMonitorInfoW, HALFTONE, HBRUSH,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLOR_BTNFACE, DIB_RGB_COLORS, GetMonitorInfoW, HALFTONE, HBRUSH,
     InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, SetStretchBltMode,
     StretchDIBits,
 };
@@ -420,11 +419,7 @@ fn build(h: HWND, inst: HINSTANCE) {
 
     // フォント適用
     unsafe {
-        let font = CreateFontW(
-            -13, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0, DEFAULT_CHARSET, Default::default(),
-            Default::default(), Default::default(),
-            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32, w!("Yu Gothic UI"),
-        );
+        let font = make_font(13, false);
         let _ = windows::Win32::UI::WindowsAndMessaging::EnumChildWindows(
             Some(h),
             Some(set_font_proc),
@@ -432,18 +427,6 @@ fn build(h: HWND, inst: HINSTANCE) {
         );
     }
     layout(h);
-}
-
-unsafe extern "system" fn set_font_proc(child: HWND, lparam: LPARAM) -> windows::core::BOOL {
-    unsafe {
-        SendMessageW(
-            child,
-            windows::Win32::UI::WindowsAndMessaging::WM_SETFONT,
-            Some(WPARAM(lparam.0 as usize)),
-            Some(LPARAM(1)),
-        );
-    }
-    true.into()
 }
 
 thread_local! {

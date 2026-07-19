@@ -2,13 +2,10 @@
 use crate::capture::Captured;
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DEFAULT_CHARSET,
-    DEFAULT_PITCH, DIB_RGB_COLORS, DT_NOPREFIX, DT_SINGLELINE, DeleteDC, DeleteObject, DrawTextW,
-    FONT_OUTPUT_PRECISION, FW_NORMAL, FillRect, GetDC, HGDIOBJ, ReleaseDC, SelectObject,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DIB_RGB_COLORS, DT_NOPREFIX, DT_SINGLELINE, DeleteDC, DeleteObject, DrawTextW, FillRect, GetDC, HGDIOBJ, ReleaseDC, SelectObject,
     SetBkMode, SetTextColor, TRANSPARENT,
 };
-use windows::core::w;
 
 /// GDIでテキストを白背景に黒文字で描画したBGRA画像を作る(実推論の疎通確認用)
 pub fn render_text(text: &str, w: i32, h: i32) -> Captured {
@@ -39,22 +36,7 @@ pub fn render_text(text: &str, w: i32, h: i32) -> Captured {
 
         SetBkMode(mem, TRANSPARENT);
         SetTextColor(mem, COLORREF(0x00000000));
-        let font = CreateFontW(
-            -28,
-            0,
-            0,
-            0,
-            FW_NORMAL.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            FONT_OUTPUT_PRECISION(0),
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            DEFAULT_PITCH.0.into(),
-            w!("Yu Gothic UI"),
-        );
+        let font = crate::ui_helpers::make_font(28, false);
         let old_font = SelectObject(mem, HGDIOBJ(font.0));
         let mut wide: Vec<u16> = text.encode_utf16().collect();
         let mut r = rect;
