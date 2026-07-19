@@ -7,8 +7,25 @@ use crate::engine;
 use crate::overlay;
 use crate::util;
 
-use windows::Win32::Foundation::RECT;
+use windows::Win32::Foundation::{POINT, RECT};
 use windows::core::w;
+
+/// handle_chip 冒頭でAppから取り出す状態一式。
+/// App の借用を解放してからダイアログ表示やワーカー起動を行うためのスナップショット。
+struct ChipCtx {
+    cfg: Config,
+    source: String,
+    last_img: Option<std::sync::Arc<crate::capture::Captured>>,
+    last_focus: crate::ocr::Focus,
+    origin: POINT,
+    target: isize,
+    main: isize,
+    anchor: (i32, i32),
+    cur_tr: String,
+    recog_id: Option<i64>,
+    capture_id: Option<i64>,
+    held_ctx: crate::worker::AppContext,
+}
 
 /// 現在のアプリ状態からプロンプト置換用コンテキストを組み立てる (SPECv0.4 §7.1)。
 /// translated_text / tr_engine は最新の翻訳結果があるときのみ値を持つ。
@@ -145,28 +162,22 @@ pub fn handle_chip(id: usize) {
         return;
     }
     // フェーズ1: 状態取得(借用を解放してから同意ダイアログを出す)
-    let Some(info) = with_app(|app| {
-        (
-            app.cfg.clone(),
-            app.source.clone(),
-            app.last_img.clone(),
-            app.last_focus,
-            app.origin,
-            app.target,
-            app.main.0 as isize,
-            app.anchor,
-            app.cur_tr.clone(),
-            app.recog_id,
-            app.capture_id,
-            app.held_ctx(),
-        )
+    let Some(c) = with_app(|app| ChipCtx {
+        cfg: app.cfg.clone(),
+        source: app.source.clone(),
+        last_img: app.last_img.clone(),
+        last_focus: app.last_focus,
+        origin: app.origin,
+        target: app.target,
+        main: app.main.0 as isize,
+        anchor: app.anchor,
+        cur_tr: app.cur_tr.clone(),
+        recog_id: app.recog_id,
+        capture_id: app.capture_id,
+        held_ctx: app.held_ctx(),
     }) else {
         return;
     };
-    let (
-        cfg, source, last_img, last_focus, origin, target, main, anchor, cur_tr, recog_id, capture_id,
-        held_ctx,
-    ) = info;
 
     match id {
         overlay::CHIP_COPY => {
@@ -306,211 +317,28 @@ pub fn handle_chip(id: usize) {
         
         // テキスト編集ポップアップ
         overlay::CHIP_EDIT_SRC => {
-            let (hwnd, text) = with_app(|app| (app.overlay, app.source.clone())).unwrap();
-            if let Some(new_text) = crate::input_dialog::show(hwnd, "原文を編集", &text) {
-                if new_text.is_empty() || new_text == source {
-                    return;
-                }
-                if let Some(rid) = recog_id {
-                    crate::logdb::update_recog_text(rid, &new_text);
-                }
-                let new_gen = with_app(|app| {
-                    app.source = new_text.clone();
-                    app.translation = None;
-                    // 読み取り結果(原文)が変わったので解説も破棄する (再度開けば同一なら復元される)
-                    app.explanation = None;
-                    app.explaining = false;
-                    app.mode = Mode::Pinned;
-                    app.status = Some("修正された原文で再翻訳中…".into());
-                    app.busy = true;
-                    sync_overlay(app);
-                    app.generation += 1;
-                    app.generation
-                }).unwrap_or(0);
-                
-                let cfg2 = Config::load();
-                let pc = prompt_ctx_from_app(&new_text);
-                crate::worker::retranslate(new_gen, cur_tr, cfg2, new_text, main, recog_id, pc);
-            }
+            chip_edit_source(c);
             return;
         }
         overlay::CHIP_EDIT_TR => {
-            let (hwnd, text) = with_app(|app| (app.overlay, app.translation.clone().unwrap_or_default())).unwrap();
-            if let Some(new_text) = crate::input_dialog::show(hwnd, "翻訳結果を編集", &text) {
-                let prev_tr = with_app(|app| app.translation.clone()).flatten().unwrap_or_default();
-                if !new_text.is_empty() && new_text != prev_tr {
-                    if let Some(rid) = recog_id {
-                        crate::logdb::update_trans_text(rid, &new_text);
-                    }
-                    with_app(|app| {
-                        app.translation = Some(new_text);
-                        app.mode = Mode::Pinned;
-                        sync_overlay(app);
-                    });
-                }
-            }
+            chip_edit_translation(c.recog_id);
             return;
         }
         overlay::CHIP_EDIT_EXP => {
-            let (hwnd, text) = with_app(|app| (app.overlay, app.explanation.clone().unwrap_or_default())).unwrap();
-            if let Some(new_text) = crate::input_dialog::show(hwnd, "解説を編集", &text) {
-                let prev_exp = with_app(|app| app.explanation.clone()).flatten().unwrap_or_default();
-                if !new_text.is_empty() && new_text != prev_exp {
-                    if let Some(rid) = recog_id {
-                        crate::logdb::update_explain_text(rid, &new_text);
-                    }
-                    with_app(|app| {
-                        app.explanation = Some(new_text);
-                        app.mode = Mode::Pinned;
-                        sync_overlay(app);
-                    });
-                }
-            }
+            chip_edit_explanation(c.recog_id);
             return;
         }
-        
+
         overlay::CHIP_SWAP_LANG => {
-            // 翻訳方向を反転 (en→ja ⇄ ja→en)
-            if source.is_empty() {
-                return;
-            }
-            let new_gen = with_app(|app| {
-                std::mem::swap(&mut app.cfg.source_lang, &mut app.cfg.target_lang);
-                app.cfg.save();
-                app.generation += 1;
-                app.mode = Mode::Pinned;
-                app.translation = None;
-                let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
-                app.status = Some(format!("{} で翻訳中…", engine_name));
-                app.busy = true;
-                sync_overlay(app);
-                app.generation
-            })
-            .unwrap_or(0);
-            let cfg2 = Config::load();
-            let pc = prompt_ctx_from_app(&source);
-            crate::worker::retranslate(new_gen, cur_tr, cfg2, source, main, recog_id, pc);
+            chip_swap_lang(c);
             return;
         }
         overlay::CHIP_EXPLAIN_QUICK => {
-            // 解説(即時): 編集ダイアログを出さず、既定プロンプトをそのまま送信する
-            with_app(|app| {
-                app.mode = Mode::Pinned;
-                sync_overlay(app);
-            });
-            let Some(r_id) = recog_id else { return };
-            if source.is_empty() {
-                return;
-            }
-            // キャッシュ済みの解説があれば即表示する
-            if let Some(expl) = crate::logdb::latest_explanation(r_id) {
-                with_app(|app| {
-                    app.mode = Mode::Pinned;
-                    app.status = None;
-                    app.error_only = false;
-                    app.explanation = Some(expl);
-                    sync_overlay(app);
-                });
-                return;
-            }
-            let pc = prompt_ctx_from_app(&source);
-            let prompt = crate::worker::build_explain_prompt(&cfg, &pc).unwrap_or_default();
-            if prompt.is_empty() {
-                with_app(|app| {
-                    app.badge = Some("LLM APIが設定されていません".into());
-                    sync_overlay(app);
-                });
-                return;
-            }
-            let profile = cfg.active_api_profile.clone();
-            let new_gen = with_app(|app| {
-                app.generation += 1;
-                app.mode = Mode::Pinned;
-                app.status = Some(format!("LLM:{} で解説を取得中…", profile));
-                app.explaining = true;
-                app.busy = true;
-                sync_overlay(app);
-                app.generation
-            })
-            .unwrap_or(0);
-            let cfg2 = Config::load();
-            crate::worker::explain(new_gen, r_id, cfg2, prompt, profile, main);
+            chip_explain_quick(c);
             return;
         }
         overlay::CHIP_EXPLAIN => {
-            // プロンプト編集ウィンドウ (モードB) を表示してから送信 (SPECv0.4.7 §2)
-            with_app(|app| {
-                app.mode = Mode::Pinned;
-                sync_overlay(app);
-            });
-            if let Some(r_id) = recog_id
-                && !source.is_empty()
-            {
-                let dialog_pos = with_app(|app| {
-                    let mut r = RECT::default();
-                    unsafe {
-                        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(app.overlay, &mut r);
-                    }
-                    (r.left + 24, r.top + 24)
-                })
-                .unwrap_or_default();
-
-                // 全プロファイルの解説テンプレートを渡す (テンプレート/送信内容の分離編集)
-                let profiles: Vec<crate::prompt_edit::ProfilePrompt> = cfg
-                    .api_profiles
-                    .iter()
-                    .map(|p| crate::prompt_edit::ProfilePrompt {
-                        name: p.name.clone(),
-                        template: p.explain_prompt.clone(),
-                    })
-                    .collect();
-                if profiles.is_empty() {
-                    with_app(|app| {
-                        app.badge = Some("LLM APIが設定されていません".into());
-                        sync_overlay(app);
-                    });
-                    return;
-                }
-                let active_idx = cfg
-                    .api_profiles
-                    .iter()
-                    .position(|p| p.name == cfg.active_api_profile)
-                    .unwrap_or(0);
-
-                let pc = prompt_ctx_from_app(&source);
-                let main_hwnd_val = main;
-                let inst = with_app(|app| app.instance).unwrap_or_default();
-                crate::prompt_edit::open(
-                    inst,
-                    main_hwnd(),
-                    Some(dialog_pos),
-                    crate::prompt_edit::PromptKind::Explain,
-                    profiles,
-                    active_idx,
-                    Some(pc),
-                    Box::new(|name, tmpl| {
-                        crate::prompt_edit::save_prompt_to_config(
-                            crate::prompt_edit::PromptKind::Explain,
-                            name,
-                            tmpl,
-                        )
-                    }),
-                    Some(Box::new(move |edited_prompt, profile| {
-                        let new_gen = with_app(|app| {
-                            app.generation += 1;
-                            app.mode = Mode::Pinned;
-                            app.status = Some(format!("LLM:{} で解説を取得中…", profile));
-                            app.explaining = true;
-                            app.busy = true;
-                            sync_overlay(app);
-                            app.generation
-                        })
-                        .unwrap_or(0);
-                        let cfg2 = Config::load();
-                        crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val);
-                    })),
-                );
-            }
+            chip_explain(c);
             return;
         }
         overlay::CHIP_SETTINGS => {
@@ -528,131 +356,10 @@ pub fn handle_chip(id: usize) {
 
     if id < overlay::CHIP_TR_BASE {
         // OCRエンジン切替: 保持画像で再認識→現行エンジンで再翻訳 (SPEC §8)
-        let mut keys = Vec::new();
-        for k in engine::OCR_KEYS.iter() {
-            if *k != "llm" {
-                keys.push(k.to_string());
-            }
-        }
-        for prof in cfg.ready_api_profiles() {
-            keys.push(prof.name.clone());
-        }
-        let idx = id - overlay::CHIP_OCR_BASE;
-        if idx >= keys.len() {
-            return;
-        }
-        let selected_key = keys[idx].clone();
-        let is_fixed = engine::OCR_KEYS.iter().any(|k| *k == selected_key && *k != "llm");
-        let target_ocr = if is_fixed { selected_key.clone() } else { "llm".to_string() };
-
-        let available = if is_fixed {
-            cfg.engine_available(&selected_key)
-        } else {
-            cfg.api_profiles.iter().find(|p| p.name == selected_key).is_some_and(|p| p.is_ready())
-        };
-        if !available {
-            with_app(|app| {
-                app.status = Some(engine_unavailable_msg(&selected_key));
-                sync_overlay(app);
-            });
-            return;
-        }
-        if is_fixed && !ensure_consent(&selected_key, &cfg) {
-            return;
-        }
-        let new_gen = with_app(|app| {
-            app.generation += 1;
-            app.mode = Mode::Pinned;
-            if is_fixed {
-                app.cur_ocr = selected_key.clone();
-            } else {
-                app.cur_ocr = "llm".to_string();
-                app.cfg.active_api_profile = selected_key.clone();
-            }
-            app.cfg.save();
-            app.status = Some("再認識中…".into());
-            app.busy = true;
-            sync_overlay(app);
-            app.generation
-        })
-        .unwrap_or(0);
-        let cfg2 = Config::load();
-        crate::worker::reocr(crate::worker::ReocrJob {
-            generation: new_gen,
-            capture_id,
-            img: last_img,
-            focus: last_focus,
-            x: origin.x,
-            y: origin.y,
-            target,
-            ocr_engine: target_ocr,
-            tr_engine: cur_tr,
-            cfg: cfg2,
-            main,
-            anchor,
-            ctx: held_ctx,
-            force_pin: false,
-            perf_label: "reocr",
-        });
+        switch_ocr_engine(id, c);
     } else if (overlay::CHIP_TR_BASE..overlay::CHIP_COPY).contains(&id) {
         // 翻訳エンジン切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)
-        let mut keys = Vec::new();
-        for k in engine::TR_KEYS.iter() {
-            if *k != "llm" {
-                keys.push(k.to_string());
-            }
-        }
-        for prof in cfg.ready_api_profiles() {
-            keys.push(prof.name.clone());
-        }
-        let idx = id - overlay::CHIP_TR_BASE;
-        if idx >= keys.len() {
-            return;
-        }
-        let selected_key = keys[idx].clone();
-        let is_fixed = engine::TR_KEYS.iter().any(|k| *k == selected_key && *k != "llm");
-        let target_tr = if is_fixed { selected_key.clone() } else { "llm".to_string() };
-
-        if source.is_empty() {
-            return;
-        }
-        let available = if is_fixed {
-            cfg.engine_available(&selected_key)
-        } else {
-            cfg.api_profiles.iter().find(|p| p.name == selected_key).is_some_and(|p| p.is_ready())
-        };
-        if !available {
-            with_app(|app| {
-                app.status = Some(engine_unavailable_msg(&selected_key));
-                sync_overlay(app);
-            });
-            return;
-        }
-        if is_fixed && !ensure_consent(&selected_key, &cfg) {
-            return;
-        }
-
-        let new_gen = with_app(|app| {
-            app.generation += 1;
-            app.mode = Mode::Pinned;
-            if is_fixed {
-                app.cur_tr = selected_key.clone();
-            } else {
-                app.cur_tr = "llm".to_string();
-                app.cfg.active_api_profile = selected_key.clone();
-            }
-            app.cfg.save();
-            let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
-            app.status = Some(format!("{} で翻訳中…", engine_name));
-            app.translation = None;
-            app.busy = true;
-            sync_overlay(app);
-            app.generation
-        })
-        .unwrap_or(0);
-        let cfg2 = Config::load();
-        let pc = prompt_ctx_from_app(&source);
-        crate::worker::retranslate(new_gen, target_tr, cfg2, source, main, recog_id, pc);
+        switch_tr_engine(id, c);
     } else if id == overlay::CHIP_SELECTED_TEXT {
         // 選択中の文字列を(再)採用: 検出済みの選択テキストを原文として採用し再翻訳
         let Some(text) = with_app(|app| app.selected_text.clone())
@@ -662,7 +369,7 @@ pub fn handle_chip(id: usize) {
         else {
             return;
         };
-        adopt_text_and_retranslate(text, cur_tr, recog_id, main);
+        adopt_text_and_retranslate(text, c.cur_tr, c.recog_id, c.main);
     } else if id >= overlay::CHIP_UIA_NODE_BASE {
         // UIAパスノード選択: そのノードのテキストを原文として採用し再翻訳
         let idx = id - overlay::CHIP_UIA_NODE_BASE;
@@ -672,8 +379,329 @@ pub fn handle_chip(id: usize) {
         else {
             return;
         };
-        adopt_text_and_retranslate(text, cur_tr, recog_id, main);
+        adopt_text_and_retranslate(text, c.cur_tr, c.recog_id, c.main);
     }
+}
+
+/// 原文の編集ダイアログ (CHIP_EDIT_SRC): 確定した原文をDB・Appへ反映し再翻訳する
+fn chip_edit_source(c: ChipCtx) {
+    let (hwnd, text) = with_app(|app| (app.overlay, app.source.clone())).unwrap();
+    if let Some(new_text) = crate::input_dialog::show(hwnd, "原文を編集", &text) {
+        if new_text.is_empty() || new_text == c.source {
+            return;
+        }
+        if let Some(rid) = c.recog_id {
+            crate::logdb::update_recog_text(rid, &new_text);
+        }
+        let new_gen = with_app(|app| {
+            app.source = new_text.clone();
+            app.translation = None;
+            // 読み取り結果(原文)が変わったので解説も破棄する (再度開けば同一なら復元される)
+            app.explanation = None;
+            app.explaining = false;
+            app.mode = Mode::Pinned;
+            app.status = Some("修正された原文で再翻訳中…".into());
+            app.busy = true;
+            sync_overlay(app);
+            app.generation += 1;
+            app.generation
+        }).unwrap_or(0);
+
+        let cfg2 = Config::load();
+        let pc = prompt_ctx_from_app(&new_text);
+        crate::worker::retranslate(new_gen, c.cur_tr, cfg2, new_text, c.main, c.recog_id, pc);
+    }
+}
+
+/// 翻訳結果の編集ダイアログ (CHIP_EDIT_TR): 確定した訳文をDB・Appへ反映する
+fn chip_edit_translation(recog_id: Option<i64>) {
+    let (hwnd, text) = with_app(|app| (app.overlay, app.translation.clone().unwrap_or_default())).unwrap();
+    if let Some(new_text) = crate::input_dialog::show(hwnd, "翻訳結果を編集", &text) {
+        let prev_tr = with_app(|app| app.translation.clone()).flatten().unwrap_or_default();
+        if !new_text.is_empty() && new_text != prev_tr {
+            if let Some(rid) = recog_id {
+                crate::logdb::update_trans_text(rid, &new_text);
+            }
+            with_app(|app| {
+                app.translation = Some(new_text);
+                app.mode = Mode::Pinned;
+                sync_overlay(app);
+            });
+        }
+    }
+}
+
+/// 解説の編集ダイアログ (CHIP_EDIT_EXP): 確定した解説をDB・Appへ反映する
+fn chip_edit_explanation(recog_id: Option<i64>) {
+    let (hwnd, text) = with_app(|app| (app.overlay, app.explanation.clone().unwrap_or_default())).unwrap();
+    if let Some(new_text) = crate::input_dialog::show(hwnd, "解説を編集", &text) {
+        let prev_exp = with_app(|app| app.explanation.clone()).flatten().unwrap_or_default();
+        if !new_text.is_empty() && new_text != prev_exp {
+            if let Some(rid) = recog_id {
+                crate::logdb::update_explain_text(rid, &new_text);
+            }
+            with_app(|app| {
+                app.explanation = Some(new_text);
+                app.mode = Mode::Pinned;
+                sync_overlay(app);
+            });
+        }
+    }
+}
+
+/// 翻訳方向の反転 (CHIP_SWAP_LANG): en→ja ⇄ ja→en を入れ替えて再翻訳する
+fn chip_swap_lang(c: ChipCtx) {
+    if c.source.is_empty() {
+        return;
+    }
+    let new_gen = with_app(|app| {
+        std::mem::swap(&mut app.cfg.source_lang, &mut app.cfg.target_lang);
+        app.cfg.save();
+        app.generation += 1;
+        app.mode = Mode::Pinned;
+        app.translation = None;
+        let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
+        app.status = Some(format!("{} で翻訳中…", engine_name));
+        app.busy = true;
+        sync_overlay(app);
+        app.generation
+    })
+    .unwrap_or(0);
+    let cfg2 = Config::load();
+    let pc = prompt_ctx_from_app(&c.source);
+    crate::worker::retranslate(new_gen, c.cur_tr, cfg2, c.source, c.main, c.recog_id, pc);
+}
+
+/// 解説(即時) (CHIP_EXPLAIN_QUICK): 編集ダイアログを出さず既定プロンプトをそのまま送信する
+fn chip_explain_quick(c: ChipCtx) {
+    with_app(|app| {
+        app.mode = Mode::Pinned;
+        sync_overlay(app);
+    });
+    let Some(r_id) = c.recog_id else { return };
+    if c.source.is_empty() {
+        return;
+    }
+    // キャッシュ済みの解説があれば即表示する
+    if let Some(expl) = crate::logdb::latest_explanation(r_id) {
+        with_app(|app| {
+            app.mode = Mode::Pinned;
+            app.status = None;
+            app.error_only = false;
+            app.explanation = Some(expl);
+            sync_overlay(app);
+        });
+        return;
+    }
+    let pc = prompt_ctx_from_app(&c.source);
+    let prompt = crate::worker::build_explain_prompt(&c.cfg, &pc).unwrap_or_default();
+    if prompt.is_empty() {
+        with_app(|app| {
+            app.badge = Some("LLM APIが設定されていません".into());
+            sync_overlay(app);
+        });
+        return;
+    }
+    let profile = c.cfg.active_api_profile.clone();
+    let new_gen = with_app(|app| {
+        app.generation += 1;
+        app.mode = Mode::Pinned;
+        app.status = Some(format!("LLM:{} で解説を取得中…", profile));
+        app.explaining = true;
+        app.busy = true;
+        sync_overlay(app);
+        app.generation
+    })
+    .unwrap_or(0);
+    let cfg2 = Config::load();
+    crate::worker::explain(new_gen, r_id, cfg2, prompt, profile, c.main);
+}
+
+/// 解説 (CHIP_EXPLAIN): プロンプト編集ウィンドウ (モードB) を表示してから送信 (SPECv0.4.7 §2)
+fn chip_explain(c: ChipCtx) {
+    with_app(|app| {
+        app.mode = Mode::Pinned;
+        sync_overlay(app);
+    });
+    if let Some(r_id) = c.recog_id
+        && !c.source.is_empty()
+    {
+        let dialog_pos = with_app(|app| {
+            let mut r = RECT::default();
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(app.overlay, &mut r);
+            }
+            (r.left + 24, r.top + 24)
+        })
+        .unwrap_or_default();
+
+        // 全プロファイルの解説テンプレートを渡す (テンプレート/送信内容の分離編集)
+        let profiles: Vec<crate::prompt_edit::ProfilePrompt> = c.cfg
+            .api_profiles
+            .iter()
+            .map(|p| crate::prompt_edit::ProfilePrompt {
+                name: p.name.clone(),
+                template: p.explain_prompt.clone(),
+            })
+            .collect();
+        if profiles.is_empty() {
+            with_app(|app| {
+                app.badge = Some("LLM APIが設定されていません".into());
+                sync_overlay(app);
+            });
+            return;
+        }
+        let active_idx = c.cfg
+            .api_profiles
+            .iter()
+            .position(|p| p.name == c.cfg.active_api_profile)
+            .unwrap_or(0);
+
+        let pc = prompt_ctx_from_app(&c.source);
+        let main_hwnd_val = c.main;
+        let inst = with_app(|app| app.instance).unwrap_or_default();
+        crate::prompt_edit::open(
+            inst,
+            main_hwnd(),
+            Some(dialog_pos),
+            crate::prompt_edit::PromptKind::Explain,
+            profiles,
+            active_idx,
+            Some(pc),
+            Box::new(|name, tmpl| {
+                crate::prompt_edit::save_prompt_to_config(
+                    crate::prompt_edit::PromptKind::Explain,
+                    name,
+                    tmpl,
+                )
+            }),
+            Some(Box::new(move |edited_prompt, profile| {
+                let new_gen = with_app(|app| {
+                    app.generation += 1;
+                    app.mode = Mode::Pinned;
+                    app.status = Some(format!("LLM:{} で解説を取得中…", profile));
+                    app.explaining = true;
+                    app.busy = true;
+                    sync_overlay(app);
+                    app.generation
+                })
+                .unwrap_or(0);
+                let cfg2 = Config::load();
+                crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val);
+            })),
+        );
+    }
+}
+
+/// OCR/翻訳エンジンチップの押下位置から選択エンジンを解決し、利用可否と初回同意を確認する。
+/// チップの並びは「固定エンジン (llm除く) + 準備済みLLMプロファイル」(overlay_layout と対)。
+/// 返り値: (選択キー, 固定エンジンか, 実際に設定するエンジンキー)。範囲外・利用不可・同意拒否は None。
+fn resolve_engine_chip(idx: usize, fixed_keys: &[&str], cfg: &Config) -> Option<(String, bool, String)> {
+    let mut keys = Vec::new();
+    for k in fixed_keys.iter() {
+        if *k != "llm" {
+            keys.push(k.to_string());
+        }
+    }
+    for prof in cfg.ready_api_profiles() {
+        keys.push(prof.name.clone());
+    }
+    let selected_key = keys.get(idx)?.clone();
+    let is_fixed = fixed_keys.iter().any(|k| *k == selected_key && *k != "llm");
+    let target = if is_fixed { selected_key.clone() } else { "llm".to_string() };
+
+    let available = if is_fixed {
+        cfg.engine_available(&selected_key)
+    } else {
+        cfg.api_profiles.iter().find(|p| p.name == selected_key).is_some_and(|p| p.is_ready())
+    };
+    if !available {
+        with_app(|app| {
+            app.status = Some(engine_unavailable_msg(&selected_key));
+            sync_overlay(app);
+        });
+        return None;
+    }
+    if is_fixed && !ensure_consent(&selected_key, cfg) {
+        return None;
+    }
+    Some((selected_key, is_fixed, target))
+}
+
+/// OCRエンジン切替チップ: 保持画像で再認識→現行エンジンで再翻訳 (SPEC §8)
+fn switch_ocr_engine(id: usize, c: ChipCtx) {
+    let idx = id - overlay::CHIP_OCR_BASE;
+    let Some((selected_key, is_fixed, target_ocr)) = resolve_engine_chip(idx, &engine::OCR_KEYS, &c.cfg)
+    else {
+        return;
+    };
+    let new_gen = with_app(|app| {
+        app.generation += 1;
+        app.mode = Mode::Pinned;
+        if is_fixed {
+            app.cur_ocr = selected_key.clone();
+        } else {
+            app.cur_ocr = "llm".to_string();
+            app.cfg.active_api_profile = selected_key.clone();
+        }
+        app.cfg.save();
+        app.status = Some("再認識中…".into());
+        app.busy = true;
+        sync_overlay(app);
+        app.generation
+    })
+    .unwrap_or(0);
+    let cfg2 = Config::load();
+    crate::worker::reocr(crate::worker::ReocrJob {
+        generation: new_gen,
+        capture_id: c.capture_id,
+        img: c.last_img,
+        focus: c.last_focus,
+        x: c.origin.x,
+        y: c.origin.y,
+        target: c.target,
+        ocr_engine: target_ocr,
+        tr_engine: c.cur_tr,
+        cfg: cfg2,
+        main: c.main,
+        anchor: c.anchor,
+        ctx: c.held_ctx,
+        force_pin: false,
+        perf_label: "reocr",
+    });
+}
+
+/// 翻訳エンジン切替チップ: 現在の原文を選択エンジンで再翻訳 (SPEC §8)
+fn switch_tr_engine(id: usize, c: ChipCtx) {
+    if c.source.is_empty() {
+        return;
+    }
+    let idx = id - overlay::CHIP_TR_BASE;
+    let Some((selected_key, is_fixed, target_tr)) = resolve_engine_chip(idx, &engine::TR_KEYS, &c.cfg)
+    else {
+        return;
+    };
+    let new_gen = with_app(|app| {
+        app.generation += 1;
+        app.mode = Mode::Pinned;
+        if is_fixed {
+            app.cur_tr = selected_key.clone();
+        } else {
+            app.cur_tr = "llm".to_string();
+            app.cfg.active_api_profile = selected_key.clone();
+        }
+        app.cfg.save();
+        let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
+        app.status = Some(format!("{} で翻訳中…", engine_name));
+        app.translation = None;
+        app.busy = true;
+        sync_overlay(app);
+        app.generation
+    })
+    .unwrap_or(0);
+    let cfg2 = Config::load();
+    let pc = prompt_ctx_from_app(&c.source);
+    crate::worker::retranslate(new_gen, target_tr, cfg2, c.source, c.main, c.recog_id, pc);
 }
 
 fn engine_unavailable_msg(key: &str) -> String {
