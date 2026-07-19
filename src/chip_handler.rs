@@ -114,8 +114,8 @@ fn run_edit_action(action: impl FnOnce() -> Result<(), String>) {
 /// UIAノード・テキスト編集)。編集セッションと再認識の衝突によるUI操作不能を防ぐ。
 /// overlay_layout 側の無効表示と対で、ハンドラ側でも二重にガードする。
 fn forbidden_while_editing(id: usize) -> bool {
-    id < overlay::CHIP_TR_BASE
-        || (id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_COPY)
+    // id < CHIP_COPY はOCRチップ(CHIP_OCR_BASE..)と翻訳チップ(CHIP_TR_BASE..)の全域
+    id < overlay::CHIP_COPY
         || matches!(
             id,
             overlay::CHIP_EXPLAIN
@@ -439,73 +439,73 @@ pub fn handle_chip(id: usize) {
                 app.mode = Mode::Pinned;
                 sync_overlay(app);
             });
-            if let Some(r_id) = recog_id {
-                if !source.is_empty() {
-                    let dialog_pos = with_app(|app| {
-                        let mut r = RECT::default();
-                        unsafe {
-                            let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(app.overlay, &mut r);
-                        }
-                        (r.left + 24, r.top + 24)
-                    })
-                    .unwrap_or_default();
-
-                    // 全プロファイルの解説テンプレートを渡す (テンプレート/送信内容の分離編集)
-                    let profiles: Vec<crate::prompt_edit::ProfilePrompt> = cfg
-                        .api_profiles
-                        .iter()
-                        .map(|p| crate::prompt_edit::ProfilePrompt {
-                            name: p.name.clone(),
-                            template: p.explain_prompt.clone(),
-                        })
-                        .collect();
-                    if profiles.is_empty() {
-                        with_app(|app| {
-                            app.badge = Some("LLM APIが設定されていません".into());
-                            sync_overlay(app);
-                        });
-                        return;
+            if let Some(r_id) = recog_id
+                && !source.is_empty()
+            {
+                let dialog_pos = with_app(|app| {
+                    let mut r = RECT::default();
+                    unsafe {
+                        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(app.overlay, &mut r);
                     }
-                    let active_idx = cfg
-                        .api_profiles
-                        .iter()
-                        .position(|p| p.name == cfg.active_api_profile)
-                        .unwrap_or(0);
+                    (r.left + 24, r.top + 24)
+                })
+                .unwrap_or_default();
 
-                    let pc = prompt_ctx_from_app(&source);
-                    let main_hwnd_val = main;
-                    let inst = with_app(|app| app.instance).unwrap_or_default();
-                    crate::prompt_edit::open(
-                        inst,
-                        main_hwnd(),
-                        Some(dialog_pos),
-                        crate::prompt_edit::PromptKind::Explain,
-                        profiles,
-                        active_idx,
-                        Some(pc),
-                        Box::new(|name, tmpl| {
-                            crate::prompt_edit::save_prompt_to_config(
-                                crate::prompt_edit::PromptKind::Explain,
-                                name,
-                                tmpl,
-                            )
-                        }),
-                        Some(Box::new(move |edited_prompt, profile| {
-                            let new_gen = with_app(|app| {
-                                app.generation += 1;
-                                app.mode = Mode::Pinned;
-                                app.status = Some(format!("LLM:{} で解説を取得中…", profile));
-                                app.explaining = true;
-                                app.busy = true;
-                                sync_overlay(app);
-                                app.generation
-                            })
-                            .unwrap_or(0);
-                            let cfg2 = Config::load();
-                            crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val);
-                        })),
-                    );
+                // 全プロファイルの解説テンプレートを渡す (テンプレート/送信内容の分離編集)
+                let profiles: Vec<crate::prompt_edit::ProfilePrompt> = cfg
+                    .api_profiles
+                    .iter()
+                    .map(|p| crate::prompt_edit::ProfilePrompt {
+                        name: p.name.clone(),
+                        template: p.explain_prompt.clone(),
+                    })
+                    .collect();
+                if profiles.is_empty() {
+                    with_app(|app| {
+                        app.badge = Some("LLM APIが設定されていません".into());
+                        sync_overlay(app);
+                    });
+                    return;
                 }
+                let active_idx = cfg
+                    .api_profiles
+                    .iter()
+                    .position(|p| p.name == cfg.active_api_profile)
+                    .unwrap_or(0);
+
+                let pc = prompt_ctx_from_app(&source);
+                let main_hwnd_val = main;
+                let inst = with_app(|app| app.instance).unwrap_or_default();
+                crate::prompt_edit::open(
+                    inst,
+                    main_hwnd(),
+                    Some(dialog_pos),
+                    crate::prompt_edit::PromptKind::Explain,
+                    profiles,
+                    active_idx,
+                    Some(pc),
+                    Box::new(|name, tmpl| {
+                        crate::prompt_edit::save_prompt_to_config(
+                            crate::prompt_edit::PromptKind::Explain,
+                            name,
+                            tmpl,
+                        )
+                    }),
+                    Some(Box::new(move |edited_prompt, profile| {
+                        let new_gen = with_app(|app| {
+                            app.generation += 1;
+                            app.mode = Mode::Pinned;
+                            app.status = Some(format!("LLM:{} で解説を取得中…", profile));
+                            app.explaining = true;
+                            app.busy = true;
+                            sync_overlay(app);
+                            app.generation
+                        })
+                        .unwrap_or(0);
+                        let cfg2 = Config::load();
+                        crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val);
+                    })),
+                );
             }
             return;
         }
@@ -578,7 +578,7 @@ pub fn handle_chip(id: usize) {
             main, anchor, held_app_title, held_app_exe, held_uia_path, held_uia_nodes, held_control_type,
             held_selected_text,
         );
-    } else if id >= overlay::CHIP_TR_BASE && id < overlay::CHIP_COPY {
+    } else if (overlay::CHIP_TR_BASE..overlay::CHIP_COPY).contains(&id) {
         // 翻訳エンジン切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)
         let mut keys = Vec::new();
         for k in engine::TR_KEYS.iter() {

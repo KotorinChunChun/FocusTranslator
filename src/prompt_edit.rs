@@ -95,6 +95,11 @@ const VARS: [(&str, &str); 9] = [
     ("tr_engine", "翻訳エンジン名"),
 ];
 
+/// 保存ボタンのコールバック: (プロファイル名, 新テンプレート) を受け取り成否を返す
+pub type OnSave = Box<dyn Fn(&str, &str) -> bool>;
+/// 送信ボタンのコールバック: (送信プロンプト, プロファイル名)。モードBのみ
+pub type OnSubmit = Box<dyn FnOnce(String, String)>;
+
 struct State {
     /// プロファイル名と該当種別のテンプレート。保存時に該当要素も更新し、
     /// プロファイルを切り替えて戻ったときに保存済みの内容が出るようにする。
@@ -103,8 +108,8 @@ struct State {
     cur_idx: usize,
     /// Some(_) でモードB
     ctx: Option<PromptContext>,
-    on_save: Box<dyn Fn(&str, &str) -> bool>,
-    on_submit: Option<Box<dyn FnOnce(String, String)>>,
+    on_save: OnSave,
+    on_submit: Option<OnSubmit>,
     /// ペイン2/3の未保存編集フラグ (§4.6)
     tmpl_dirty: bool,
     preview_dirty: bool,
@@ -325,8 +330,8 @@ pub fn open(
     profiles: Vec<ProfilePrompt>,
     active_idx: usize,
     ctx: Option<PromptContext>,
-    on_save: Box<dyn Fn(&str, &str) -> bool>,
-    on_submit: Option<Box<dyn FnOnce(String, String)>>,
+    on_save: OnSave,
+    on_submit: Option<OnSubmit>,
 ) {
     if profiles.is_empty() {
         return;

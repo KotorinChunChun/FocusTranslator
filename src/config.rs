@@ -3,14 +3,12 @@
 use crate::util;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub enum ApiType {
+    #[default]
     Gemini,
     OpenAI,
     Claude,
-}
-impl Default for ApiType {
-    fn default() -> Self { ApiType::Gemini }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -46,6 +44,13 @@ impl ApiProfile {
         }
     }
 
+    /// このプロファイルの呼び出しにAPIキーが必須か。公式エンドポイント(完全一致)のみ必須で、
+    /// ローカルサーバ等の非公式URLはキー空欄でも呼び出しを許容する。
+    /// チップ表示判定 (is_ready) と実呼び出し (llm_api::call) の双方がこの判定を共用する。
+    pub fn requires_key(&self) -> bool {
+        MAJOR_API_URLS.contains(&self.api_url.trim())
+    }
+
     /// このプロファイルで呼び出しを試みても失敗しないと分かる状態か(ボタンのグレーアウト判定用)。
     /// API URL/モデル名が未設定なら必ず失敗する。APIキーの空欄自体は許容するが、
     /// Gemini/Claude/ChatGPTの主要な公式URLではAPIキーが無いと必ず失敗するため許容しない。
@@ -53,7 +58,7 @@ impl ApiProfile {
         if self.api_url.trim().is_empty() || self.model_name.trim().is_empty() {
             return false;
         }
-        if self.get_key().is_empty() && MAJOR_API_URLS.contains(&self.api_url.trim()) {
+        if self.get_key().is_empty() && self.requires_key() {
             return false;
         }
         true

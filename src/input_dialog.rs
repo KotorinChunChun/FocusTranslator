@@ -25,8 +25,8 @@ const DLG_W: i32 = 600;
 const DLG_H: i32 = 400;
 
 thread_local! {
-    static DIALOG_RESULT: RefCell<Option<String>> = RefCell::new(None);
-    static HAS_RESULT: RefCell<bool> = RefCell::new(false);
+    static DIALOG_RESULT: RefCell<Option<String>> = const { RefCell::new(None) };
+    static HAS_RESULT: RefCell<bool> = const { RefCell::new(false) };
     static WND: RefCell<isize> = const { RefCell::new(0) };
 }
 
@@ -89,8 +89,7 @@ pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
             None,
         );
 
-        if hwnd.is_ok() {
-            let hwnd = hwnd.unwrap();
+        if let Ok(hwnd) = hwnd {
             WND.with(|w| *w.borrow_mut() = hwnd.0 as isize);
             let _ = EnableWindow(parent, false);
 
@@ -152,7 +151,7 @@ pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
                 if msg.message == WM_KEYDOWN {
                     let key = msg.wParam.0 as u16;
                     if key == VK_RETURN.0 {
-                        let ctrl = GetAsyncKeyState(VK_CONTROL.0 as i32) as i16;
+                        let ctrl = GetAsyncKeyState(VK_CONTROL.0 as i32);
                         if ctrl < 0 {
                             let _ = SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(IDC_SAVE as usize)), Some(LPARAM(0)));
                             continue;

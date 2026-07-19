@@ -325,11 +325,12 @@ pub fn tick() {
                 start_cycle_params(app)
             }
             (true, true) => {
-                if let Some(start) = app.hold_start {
-                    if start.elapsed().as_secs() >= app.cfg.pin_hold_seconds as u64 && app.mode != Mode::Pinned {
-                        app.mode = Mode::Pinned;
-                        sync_overlay(app);
-                    }
+                if let Some(start) = app.hold_start
+                    && start.elapsed().as_secs() >= app.cfg.pin_hold_seconds as u64
+                    && app.mode != Mode::Pinned
+                {
+                    app.mode = Mode::Pinned;
+                    sync_overlay(app);
                 }
                 None
             }
