@@ -12,9 +12,13 @@ mod detect;
 mod engine;
 mod image_edit;
 mod image_preview;
+mod input_dialog;
+mod llama_install;
+mod llama_server;
 mod llm_api;
 mod logdb;
 mod logviewer;
+mod markdown;
 mod ocr;
 mod oneocr;
 mod onnx_translate;
@@ -34,7 +38,6 @@ mod uia;
 mod ui_helpers;
 mod util;
 mod worker;
-mod input_dialog;
 
 use config::Config;
 use windows::Win32::Foundation::{
@@ -165,6 +168,22 @@ fn main() {
         }
         cfg.first_launch_done = true;
         cfg.save();
+    }
+
+    // ローカルLLMサーバーの自動起動 (SPECv0.5.2追補)。導入済みのときのみ、起動完了を
+    // 待たずバックグラウンドスレッドで起動を試みる (モデル読込に数十秒かかりうるため)。
+    if cfg.llama_auto_start && llama_install::installed() {
+        let port = cfg.llama_port;
+        let model = llama_install::resolve_model_path(&cfg.llama_model_path);
+        // mmprojが存在すれば画像入力対応(VLM)込みで起動する。無ければテキスト専用。
+        let mmproj = Some(llama_install::resolve_mmproj_path(&cfg.llama_mmproj_path)).filter(|p| p.is_file());
+        if model.is_file() {
+            std::thread::spawn(move || {
+                if let Err(e) = llama_server::start(port, &model, mmproj.as_deref()) {
+                    util::app_log(&format!("llama_server auto-start failed: {e}"));
+                }
+            });
+        }
     }
 
     app_state::init(cfg, instance, main, overlay);

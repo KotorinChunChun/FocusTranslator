@@ -151,10 +151,10 @@ fn run_edit_action(action: impl FnOnce() -> Result<(), String>) {
 fn forbidden_while_editing(id: usize) -> bool {
     // id < CHIP_COPY はOCRチップ(CHIP_OCR_BASE..)と翻訳チップ(CHIP_TR_BASE..)の全域
     id < overlay::CHIP_COPY
+        || (overlay::CHIP_EXPLAIN_BASE..overlay::CHIP_UIA_NODE_BASE).contains(&id)
         || matches!(
             id,
             overlay::CHIP_EXPLAIN
-                | overlay::CHIP_EXPLAIN_QUICK
                 | overlay::CHIP_SWAP_LANG
                 | overlay::CHIP_EDIT_SRC
                 | overlay::CHIP_EDIT_TR
@@ -351,10 +351,6 @@ pub fn handle_chip(id: usize) {
             chip_swap_lang(c);
             return;
         }
-        overlay::CHIP_EXPLAIN_QUICK => {
-            chip_explain_quick(c);
-            return;
-        }
         overlay::CHIP_EXPLAIN => {
             chip_explain(c);
             return;
@@ -378,6 +374,14 @@ pub fn handle_chip(id: usize) {
     } else if (overlay::CHIP_TR_BASE..overlay::CHIP_COPY).contains(&id) {
         // 翻訳エンジン切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)
         switch_tr_engine(id, c);
+    } else if (overlay::CHIP_EXPLAIN_BASE..overlay::CHIP_UIA_NODE_BASE).contains(&id) {
+        // 解説チップ: クリックしたプロファイルの既定解説プロンプトをそのまま送信 (SPECv0.5.2追補)
+        let idx = id - overlay::CHIP_EXPLAIN_BASE;
+        let Some(profile) = with_app(|app| app.cfg.ready_api_profiles().nth(idx).map(|p| p.name.clone())).flatten()
+        else {
+            return;
+        };
+        chip_explain_with_profile(c, profile);
     } else if id == overlay::CHIP_SELECTED_TEXT {
         // 選択中の文字列を(再)採用: 検出済みの選択テキストを原文として採用し再翻訳
         let Some(text) = with_app(|app| app.selected_text.clone())
@@ -416,6 +420,7 @@ fn chip_edit_source(c: ChipCtx) {
             app.translation = None;
             // 読み取り結果(原文)が変わったので解説も破棄する (再度開けば同一なら復元される)
             app.explanation = None;
+            app.explain_profile = String::new();
             app.explaining = false;
             app.mode = Mode::Pinned;
             app.status = Some("修正された原文で再翻訳中…".into());
@@ -490,8 +495,9 @@ fn chip_swap_lang(c: ChipCtx) {
     crate::worker::retranslate(new_gen, c.cur_tr, cfg2, c.source, c.main, c.recog_id, pc);
 }
 
-/// 解説(即時) (CHIP_EXPLAIN_QUICK): 編集ダイアログを出さず既定プロンプトをそのまま送信する
-fn chip_explain_quick(c: ChipCtx) {
+/// 解説(プロファイル別ボタン, SPECv0.5.2追補): OCR/翻訳のエンジンチップと同様、クリックした
+/// プロファイルの既定解説プロンプトを編集ダイアログ無しでそのまま送信する。
+fn chip_explain_with_profile(c: ChipCtx, profile: String) {
     with_app(|app| {
         app.mode = Mode::Pinned;
         sync_overlay(app);
@@ -500,19 +506,20 @@ fn chip_explain_quick(c: ChipCtx) {
     if c.source.is_empty() {
         return;
     }
-    // キャッシュ済みの解説があれば即表示する
-    if let Some(expl) = crate::logdb::latest_explanation(r_id) {
+    // 同一プロファイルのキャッシュ済み解説があれば即表示する
+    if let Some(expl) = crate::logdb::latest_explanation_for_profile(r_id, &profile) {
         with_app(|app| {
             app.mode = Mode::Pinned;
             app.status = None;
             app.error_only = false;
             app.explanation = Some(expl);
+            app.explain_profile = profile.clone();
             sync_overlay(app);
         });
         return;
     }
     let pc = prompt_ctx_from_app(&c.source);
-    let prompt = crate::worker::build_explain_prompt(&c.cfg, &pc).unwrap_or_default();
+    let prompt = crate::worker::build_explain_prompt_for(&c.cfg, &profile, &pc).unwrap_or_default();
     if prompt.is_empty() {
         with_app(|app| {
             app.badge = Some("LLM APIが設定されていません".into());
@@ -520,7 +527,6 @@ fn chip_explain_quick(c: ChipCtx) {
         });
         return;
     }
-    let profile = c.cfg.active_api_profile.clone();
     let new_gen = with_app(|app| {
         app.generation += 1;
         app.mode = Mode::Pinned;

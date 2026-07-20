@@ -86,6 +86,9 @@ pub struct App {
     pub capture_id: Option<i64>,
     pub recog_id: Option<i64>,
     pub explanation: Option<String>,
+    /// 現在の explanation を生成したLLMプロファイル名 (SPECv0.5.2追補: プロファイル別ボタンの
+    /// 選択状態表示・キャッシュ判定に使う)
+    pub explain_profile: String,
     /// 解説をLLMへ問い合わせ中
     pub explaining: bool,
     /// 時間のかかる処理の実行中。オーバーレイの操作をロックする。
@@ -93,6 +96,8 @@ pub struct App {
     pub app_title: String,
     pub app_exe: String,
     pub uia_path: String,
+    /// uia_nodes のJSON表現 (SPECv0.5.2追補: ログDB記録用)
+    pub uia_json: String,
     /// UIAパスの各ノード
     pub uia_nodes: Vec<crate::uia::UiaPathNode>,
     /// カーソル位置要素のUIA ControlType名 (入力内容ログ用; SPECv0.4.8追補)
@@ -123,6 +128,7 @@ impl App {
             exe: if self.app_exe.is_empty() { None } else { Some(self.app_exe.clone()) },
             title: self.app_title.clone(),
             uia_path: self.uia_path.clone(),
+            uia_json: self.uia_json.clone(),
             uia_nodes: self.uia_nodes.clone(),
             control_type: self.control_type.clone(),
             selected_text: self.selected_text.clone(),
@@ -179,11 +185,13 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             capture_id: None,
             recog_id: None,
             explanation: None,
+            explain_profile: String::new(),
             explaining: false,
             busy: false,
             app_title: String::new(),
             app_exe: String::new(),
             uia_path: String::new(),
+            uia_json: String::new(),
             uia_nodes: Vec::new(),
             control_type: None,
             selected_text: None,
@@ -470,6 +478,7 @@ pub fn close_overlay(app: &mut App) {
     app.capture_id = None;
     app.recog_id = None;
     app.explanation = None;
+    app.explain_profile = String::new();
     app.explaining = false;
     app.busy = false;
     app.via_uia = false;
@@ -503,7 +512,12 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.last_focus = focus;
                 app.last_full_img = full_img;
                 app.last_crop_rect = crop_rect;
-                if app.via_uia {
+                // 原文が空のSourceは「OCR失敗だが再試行用に画像だけ保持したい」ケース
+                // (SPECv0.5.2追補)。この直後に届く WorkerMsg::Error が実際のエラー文言を
+                // status へ入れるため、ここでは誤った成功メッセージを出さない。
+                if app.source.is_empty() {
+                    // no-op: 直後のErrorメッセージがstatusを設定する
+                } else if app.via_uia {
                     app.status = Some("UIからの文字抽出に成功しました。".to_string());
                 } else {
                     app.status = Some("画像認識により文字起こししました。".to_string());
@@ -516,12 +530,14 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.app_title = ctx.title;
                 app.app_exe = ctx.exe.unwrap_or_default();
                 app.uia_path = ctx.uia_path;
+                app.uia_json = ctx.uia_json;
                 app.uia_nodes = ctx.uia_nodes;
                 app.control_type = ctx.control_type;
                 app.selected_text = ctx.selected_text;
                 app.scroll_y = 0;
                 // キャプチャ内容が変わったら解説を初期化する (SPECv0.4.8追補: 開く度に解説をリセット)
                 app.explanation = None;
+                app.explain_profile = String::new();
                 app.explaining = false;
 
                 if pin {
@@ -562,7 +578,10 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                     app.translation = None;
                     app.status = Some(msg);
                     app.error_only = false;
-                } else if !app.source.is_empty() {
+                } else if !app.source.is_empty() || app.last_img.is_some() {
+                    // 原文が空でも保持画像があれば(直前にOCR失敗を示すSourceを受信済みの場合)
+                    // ブロックごと消す単一行モードにはせず、OCRエンジン切替チップを残す
+                    // (SPECv0.5.2追補)。
                     app.status = Some(msg);
                     app.error_only = false;
                 } else {
@@ -576,12 +595,13 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 }
                 sync_overlay(app);
             }
-            worker::WorkerMsg::Explanation { text } => {
+            worker::WorkerMsg::Explanation { text, profile } => {
                 app.mode = Mode::Pinned;
                 app.status = None;
                 app.error_only = false;
                 app.explaining = false;
                 app.explanation = Some(text);
+                app.explain_profile = profile;
                 sync_overlay(app);
             }
         }
@@ -669,6 +689,9 @@ pub fn sync_overlay(app: &mut App) {
         tr_labels.push(prof.name.clone());
         tr_enabled.push(true);
     }
+    let explain_keys: Vec<String> = app.cfg.ready_api_profiles().map(|p| p.name.clone()).collect();
+    let explain_labels = explain_keys.clone();
+    let explain_enabled = vec![true; explain_keys.len()];
     let content = OverlayContent {
         main_hwnd: app.main.0 as isize,
         anchor: app.anchor,
@@ -686,7 +709,11 @@ pub fn sync_overlay(app: &mut App) {
         } else {
             None
         },
-        explain_engine: app.cfg.active_profile().map(|p| p.name.clone()).unwrap_or_default(),
+        explain_engine: app.explain_profile.clone(),
+        explain_keys,
+        explain_labels,
+        explain_enabled,
+        cur_explain_chip_key: app.explain_profile.clone(),
         via_uia: app.via_uia,
         ocr_keys,
         ocr_labels,

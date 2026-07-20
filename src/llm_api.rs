@@ -44,7 +44,7 @@ pub fn call(prof: &ApiProfile, req: &LlmRequest) -> Result<LlmResponse, String> 
     }
     match prof.api_type {
         ApiType::Gemini => call_gemini(prof, &key, req),
-        ApiType::OpenAI => call_openai(prof, &key, req),
+        ApiType::OpenAI | ApiType::LlamaCpp => call_openai(prof, &key, req),
         ApiType::Claude => call_claude(prof, &key, req),
     }
 }
@@ -54,7 +54,7 @@ pub fn call(prof: &ApiProfile, req: &LlmRequest) -> Result<LlmResponse, String> 
 pub fn build_request_json(prof: &ApiProfile, req: &LlmRequest) -> String {
     match prof.api_type {
         ApiType::Gemini => gemini_body(req).to_string(),
-        ApiType::OpenAI => openai_body(prof, req).to_string(),
+        ApiType::OpenAI | ApiType::LlamaCpp => openai_body(prof, req).to_string(),
         ApiType::Claude => claude_body(prof, req).to_string(),
     }
 }

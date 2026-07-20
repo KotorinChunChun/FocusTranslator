@@ -2,7 +2,7 @@
 ; AppId は旧バージョン (AppName=Focus Translator 時代) からの上書き更新を維持するため固定
 AppId=Focus Translator
 AppName=なにこれ？（Focus Translator）
-AppVersion=0.5.1
+AppVersion=0.5.2
 AppPublisher=Focus Translator Team
 ; インストール先はパス互換のため内部名のまま
 DefaultDirName={autopf}\Focus Translator

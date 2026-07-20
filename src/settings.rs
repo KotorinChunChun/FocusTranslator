@@ -10,6 +10,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
 };
+use windows::Win32::UI::Controls::Dialogs::{
+    GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -72,6 +75,29 @@ const IDC_RESET_SETTINGS: i32 = 158;
 const IDC_OVERLAY_THEME: i32 = 159;
 /// OneOCRが現PCで使用可能かの判定結果表示
 const IDC_ONEOCR_STATUS: i32 = 160;
+/// ローカルLLM (llama.cpp) 関連コントロール (SPECv0.5.2追補)
+const IDC_LLAMA_BIN_STATUS: i32 = 161;
+const IDC_LLAMA_BIN_INSTALL: i32 = 162;
+const IDC_LLAMA_MODEL_STATUS: i32 = 163;
+/// モデルの自動ダウンロード(既定の管理下ディレクトリへ導入)
+const IDC_LLAMA_MODEL_INSTALL: i32 = 164;
+const IDC_LLAMA_PORT: i32 = 165;
+const IDC_LLAMA_TOGGLE: i32 = 166;
+const IDC_LLAMA_SERVER_STATUS: i32 = 167;
+const IDC_LLAMA_AUTOSTART: i32 = 168;
+/// 既存GGUFファイルのパス(LM Studio等で導入済みのモデルを再利用する場合に指定)
+const IDC_LLAMA_MODEL_PATH: i32 = 169;
+/// ファイル選択ダイアログでモデルファイルを選ぶボタン
+const IDC_LLAMA_MODEL_BROWSE: i32 = 170;
+/// 左下欄外のバージョン情報表示 (SPECv0.5.2追補)
+const IDC_VERSION_INFO: i32 = 171;
+const IDC_GITHUB_LINK: i32 = 172;
+/// mmproj (画像入力/VLM対応) 関連コントロール (SPECv0.5.2追補)。ローカルLLMサーバーは
+/// 1プロセスで、mmprojファイルが指定されていれば同一ポートのまま画像入力にも対応する。
+const IDC_LLAMA_MMPROJ_STATUS: i32 = 173;
+const IDC_LLAMA_MMPROJ_INSTALL: i32 = 174;
+const IDC_LLAMA_MMPROJ_PATH: i32 = 175;
+const IDC_LLAMA_MMPROJ_BROWSE: i32 = 176;
 
 /// エディットコントロールの通知コード (windows クレートに定義がないもの)
 const EN_KILLFOCUS: u32 = 0x0200;
@@ -80,9 +106,20 @@ const BN_CLICKED: u32 = 0;
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
 const WM_ONNX_DONE: u32 = WM_APP + 11;
+const WM_LLAMA_BIN_DONE: u32 = WM_APP + 12;
+const WM_LLAMA_MODEL_DONE: u32 = WM_APP + 13;
+const WM_LLAMA_SERVER_DONE: u32 = WM_APP + 14;
+/// モデルダウンロードの進捗通知 (10秒おき。lparamにBox<String>の進捗ラベル)
+const WM_LLAMA_MODEL_PROGRESS: u32 = WM_APP + 15;
+const WM_LLAMA_MMPROJ_DONE: u32 = WM_APP + 16;
+const WM_LLAMA_MMPROJ_PROGRESS: u32 = WM_APP + 17;
 /// 各APIキーの発行ページ(実際に確認済みの現行URL)
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
+/// 左下欄外のバージョン情報 (SPECv0.5.2追補)
+const APP_VERSION_LABEL: &str = "なにこれ - FocusTransrator";
+const APP_UPDATE_DATE: &str = "2026/7/20";
+const GITHUB_RELEASES_URL: &str = "https://github.com/KotorinChunChun/FocusTransrator/releases";
 
 const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
 const OCR_KEYS: [&str; 4] = ["oneocr", "win", "paddle", "llm"];
@@ -212,12 +249,14 @@ const GROUP4_H: i32 = GROUP2_H; // グループ2と下端を揃える (翻訳設
 
 const GROUP5_Y: i32 = 8;
 const GROUP5_H: i32 = 242; // 7行 (最終行はボタン高26) + 下余白14。偶然グループ2/4と同高
+const GROUP6_Y: i32 = GROUP5_Y + GROUP5_H + GROUP_GAP;
+const GROUP6_H: i32 = 266; // 8行 (最終行はチェックボックス) + 下余白14
 
 /// 全列の下端のうち最も低い位置 (この直下に閉じるボタン行を置く)
 const LAYOUT_CONTENT_BOTTOM: i32 = {
     let left = GROUP2_Y + GROUP2_H;
     let mid = GROUP4_Y + GROUP4_H;
-    let right = GROUP5_Y + GROUP5_H;
+    let right = GROUP6_Y + GROUP6_H;
     let m = if left > mid { left } else { mid };
     if m > right { m } else { right }
 };
@@ -379,10 +418,61 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         button(h, inst, "解説プロンプト", cx + 196, y, 92, IDC_PROMPT_EXP_BTN);
     }
 
+    // ---- 右列 グループ6: ローカルLLM (llama.cpp) (SPECv0.5.2追補) ----
+    // ラベル/状態表示/操作ボタンの3列を全行で同じX位置・同じ幅に揃える。
+    // パス欄+参照ボタンの行も、参照ボタンが他行のボタン列(BX)に揃うよう幅を合わせる。
+    {
+        let gx = col_x[2];
+        let lx = inner(gx);
+        const LABEL_W: i32 = 150;
+        let vx = lx + LABEL_W + 8; // 状態表示・値入力の開始X
+        const VALUE_W: i32 = 120;
+        let bx = vx + VALUE_W + 8; // 操作ボタンの開始X (全行共通)
+        const BTN_W: i32 = 96;
+        let path_w = bx - lx - 8; // パス欄の幅 (参照ボタンがbxに揃うよう逆算)
+        group(h, inst, "6. ローカルLLMサーバー (llama.cpp)", gx, GROUP6_Y, COL_W, GROUP6_H);
+        let mut y = GROUP6_Y + GTOP;
+        label(h, inst, "サーバープログラム本体", lx, y + 2, LABEL_W);
+        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), vx, y + 2, VALUE_W, 20, IDC_LLAMA_BIN_STATUS);
+        button(h, inst, "インストール", bx, y - 2, BTN_W, IDC_LLAMA_BIN_INSTALL);
+        y += STEP;
+        // モデルファイルは既定パス(自動ダウンロード)またはLM Studio等で導入済みのGGUFの
+        // 明示パスのどちらかを使う。空欄なら既定パスを使う (llama_install::resolve_model_path)。
+        label(h, inst, "言語モデル(Gemma4-E2B)", lx, y + 2, LABEL_W);
+        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), vx, y + 2, VALUE_W, 20, IDC_LLAMA_MODEL_STATUS);
+        button(h, inst, "ダウンロード", bx, y - 2, BTN_W, IDC_LLAMA_MODEL_INSTALL);
+        y += STEP;
+        edit(h, inst, lx, y, path_w, IDC_LLAMA_MODEL_PATH);
+        button(h, inst, "参照…", bx, y - 2, BTN_W, IDC_LLAMA_MODEL_BROWSE);
+        y += STEP;
+        // mmproj(画像入力対応): 指定されていればサーバー起動時に --mmproj で渡され、
+        // 同一ポートのまま画像入力(OCRのLLM経路)にも対応する。未指定ならテキスト専用。
+        label(h, inst, "画像入力モデル(mmproj)", lx, y + 2, LABEL_W);
+        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), vx, y + 2, VALUE_W, 20, IDC_LLAMA_MMPROJ_STATUS);
+        button(h, inst, "ダウンロード", bx, y - 2, BTN_W, IDC_LLAMA_MMPROJ_INSTALL);
+        y += STEP;
+        edit(h, inst, lx, y, path_w, IDC_LLAMA_MMPROJ_PATH);
+        button(h, inst, "参照…", bx, y - 2, BTN_W, IDC_LLAMA_MMPROJ_BROWSE);
+        y += STEP;
+        label(h, inst, "サーバーポート", lx, y + 2, LABEL_W);
+        edit(h, inst, vx, y, 70, IDC_LLAMA_PORT);
+        y += STEP;
+        label(h, inst, "サーバー状態", lx, y + 2, LABEL_W);
+        ctl(h, inst, w!("STATIC"), "停止中", WINDOW_STYLE(0), vx, y + 2, VALUE_W, 20, IDC_LLAMA_SERVER_STATUS);
+        button(h, inst, "起動", bx, y - 2, BTN_W, IDC_LLAMA_TOGGLE);
+        y += STEP;
+        checkbox(h, inst, "起動時にサーバーを自動起動する", lx, y, 260, IDC_LLAMA_AUTOSTART);
+    }
+
     // ---- 下部ボタン領域 (右下; SPECv0.4 §5.2)
     // 設定は変更時に即座に保存されるため【閉じる】のみ (SPECv0.4.7 改)
     let right = col_x[2] + COL_W;
     button(h, inst, "閉じる", right - 86, LAYOUT_BTN_Y, 80, IDC_CLOSE);
+
+    // ---- 左下欄外: バージョン情報 (SPECv0.5.2追補) ----
+    let version_text = format!("{APP_VERSION_LABEL}  v{}  (更新日: {APP_UPDATE_DATE})", env!("CARGO_PKG_VERSION"));
+    ctl(h, inst, w!("STATIC"), &version_text, WINDOW_STYLE(0), col_x[0], LAYOUT_BTN_Y + 4, 320, 20, IDC_VERSION_INFO);
+    button(h, inst, "GitHub", col_x[0] + 326, LAYOUT_BTN_Y, 80, IDC_GITHUB_LINK);
 
     // フォント設定
     unsafe {
@@ -460,9 +550,14 @@ fn populate(h: HWND) {
         THEME_KEYS.iter().position(|k| *k == cfg.overlay_theme).unwrap_or(0),
     );
     set_ctl_text(h, IDC_LOG_MAX, &cfg.log_max_records.to_string());
+    set_ctl_text(h, IDC_LLAMA_PORT, &cfg.llama_port.to_string());
+    set_ctl_text(h, IDC_LLAMA_MODEL_PATH, &cfg.llama_model_path);
+    check_set(h, IDC_LLAMA_AUTOSTART, cfg.llama_auto_start);
+    set_ctl_text(h, IDC_LLAMA_MMPROJ_PATH, &cfg.llama_mmproj_path);
     refresh_oneocr_status(h);
     refresh_paddle_status(h);
     refresh_onnx_status(h);
+    refresh_llama_status(h);
     update_explanations(h);
 }
 
@@ -493,6 +588,72 @@ fn refresh_onnx_status(h: HWND) {
     }
 }
 
+/// llama.cpp本体・モデルの両方が導入済みになったら、"LocalLLM" という名前のAPIプロファイルが
+/// 無ければ自動登録する (SPECv0.5.2追補)。既に存在する場合は利用者の編集を尊重し上書きしない。
+fn ensure_local_llm_profile_if_ready(h: HWND) {
+    if !(crate::llama_install::installed() && crate::llama_install::model_installed()) {
+        return;
+    }
+    let mut cfg = Config::load();
+    if cfg.api_profiles.iter().any(|p| p.name == "LocalLLM") {
+        return;
+    }
+    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT).trim().parse().unwrap_or(crate::llama_server::DEFAULT_PORT);
+    let profile = crate::config::ApiProfile {
+        name: "LocalLLM".into(),
+        api_type: crate::config::ApiType::LlamaCpp,
+        model_name: crate::config::ApiType::LlamaCpp.default_model().into(),
+        api_url: format!("http://localhost:{port}/v1/chat/completions"),
+        api_key_enc: String::new(),
+        ocr_prompt: crate::config::DEFAULT_GEMINI_OCR_PROMPT.into(),
+        translate_prompt: crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT.into(),
+        explain_prompt: crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT.into(),
+    };
+    cfg.api_profiles.push(profile.clone());
+    cfg.save();
+    PROFILES.with(|p| p.borrow_mut().push(profile));
+    let sel = PROFILES.with(|p| p.borrow().len().saturating_sub(1));
+    refill_profile_combo(h, sel);
+}
+
+/// llama.cpp本体・モデルの導入状況とサーバー稼働状況をステータス欄・ボタンに反映する
+/// (SPECv0.5.2追補)。稼働確認はポートへの疎通確認のため、未導入時はスキップする。
+fn refresh_llama_status(h: HWND) {
+    let bin_ok = crate::llama_install::installed();
+    let override_path = get_ctl_text(h, IDC_LLAMA_MODEL_PATH);
+    let model_path = crate::llama_install::resolve_model_path(&override_path);
+    let model_ok = model_path.is_file();
+    set_ctl_text(h, IDC_LLAMA_BIN_STATUS, if bin_ok { "導入済み" } else { "未導入" });
+    set_ctl_text(h, IDC_LLAMA_MODEL_STATUS, if model_ok { "選択済み" } else { "未選択" });
+    // ダウンロードボタンは既定の管理下ディレクトリに既にモデルがあれば無効化する
+    // (SPECv0.5.2追補: 参照ボタンで指定した外部パスの有無は問わない。あくまで
+    // 「このボタンでダウンロードした結果」の有無で判定する)。
+    let downloaded = crate::llama_install::model_installed();
+    unsafe {
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_INSTALL).unwrap_or_default(), !bin_ok);
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MODEL_INSTALL).unwrap_or_default(), !downloaded);
+    }
+    // mmproj(画像入力対応)の状態: 任意項目のため、未選択でもサーバーはテキスト専用として起動できる
+    let mmproj_path = crate::llama_install::resolve_mmproj_path(&get_ctl_text(h, IDC_LLAMA_MMPROJ_PATH));
+    let mmproj_ok = mmproj_path.is_file();
+    set_ctl_text(h, IDC_LLAMA_MMPROJ_STATUS, if mmproj_ok { "選択済み" } else { "未選択(任意)" });
+    let mmproj_downloaded = crate::llama_install::mmproj_installed();
+    unsafe {
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MMPROJ_INSTALL).unwrap_or_default(), !mmproj_downloaded);
+    }
+
+    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT).trim().parse().unwrap_or(crate::llama_server::DEFAULT_PORT);
+    let running = bin_ok && model_ok && crate::llama_server::is_running(port);
+    set_ctl_text(h, IDC_LLAMA_SERVER_STATUS, if running { "稼働中" } else { "停止中" });
+    set_ctl_text(h, IDC_LLAMA_TOGGLE, if running { "停止" } else { "起動" });
+    // 起動ボタンは常に押せる状態にしておく。本体/モデル未導入で起動できない場合は
+    // llama_server::start() が理由付きのエラーメッセージを返すので、そちらで案内する
+    // (SPECv0.5.2追補: 押せない理由が分からずグレーアウトだけ見える状態を避ける)。
+    unsafe {
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_TOGGLE).unwrap_or_default(), true);
+    }
+}
+
 /// 選択されたOCRエンジンおよび翻訳エンジンに対する解説をStatic Textに反映する
 fn update_explanations(h: HWND) {
     let ocr_idx = combo_sel(h, IDC_OCR).min(OCR_KEYS.len().saturating_sub(1));
@@ -517,12 +678,13 @@ fn update_explanations(h: HWND) {
 }
 
 /// APIプロファイル種別のコンボ表示順 (IDC_PROF_TYPE の選択indexと対応)
-const API_TYPE_ORDER: [crate::config::ApiType; 3] = [
+const API_TYPE_ORDER: [crate::config::ApiType; 4] = [
     crate::config::ApiType::Gemini,
     crate::config::ApiType::OpenAI,
     crate::config::ApiType::Claude,
+    crate::config::ApiType::LlamaCpp,
 ];
-const API_TYPE_DISP: [&str; 3] = ["Gemini", "OpenAI", "Claude"];
+const API_TYPE_DISP: [&str; 4] = ["Gemini", "OpenAI", "Claude", "llama.cpp"];
 
 fn api_type_index(t: &crate::config::ApiType) -> usize {
     API_TYPE_ORDER.iter().position(|x| x == t).unwrap_or(0)
@@ -576,18 +738,48 @@ fn load_profile_to_ui(h: HWND, idx: usize) {
     });
 }
 
+/// GGUFファイル選択ダイアログを開く (SPECv0.5.2追補: LM Studio等で導入済みのモデルを
+/// 再利用する場合に使う)。キャンセル時は None。
+fn browse_gguf_file(h: HWND, path_ctl_id: i32) -> Option<String> {
+    let mut file_buf = [0u16; 1024];
+    // 既存の入力値を初期値として使う (ユーザーが既に手入力していた場合の起点)
+    let current = get_ctl_text(h, path_ctl_id);
+    if !current.trim().is_empty() {
+        let wide = to_wide(current.trim());
+        let n = wide.len().min(file_buf.len() - 1);
+        file_buf[..n].copy_from_slice(&wide[..n]);
+    }
+    let filter = to_wide("GGUFモデル (*.gguf)\0*.gguf\0すべてのファイル (*.*)\0*.*\0\0");
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: h,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: windows::core::PWSTR(file_buf.as_mut_ptr()),
+        nMaxFile: file_buf.len() as u32,
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
+        ..Default::default()
+    };
+    let ok = unsafe { GetOpenFileNameW(&mut ofn) };
+    if !ok.as_bool() {
+        return None;
+    }
+    let len = file_buf.iter().position(|&c| c == 0).unwrap_or(0);
+    Some(String::from_utf16_lossy(&file_buf[..len]))
+}
+
 /// インストールボタン押下時の共通処理: ボタン無効化→バックグラウンドDL→完了時に done_msg を通知
 fn start_install(
     h: HWND,
     status_id: i32,
     button_id: i32,
     done_msg: u32,
+    in_progress_label: &str,
     install_fn: impl FnOnce() -> Result<(), String> + Send + 'static,
 ) {
     unsafe {
         let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), button_id).unwrap_or_default(), false);
     }
-    set_ctl_text(h, status_id, "ダウンロード中…");
+    set_ctl_text(h, status_id, in_progress_label);
     let hwnd_isize = h.0 as isize;
     std::thread::spawn(move || {
         let result = install_fn();
@@ -597,6 +789,66 @@ fn start_install(
         };
         unsafe {
             let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), done_msg, WPARAM(w), LPARAM(l));
+        }
+    });
+}
+
+/// モデルダウンロードボタン押下時の処理 (SPECv0.5.2追補)。start_install() と異なり、
+/// 10秒おきの進捗(%または受信済みMB)をWM_LLAMA_MODEL_PROGRESSで反映する。
+fn start_model_install(h: HWND) {
+    unsafe {
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MODEL_INSTALL).unwrap_or_default(), false);
+    }
+    set_ctl_text(h, IDC_LLAMA_MODEL_STATUS, "取得中…");
+    let hwnd_isize = h.0 as isize;
+    std::thread::spawn(move || {
+        let progress = move |downloaded: u64, total: Option<u64>| {
+            let label = match total {
+                Some(t) if t > 0 => format!("{}%", (downloaded * 100 / t).min(100)),
+                _ => format!("{}MB取得済み", downloaded / 1_000_000),
+            };
+            let ptr = Box::into_raw(Box::new(label)) as isize;
+            unsafe {
+                let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_MODEL_PROGRESS, WPARAM(0), LPARAM(ptr));
+            }
+        };
+        let result = crate::llama_install::install_model(progress);
+        let (w, l) = match result {
+            Ok(()) => (1usize, 0isize),
+            Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
+        };
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_MODEL_DONE, WPARAM(w), LPARAM(l));
+        }
+    });
+}
+
+/// mmproj(画像入力対応)のダウンロードボタン押下時の処理 (SPECv0.5.2追補)。
+/// 進捗を10秒おきに反映する。
+fn start_mmproj_install(h: HWND) {
+    unsafe {
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MMPROJ_INSTALL).unwrap_or_default(), false);
+    }
+    set_ctl_text(h, IDC_LLAMA_MMPROJ_STATUS, "取得中…");
+    let hwnd_isize = h.0 as isize;
+    std::thread::spawn(move || {
+        let progress = move |downloaded: u64, total: Option<u64>| {
+            let label = match total {
+                Some(t) if t > 0 => format!("{}%", (downloaded * 100 / t).min(100)),
+                _ => format!("{}MB取得済み", downloaded / 1_000_000),
+            };
+            let ptr = Box::into_raw(Box::new(label)) as isize;
+            unsafe {
+                let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_MMPROJ_PROGRESS, WPARAM(0), LPARAM(ptr));
+            }
+        };
+        let result = crate::llama_install::install_mmproj(progress);
+        let (w, l) = match result {
+            Ok(()) => (1usize, 0isize),
+            Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
+        };
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_MMPROJ_DONE, WPARAM(w), LPARAM(l));
         }
     });
 }
@@ -863,6 +1115,10 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.preview_detect_enabled = check_get(h, IDC_PREVIEW_DETECT_MODE);
     cfg.overlay_theme = THEME_KEYS[combo_sel(h, IDC_OVERLAY_THEME).min(THEME_KEYS.len() - 1)].to_string();
     cfg.log_max_records = get_ctl_text(h, IDC_LOG_MAX).trim().parse().unwrap_or(5000).clamp(100, 100000);
+    cfg.llama_auto_start = check_get(h, IDC_LLAMA_AUTOSTART);
+    cfg.llama_port = get_ctl_text(h, IDC_LLAMA_PORT).trim().parse().unwrap_or(crate::llama_server::DEFAULT_PORT).clamp(1024, 65535);
+    cfg.llama_model_path = get_ctl_text(h, IDC_LLAMA_MODEL_PATH).trim().to_string();
+    cfg.llama_mmproj_path = get_ctl_text(h, IDC_LLAMA_MMPROJ_PATH).trim().to_string();
 
     // 既定エンジンがクラウド/外部送信を伴う場合の同意確認 (SPEC §9)。
     // 即時保存化に伴い、既定エンジンのコンボを変更したときだけ確認する
@@ -944,16 +1200,21 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     update_explanations(h);
                 }
                 IDC_AUTOSTART | IDC_PERFLOG | IDC_LOG_ENABLED | IDC_DEBUG_MODE | IDC_DETECT_MODE
-                | IDC_PREVIEW_DETECT_MODE
+                | IDC_PREVIEW_DETECT_MODE | IDC_LLAMA_AUTOSTART
                     if notif == BN_CLICKED =>
                 {
                     auto_save(h, false);
                 }
-                IDC_POLL | IDC_PIN_HOLD | IDC_HOTKEY | IDC_DEEPL | IDC_GOOGLE
-                | IDC_LOG_MAX
+                IDC_POLL | IDC_PIN_HOLD | IDC_HOTKEY | IDC_DEEPL | IDC_GOOGLE | IDC_LOG_MAX
                     if notif == EN_KILLFOCUS =>
                 {
                     auto_save(h, false);
+                }
+                IDC_LLAMA_PORT | IDC_LLAMA_MODEL_PATH | IDC_LLAMA_MMPROJ_PATH
+                    if notif == EN_KILLFOCUS =>
+                {
+                    auto_save(h, false);
+                    refresh_llama_status(h);
                 }
                 _ => {}
             }
@@ -1008,6 +1269,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         IDC_PADDLE_STATUS,
                         IDC_PADDLE_INSTALL,
                         WM_PADDLE_DONE,
+                        "ダウンロード中…",
                         crate::paddle_install::install,
                     );
                 }
@@ -1017,9 +1279,83 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         IDC_ONNX_STATUS,
                         IDC_ONNX_INSTALL,
                         WM_ONNX_DONE,
+                        "ダウンロード中…",
                         crate::onnx_translate_install::install,
                     );
                 }
+                IDC_LLAMA_BIN_INSTALL => {
+                    start_install(
+                        h,
+                        IDC_LLAMA_BIN_STATUS,
+                        IDC_LLAMA_BIN_INSTALL,
+                        WM_LLAMA_BIN_DONE,
+                        "ダウンロード中…",
+                        crate::llama_install::install_binary,
+                    );
+                }
+                IDC_LLAMA_MODEL_INSTALL => unsafe {
+                    // 初回ダウンロード前に容量(約3GB)を警告し、同意を得てから開始する (SPECv0.5.2追補)。
+                    let r = MessageBoxW(
+                        Some(h),
+                        w!("Gemma 4 E2Bモデルをダウンロードします。ファイルサイズは約3GBあり、回線速度によっては数分〜数十分かかります。\nダウンロードを開始しますか?"),
+                        w!("モデルのダウンロード確認"),
+                        MB_YESNO | MB_ICONWARNING,
+                    );
+                    if r == windows::Win32::UI::WindowsAndMessaging::IDYES {
+                        start_model_install(h);
+                    }
+                },
+                IDC_LLAMA_TOGGLE => {
+                    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT).trim().parse().unwrap_or(crate::llama_server::DEFAULT_PORT);
+                    if crate::llama_server::is_running(port) {
+                        if let Err(e) = crate::llama_server::stop() {
+                            unsafe {
+                                let wide = to_wide(&e);
+                                MessageBoxW(Some(h), PCWSTR(wide.as_ptr()), w!("サーバー停止エラー"), MB_OK);
+                            }
+                        }
+                        refresh_llama_status(h);
+                    } else {
+                        let model = crate::llama_install::resolve_model_path(&get_ctl_text(h, IDC_LLAMA_MODEL_PATH));
+                        // mmprojが存在すれば画像入力対応込みで起動する。無ければテキスト専用。
+                        let mmproj = Some(crate::llama_install::resolve_mmproj_path(&get_ctl_text(h, IDC_LLAMA_MMPROJ_PATH)))
+                            .filter(|p| p.is_file());
+                        start_install(
+                            h,
+                            IDC_LLAMA_SERVER_STATUS,
+                            IDC_LLAMA_TOGGLE,
+                            WM_LLAMA_SERVER_DONE,
+                            "起動中…",
+                            move || crate::llama_server::start(port, &model, mmproj.as_deref()),
+                        );
+                    }
+                }
+                IDC_LLAMA_MODEL_BROWSE => {
+                    if let Some(path) = browse_gguf_file(h, IDC_LLAMA_MODEL_PATH) {
+                        set_ctl_text(h, IDC_LLAMA_MODEL_PATH, &path);
+                        auto_save(h, false);
+                        refresh_llama_status(h);
+                    }
+                }
+                IDC_LLAMA_MMPROJ_BROWSE => {
+                    if let Some(path) = browse_gguf_file(h, IDC_LLAMA_MMPROJ_PATH) {
+                        set_ctl_text(h, IDC_LLAMA_MMPROJ_PATH, &path);
+                        auto_save(h, false);
+                        refresh_llama_status(h);
+                    }
+                }
+                IDC_LLAMA_MMPROJ_INSTALL => unsafe {
+                    let r = MessageBoxW(
+                        Some(h),
+                        w!("mmproj(画像入力対応)ファイルをダウンロードします。ファイルサイズは約550MBあります。\nダウンロードを開始しますか?"),
+                        w!("mmprojのダウンロード確認"),
+                        MB_YESNO | MB_ICONWARNING,
+                    );
+                    if r == windows::Win32::UI::WindowsAndMessaging::IDYES {
+                        start_mmproj_install(h);
+                    }
+                },
+                IDC_GITHUB_LINK => open_url(h, GITHUB_RELEASES_URL),
                 IDC_DEEPL_URL => open_url(h, DEEPL_KEY_URL),
                 IDC_GOOGLE_URL => open_url(h, GOOGLE_KEY_URL),
                 IDC_PROMPT_TR_BTN => open_prompt_editor(h, crate::prompt_edit::PromptKind::Translate),
@@ -1136,6 +1472,47 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 refresh_onnx_status,
                 "ローカルONNX翻訳モデルをインストールしました。",
             );
+            LRESULT(0)
+        }
+        WM_LLAMA_BIN_DONE => {
+            handle_install_done(h, wparam, lparam, refresh_llama_status, "llama.cppをインストールしました。");
+            ensure_local_llm_profile_if_ready(h);
+            LRESULT(0)
+        }
+        WM_LLAMA_MODEL_PROGRESS => {
+            let label = unsafe { *Box::from_raw(lparam.0 as *mut String) };
+            set_ctl_text(h, IDC_LLAMA_MODEL_STATUS, &label);
+            LRESULT(0)
+        }
+        WM_LLAMA_MODEL_DONE => {
+            if wparam.0 == 1 {
+                // ダウンロード先(既定の管理下ディレクトリ)のパスをテキストボックスへ明示反映する
+                // (SPECv0.5.2追補: 起動時にもこのパスがそのまま使われる)。
+                let path = crate::llama_install::model_path();
+                set_ctl_text(h, IDC_LLAMA_MODEL_PATH, &path.to_string_lossy());
+                auto_save(h, false);
+            }
+            handle_install_done(h, wparam, lparam, refresh_llama_status, "Gemma 4 E2Bモデルを導入しました。");
+            ensure_local_llm_profile_if_ready(h);
+            LRESULT(0)
+        }
+        WM_LLAMA_SERVER_DONE => {
+            handle_install_done(h, wparam, lparam, refresh_llama_status, "サーバーを起動しました。");
+            LRESULT(0)
+        }
+        WM_LLAMA_MMPROJ_PROGRESS => {
+            let label = unsafe { *Box::from_raw(lparam.0 as *mut String) };
+            set_ctl_text(h, IDC_LLAMA_MMPROJ_STATUS, &label);
+            LRESULT(0)
+        }
+        WM_LLAMA_MMPROJ_DONE => {
+            if wparam.0 == 1 {
+                // ダウンロード先(既定の管理下ディレクトリ)のパスをテキストボックスへ明示反映する
+                // (SPECv0.5.2追補: 起動時にもこのパスがそのまま使われる)。
+                set_ctl_text(h, IDC_LLAMA_MMPROJ_PATH, &crate::llama_install::mmproj_path().to_string_lossy());
+                auto_save(h, false);
+            }
+            handle_install_done(h, wparam, lparam, refresh_llama_status, "mmproj(画像入力対応)ファイルを導入しました。");
             LRESULT(0)
         }
         WM_CLOSE => {

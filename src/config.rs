@@ -9,6 +9,10 @@ pub enum ApiType {
     Gemini,
     OpenAI,
     Claude,
+    /// ローカルのllama-server.exe (OpenAI互換API)。呼び出し自体はOpenAIと同じ経路を使うが、
+    /// 設定画面の種別選択でURL/モデル名をllama.cpp向けの既定値に自動入力するため独立させる
+    /// (SPECv0.5.2追補)。
+    LlamaCpp,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -72,6 +76,7 @@ impl ApiType {
             ApiType::Gemini => "gemini-3.5-flash",
             ApiType::OpenAI => "gpt-4o-mini",
             ApiType::Claude => "claude-haiku-4-5-20251001",
+            ApiType::LlamaCpp => "gemma-4-e2b",
         }
     }
     pub fn default_url(&self) -> &'static str {
@@ -79,6 +84,7 @@ impl ApiType {
             ApiType::Gemini => crate::llm_api::GEMINI_URL_BASE,
             ApiType::OpenAI => crate::llm_api::DEFAULT_OPENAI_URL,
             ApiType::Claude => crate::llm_api::DEFAULT_CLAUDE_URL,
+            ApiType::LlamaCpp => crate::llama_server::DEFAULT_URL,
         }
     }
 
@@ -158,6 +164,18 @@ pub struct Config {
     pub first_launch_done: bool,
     /// オーバーレイの配色テーマ: "system" (Windowsのアプリモードに追従) | "light" | "dark"
     pub overlay_theme: String,
+    /// 起動時にローカルLLMサーバー(llama-server.exe)を自動起動するか (SPECv0.5.2追補)
+    pub llama_auto_start: bool,
+    /// ローカルLLMサーバーの待受ポート
+    pub llama_port: u32,
+    /// ローカルLLMサーバーに読み込ませるGGUFモデルファイルの明示パス。
+    /// 空文字なら既定の管理下ディレクトリ (llama_install::model_path()) を使う。
+    /// LM Studio等で既にダウンロード済みのGGUFを再利用したい場合に設定する (SPECv0.5.2追補)。
+    pub llama_model_path: String,
+    /// 画像入力対応(VLM)用mmproj(マルチモーダル投影)ファイルのパス。空文字なら既定の
+    /// 管理下ディレクトリを使う。ファイルが存在すればサーバー起動時に --mmproj で渡され、
+    /// 同一ポートのまま画像入力にも対応する (SPECv0.5.2追補)。
+    pub llama_mmproj_path: String,
 }
 
 /// 翻訳プロンプトの既定値
@@ -166,11 +184,14 @@ pub const DEFAULT_GEMINI_TRANSLATE_PROMPT: &str =
 /// OCR+翻訳統合プロンプトの既定値
 pub const DEFAULT_GEMINI_OCR_PROMPT: &str =
     "Extract the text in this image and translate it from {{source_lang}} to {{target_lang}}. Respond with JSON only: {\"source\": \"<extracted text>\", \"translation\": \"<translation>\"}";
-/// 解説プロンプトの既定値 (SPECv0.4 §7.2)
-pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、{{app_title}} というタイトルのWindowsアプリケーションの中で表示されているテキストです。\nこれが何か{{target_lang}}で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 実行ファイル名\n{{app_exe}}\n\n## UIAパス\n{{uia_path}}\n\n## 表示テキスト\n{{original_text}}";
+/// 解説プロンプトの既定値 (SPECv0.5.2 追補)
+pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されてている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されてているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
 /// v0.3 までの解説プロンプト既定値 (設定移行の判定用。当時の文言そのままで比較する)
 const OLD_EXPLAIN_PROMPT: &str =
     "Explain the grammar, nuances, and background of the following text in {{target_lang}}.\n{{glossary}}\n\n{{original_text}}";
+/// v0.4〜v0.5.1 までの解説プロンプト既定値 (SPECv0.5.2でテンプレートを変更したため、
+/// 移行判定用にこの文言のまま保持する)
+const OLD_EXPLAIN_PROMPT_V4: &str = "以下は、{{app_title}} というタイトルのWindowsアプリケーションの中で表示されているテキストです。\nこれが何か{{target_lang}}で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 実行ファイル名\n{{app_exe}}\n\n## UIAパス\n{{uia_path}}\n\n## 表示テキスト\n{{original_text}}";
 
 /// 初回起動時・マイグレーション時に生成する既定LLMプロファイルの名前一覧
 pub const DEFAULT_PROFILE_NAMES: [&str; 4] =
@@ -183,7 +204,11 @@ fn seed_profile(name: &str) -> ApiProfile {
         "Gemini" => (ApiType::Gemini, ApiType::Gemini.default_model().into(), ApiType::Gemini.default_url().into()),
         "GPT" => (ApiType::OpenAI, ApiType::OpenAI.default_model().into(), ApiType::OpenAI.default_url().into()),
         "Claude" => (ApiType::Claude, ApiType::Claude.default_model().into(), ApiType::Claude.default_url().into()),
-        "LocalLLM" => (ApiType::OpenAI, "gemma4:e2b".into(), "http://localhost:11434/v1/chat/completions".into()),
+        "LocalLLM" => (
+            ApiType::LlamaCpp,
+            ApiType::LlamaCpp.default_model().into(),
+            ApiType::LlamaCpp.default_url().into(),
+        ),
         _ => (ApiType::Gemini, ApiType::Gemini.default_model().into(), ApiType::Gemini.default_url().into()),
     };
     ApiProfile {
@@ -254,6 +279,10 @@ impl Default for Config {
             log_max_records: 5000,
             first_launch_done: false,
             overlay_theme: "system".into(),
+            llama_auto_start: false,
+            llama_port: crate::llama_server::DEFAULT_PORT,
+            llama_model_path: String::new(),
+            llama_mmproj_path: String::new(),
         }
     }
 }
@@ -329,7 +358,7 @@ impl Config {
                     migrated = true;
                 }
             }
-            if p.explain_prompt == OLD_EXPLAIN_PROMPT {
+            if p.explain_prompt == OLD_EXPLAIN_PROMPT || p.explain_prompt == OLD_EXPLAIN_PROMPT_V4 {
                 p.explain_prompt = DEFAULT_GEMINI_EXPLAIN_PROMPT.into();
                 migrated = true;
             }
