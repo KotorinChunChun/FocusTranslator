@@ -181,7 +181,9 @@ fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<(), String> {
 }
 
 /// llama.cpp本体(CPU版)を導入する。既に導入済みなら何もしない。
-pub fn install_binary() -> Result<(), String> {
+/// on_progress は10秒おきに (受信済みバイト数, 合計バイト数) を通知する (SPECv0.5.3:
+/// モデル/mmprojの導入と同様に設定画面へ進捗を反映するため)。
+pub fn install_binary(on_progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
     if installed() {
         return Ok(());
     }
@@ -189,7 +191,7 @@ pub fn install_binary() -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("フォルダ作成に失敗しました: {e}"))?;
     let url = resolve_latest_zip_url()?;
     let zip_path = dir.join("llama.part.zip");
-    download_to_file(&url, &zip_path, 300, |_, _| {})?;
+    download_to_file(&url, &zip_path, 300, on_progress)?;
     let result = extract_zip(&zip_path, &dir);
     let _ = std::fs::remove_file(&zip_path);
     result?;
@@ -238,7 +240,7 @@ pub fn install_mmproj(on_progress: impl FnMut(u64, Option<u64>)) -> Result<(), S
 /// 導入する現行UIでは個別に呼ばれる。将来の一括導入用に残す)。
 #[allow(dead_code)]
 pub fn install_all() -> Result<(), String> {
-    install_binary()?;
+    install_binary(|_, _| {})?;
     install_model(|_, _| {})?;
     Ok(())
 }

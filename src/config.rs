@@ -26,6 +26,19 @@ pub struct ApiProfile {
     pub ocr_prompt: String,
     pub translate_prompt: String,
     pub explain_prompt: String,
+    /// 応答の最大トークン数 (SPECv0.5.3)。Claudeは max_tokens が必須のため常に適用
+    /// (0 なら既定の DEFAULT_MAX_TOKENS)。Gemini/OpenAI互換は 1 以上のときのみ
+    /// リクエストへ付与し、0 ならプロバイダ既定に任せる。
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+}
+
+/// max_tokens の既定値。従来のClaude固定値(1024)では長いMarkdown解説が途中で切れるため
+/// 引き上げた (SPECv0.5.3)。
+pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+fn default_max_tokens() -> u32 {
+    DEFAULT_MAX_TOKENS
 }
 
 /// Gemini/Claude/ChatGPTの公式APIエンドポイント。これらのURLで呼び出す場合はAPIキーが必須。
@@ -243,6 +256,7 @@ fn seed_profile(name: &str) -> ApiProfile {
         ocr_prompt: DEFAULT_GEMINI_OCR_PROMPT.into(),
         translate_prompt: DEFAULT_GEMINI_TRANSLATE_PROMPT.into(),
         explain_prompt: DEFAULT_GEMINI_EXPLAIN_PROMPT.into(),
+        max_tokens: DEFAULT_MAX_TOKENS,
     }
 }
 
