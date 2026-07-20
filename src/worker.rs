@@ -986,20 +986,67 @@ pub fn build_explain_prompt_for(cfg: &Config, profile: &str, ctx: &crate::config
     Some(cfg.fill_prompt(&prof.explain_prompt, ctx))
 }
 
+/// 解説に添付するアプリ全体キャプチャ (SPECv0.5.3)。
+/// rect は full 内での解説対象範囲 (物理ピクセル座標)。赤枠を描いてから送信する。
+pub struct ExplainImage {
+    pub full: Arc<Captured>,
+    pub rect: Option<RECT>,
+}
+
+/// 解説送信用画像の長辺上限 (px)。全体キャプチャは大きくなりがちなため縮小して送る。
+const EXPLAIN_IMAGE_MAX_DIM: u32 = 1600;
+
+/// 解説用の送信画像を組み立てる: 縮小 → 対象範囲へ赤枠描画 → PNG。
+/// 戻り値: (PNGバイト列, 画像ハッシュ)。
+fn build_explain_image(img: &ExplainImage) -> (Vec<u8>, String) {
+    let full = &*img.full;
+    let scale_src = full.width.max(full.height).max(1);
+    let mut prepared = crate::capture::downscale_max(full, EXPLAIN_IMAGE_MAX_DIM);
+    if let Some(r) = img.rect {
+        // 縮小後の座標系へ矩形を変換してから赤枠を描く (先に描くと縮小で枠が痩せるため)
+        let s = prepared.width.max(prepared.height) as f32 / scale_src as f32;
+        let scaled = RECT {
+            left: (r.left as f32 * s) as i32,
+            top: (r.top as f32 * s) as i32,
+            right: (r.right as f32 * s) as i32,
+            bottom: (r.bottom as f32 * s) as i32,
+        };
+        crate::capture::draw_red_frame(&mut prepared, scaled, 3);
+    }
+    let hash = crate::capture::hash_hex(&prepared);
+    (crate::capture::to_png(&prepared), hash)
+}
+
 /// 解説の取得 (SPEC v0.3 §2.2.2 / v0.4 §8.2.4): 成功・失敗ともログへ追記してオーバーレイへ通知する。
 /// profile はダイアログで選択されたAPIプロファイル名 (見つからなければアクティブを使用)。
-pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, profile: String, main: isize) {
+/// image が Some なら、赤枠でマークした全体キャプチャを添付して送信する (SPECv0.5.3)。
+pub fn explain(
+    generation: u64,
+    recog_id: i64,
+    cfg: Config,
+    prompt: String,
+    profile: String,
+    main: isize,
+    image: Option<ExplainImage>,
+) {
     std::thread::spawn(move || {
         init_com();
+        // 画像添付時は送信画像を先に確定し、キャッシュキー(input_text)へ画像ハッシュを
+        // 含める (SPECv0.5.3: 同一プロンプトでも別画面のキャッシュを誤って流用しないため)。
+        let prepared = image.as_ref().map(build_explain_image);
+        let cache_text = match &prepared {
+            Some((_, hash)) => format!("{prompt}\n[添付画像hash: {}]", &hash[..16]),
+            None => prompt.clone(),
+        };
         // 同一プロファイル+同一送信プロンプト(input_text)の成功済み解説がDBにあれば、
         // APIを呼ばずそれを使う (SPECv0.5.2追補: プロファイル別チップのため、テンプレートが
         // 同一で input_text が一致していても別プロファイルのキャッシュは流用しない)。
         if cfg.log_enabled
-            && let Some((cached_rid, cached_text)) = crate::logdb::find_cached_explanation_for_profile(&profile, &prompt)
+            && let Some((cached_rid, cached_text)) = crate::logdb::find_cached_explanation_for_profile(&profile, &cache_text)
         {
             if cached_rid != recog_id {
                 crate::logdb::log_explanation(
-                    recog_id, &profile, 0, &prompt, Some(&cached_text), None, Some(0), Some(0),
+                    recog_id, &profile, 0, &cache_text, Some(&cached_text), None, Some(0), Some(0),
                 );
             }
             post(main, generation, WorkerMsg::Explanation { text: cached_text, profile });
@@ -1019,18 +1066,27 @@ pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, prof
             });
             return;
         };
-        let result = crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt))
+        let png_b64 = prepared.as_ref().map(|(png, _)| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(png)
+        });
+        let req = crate::llm_api::LlmRequest {
+            prompt: &prompt,
+            image_png_b64: png_b64.as_deref(),
+            json_mode: false,
+        };
+        let result = crate::llm_api::call(prof, &req)
             // エラーメッセージにAPIキーが混入しても表示・ログへ漏れないよう伏字化する (SPECv0.5.3)
             .map_err(|e| crate::translate::mask_keys(&cfg, &e));
         let ms = t0.elapsed().as_millis();
         if cfg.log_enabled {
             match &result {
                 Ok(res) => crate::logdb::log_explanation(
-                    recog_id, &prof.name, ms, &prompt, Some(&res.text), None,
+                    recog_id, &prof.name, ms, &cache_text, Some(&res.text), None,
                     res.tokens_in, res.tokens_out,
                 ),
                 Err(e) => crate::logdb::log_explanation(
-                    recog_id, &prof.name, ms, &prompt, None, Some(e), None, None,
+                    recog_id, &prof.name, ms, &cache_text, None, Some(e), None, None,
                 ),
             }
         }

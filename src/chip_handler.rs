@@ -518,8 +518,10 @@ fn chip_explain_with_profile(c: ChipCtx, profile: String) {
         });
         return;
     }
-    // 外部プロファイルへの解説依頼はテキスト送信の同意を確認する (SPECv0.5.3)
-    if !ensure_consent_profile(&profile, false, &c.cfg) {
+    // 外部プロファイルへの解説依頼は同意を確認する (SPECv0.5.3)。
+    // 全体キャプチャがあれば赤枠付きで画像も送るため、画像送信の同意も対象。
+    let with_image = c.last_full_img.is_some();
+    if !ensure_consent_profile(&profile, with_image, &c.cfg) {
         return;
     }
     let pc = prompt_ctx_from_app(&c.source);
@@ -542,7 +544,12 @@ fn chip_explain_with_profile(c: ChipCtx, profile: String) {
     })
     .unwrap_or(0);
     let cfg2 = Config::load();
-    crate::worker::explain(new_gen, r_id, cfg2, prompt, profile, c.main);
+    // 全体キャプチャがあれば赤枠付きで添付する (SPECv0.5.3)
+    let image = c.last_full_img.clone().map(|full| crate::worker::ExplainImage {
+        full,
+        rect: c.last_crop_rect,
+    });
+    crate::worker::explain(new_gen, r_id, cfg2, prompt, profile, c.main, image);
 }
 
 /// 解説 (CHIP_EXPLAIN): プロンプト編集ウィンドウ (モードB) を表示してから送信 (SPECv0.4.7 §2)
@@ -587,6 +594,9 @@ fn chip_explain(c: ChipCtx) {
 
         let pc = prompt_ctx_from_app(&c.source);
         let main_hwnd_val = c.main;
+        // 送信時に赤枠付き全体キャプチャを添付するため、閉包へ引き渡す (SPECv0.5.3)
+        let full_img = c.last_full_img.clone();
+        let crop_rect = c.last_crop_rect;
         let inst = with_app(|app| app.instance).unwrap_or_default();
         crate::prompt_edit::open(
             inst,
@@ -607,7 +617,7 @@ fn chip_explain(c: ChipCtx) {
                 // プロンプト編集ウィンドウからの送信も、外部プロファイルなら同意を確認する
                 // (SPECv0.5.3)。プロファイルはウィンドウ内で切替できるため送信時点で判定する。
                 let cfg_now = Config::load();
-                if !ensure_consent_profile(&profile, false, &cfg_now) {
+                if !ensure_consent_profile(&profile, full_img.is_some(), &cfg_now) {
                     return;
                 }
                 let new_gen = with_app(|app| {
@@ -621,7 +631,12 @@ fn chip_explain(c: ChipCtx) {
                 })
                 .unwrap_or(0);
                 let cfg2 = Config::load();
-                crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val);
+                // 全体キャプチャがあれば赤枠付きで添付する (SPECv0.5.3)
+                let image = full_img.clone().map(|full| crate::worker::ExplainImage {
+                    full,
+                    rect: crop_rect,
+                });
+                crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val, image);
             })),
         );
     }

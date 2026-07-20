@@ -195,20 +195,26 @@ pub struct Config {
     pub llama_mmproj_path: String,
 }
 
-/// 翻訳プロンプトの既定値
+/// 翻訳プロンプトの既定値 (SPECv0.5.3: 既に訳先言語ならそのまま返す指示を追加)
 pub const DEFAULT_GEMINI_TRANSLATE_PROMPT: &str =
+    "Translate the following text from {{source_lang}} to {{target_lang}}. If the text is already in {{target_lang}}, output it unchanged. Output only the translation.\n\n{{original_text}}";
+/// v0.5.2 までの翻訳プロンプト既定値 (SPECv0.5.3でテンプレートを変更したため移行判定用)
+const OLD_TRANSLATE_PROMPT_V52: &str =
     "Translate the following text from {{source_lang}} to {{target_lang}}. Output only the translation.\n\n{{original_text}}";
 /// OCR+翻訳統合プロンプトの既定値
 pub const DEFAULT_GEMINI_OCR_PROMPT: &str =
     "Extract the text in this image and translate it from {{source_lang}} to {{target_lang}}. Respond with JSON only: {\"source\": \"<extracted text>\", \"translation\": \"<translation>\"}";
-/// 解説プロンプトの既定値 (SPECv0.5.2 追補)
-pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されてている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されてているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
+/// 解説プロンプトの既定値 (SPECv0.5.3: 赤枠付き全体キャプチャ添付の説明を追加)
+pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n画像が添付されている場合、それは対象アプリ全体のスクリーンショットで、赤枠で囲んだ箇所が解説対象の表示位置です。画面全体の文脈も参考にしてください。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
 /// v0.3 までの解説プロンプト既定値 (設定移行の判定用。当時の文言そのままで比較する)
 const OLD_EXPLAIN_PROMPT: &str =
     "Explain the grammar, nuances, and background of the following text in {{target_lang}}.\n{{glossary}}\n\n{{original_text}}";
 /// v0.4〜v0.5.1 までの解説プロンプト既定値 (SPECv0.5.2でテンプレートを変更したため、
 /// 移行判定用にこの文言のまま保持する)
 const OLD_EXPLAIN_PROMPT_V4: &str = "以下は、{{app_title}} というタイトルのWindowsアプリケーションの中で表示されているテキストです。\nこれが何か{{target_lang}}で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 実行ファイル名\n{{app_exe}}\n\n## UIAパス\n{{uia_path}}\n\n## 表示テキスト\n{{original_text}}";
+/// v0.5.2 の解説プロンプト既定値 (SPECv0.5.3でテンプレートを変更したため、移行判定用に
+/// 当時の文言そのままで保持する。「表示されてている」の誤記も当時のまま)
+const OLD_EXPLAIN_PROMPT_V52: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されてている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されてているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
 
 /// 初回起動時・マイグレーション時に生成する既定LLMプロファイルの名前一覧
 pub const DEFAULT_PROFILE_NAMES: [&str; 4] =
@@ -375,9 +381,28 @@ impl Config {
                     migrated = true;
                 }
             }
-            if p.explain_prompt == OLD_EXPLAIN_PROMPT || p.explain_prompt == OLD_EXPLAIN_PROMPT_V4 {
+            if p.explain_prompt == OLD_EXPLAIN_PROMPT
+                || p.explain_prompt == OLD_EXPLAIN_PROMPT_V4
+                || p.explain_prompt == OLD_EXPLAIN_PROMPT_V52
+            {
                 p.explain_prompt = DEFAULT_GEMINI_EXPLAIN_PROMPT.into();
                 migrated = true;
+            }
+            // 旧既定の翻訳プロンプトのままなら新しい既定へ差し替える (SPECv0.5.3)
+            if p.translate_prompt == OLD_TRANSLATE_PROMPT_V52 {
+                p.translate_prompt = DEFAULT_GEMINI_TRANSLATE_PROMPT.into();
+                migrated = true;
+            }
+            // プロンプト欄が欠落した旧設定 (フィールド無し=空文字) は既定で補完する (SPECv0.5.3)
+            for (prompt, default) in [
+                (&mut p.ocr_prompt, DEFAULT_GEMINI_OCR_PROMPT),
+                (&mut p.translate_prompt, DEFAULT_GEMINI_TRANSLATE_PROMPT),
+                (&mut p.explain_prompt, DEFAULT_GEMINI_EXPLAIN_PROMPT),
+            ] {
+                if prompt.trim().is_empty() {
+                    *prompt = default.into();
+                    migrated = true;
+                }
             }
             // 旧バージョンは Gemini の api_url を空欄のまま保存していた。
             // 実行時は url_or() が既定URLへ解決するため動作に支障は無いが、設定画面の

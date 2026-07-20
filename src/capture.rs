@@ -211,6 +211,116 @@ pub fn crop_with_rect(img: &Captured, x: i32, y: i32, w: i32, h: i32) -> Option<
     Some((Captured { width: cw, height: ch, bgra: out }, rect))
 }
 
+/// 長辺が max_dim を超える場合にアスペクト比を保って縮小する (SPECv0.5.3:
+/// 解説用の全体キャプチャ送信サイズ抑制)。縮小はボックス平均(領域平均)で行い、
+/// 文字の視認性をなるべく保つ。超えない場合は複製をそのまま返す。
+pub fn downscale_max(img: &Captured, max_dim: u32) -> Captured {
+    let long = img.width.max(img.height);
+    if long <= max_dim || img.width == 0 || img.height == 0 {
+        return img.clone();
+    }
+    let scale = max_dim as f32 / long as f32;
+    let nw = ((img.width as f32 * scale).round() as u32).max(1);
+    let nh = ((img.height as f32 * scale).round() as u32).max(1);
+    let mut out = vec![0u8; (nw * nh * 4) as usize];
+    for oy in 0..nh {
+        // 出力1pxに対応する元画像の帯 (ボックス)
+        let sy0 = (oy as f32 / scale) as u32;
+        let sy1 = (((oy + 1) as f32 / scale) as u32).clamp(sy0 + 1, img.height);
+        for ox in 0..nw {
+            let sx0 = (ox as f32 / scale) as u32;
+            let sx1 = (((ox + 1) as f32 / scale) as u32).clamp(sx0 + 1, img.width);
+            let mut acc = [0u32; 4];
+            let mut n = 0u32;
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let s = ((sy * img.width + sx) * 4) as usize;
+                    for c in 0..4 {
+                        acc[c] += img.bgra[s + c] as u32;
+                    }
+                    n += 1;
+                }
+            }
+            let d = ((oy * nw + ox) * 4) as usize;
+            for c in 0..4 {
+                out[d + c] = (acc[c] / n.max(1)) as u8;
+            }
+        }
+    }
+    Captured { width: nw, height: nh, bgra: out }
+}
+
+/// 画像へ赤枠を描き込む (SPECv0.5.3: 解説プロンプトで「赤枠内が対象」と示すため)。
+/// rect は img 内の物理ピクセル座標。枠は矩形の外側へ thickness px 分膨らませて描き、
+/// 対象そのものを塗り潰さないようにする (画像端ではクランプ)。
+pub fn draw_red_frame(img: &mut Captured, rect: RECT, thickness: i32) {
+    let t = thickness.max(1);
+    let x0 = (rect.left - t).max(0);
+    let y0 = (rect.top - t).max(0);
+    let x1 = (rect.right + t).min(img.width as i32);
+    let y1 = (rect.bottom + t).min(img.height as i32);
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let mut put = |x: i32, y: i32| {
+        if x >= 0 && y >= 0 && (x as u32) < img.width && (y as u32) < img.height {
+            let i = ((y as u32 * img.width + x as u32) * 4) as usize;
+            img.bgra[i] = 0; // B
+            img.bgra[i + 1] = 0; // G
+            img.bgra[i + 2] = 255; // R
+            img.bgra[i + 3] = 255; // A
+        }
+    };
+    for x in x0..x1 {
+        for dy in 0..t {
+            put(x, y0 + dy);
+            put(x, y1 - 1 - dy);
+        }
+    }
+    for y in y0..y1 {
+        for dx in 0..t {
+            put(x0 + dx, y);
+            put(x1 - 1 - dx, y);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solid(w: u32, h: u32, bgra: [u8; 4]) -> Captured {
+        Captured { width: w, height: h, bgra: bgra.repeat((w * h) as usize) }
+    }
+
+    #[test]
+    fn downscale_max_は長辺を上限へ縮小しアスペクト比を保つ() {
+        let img = solid(3200, 1600, [10, 20, 30, 255]);
+        let out = downscale_max(&img, 1600);
+        assert_eq!((out.width, out.height), (1600, 800));
+        // 単色画像は縮小後も同色 (ボックス平均)
+        assert_eq!(&out.bgra[..4], &[10, 20, 30, 255]);
+        // 上限以下ならサイズ不変
+        let same = downscale_max(&out, 1600);
+        assert_eq!((same.width, same.height), (1600, 800));
+    }
+
+    #[test]
+    fn draw_red_frame_は矩形の外周へ赤枠を描く() {
+        let mut img = solid(100, 100, [0, 0, 0, 255]);
+        let rect = RECT { left: 40, top: 40, right: 60, bottom: 60 };
+        draw_red_frame(&mut img, rect, 3);
+        let px = |x: u32, y: u32| {
+            let i = ((y * 100 + x) * 4) as usize;
+            [img.bgra[i], img.bgra[i + 1], img.bgra[i + 2]]
+        };
+        assert_eq!(px(38, 50), [0, 0, 255], "左枠 (矩形の外側) が赤");
+        assert_eq!(px(50, 38), [0, 0, 255], "上枠が赤");
+        assert_eq!(px(50, 50), [0, 0, 0], "矩形内部は塗り潰さない");
+        assert_eq!(px(10, 10), [0, 0, 0], "枠の外は変更しない");
+    }
+}
+
 /// BGRA → PNG エンコード(外部OCR/Gemini送信用)
 pub fn to_png(img: &Captured) -> Vec<u8> {
     let mut rgba = vec![0u8; img.bgra.len()];
