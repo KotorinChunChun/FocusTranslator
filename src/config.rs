@@ -55,6 +55,23 @@ impl ApiProfile {
         MAJOR_API_URLS.contains(&self.api_url.trim())
     }
 
+    /// このプロファイルの呼び出しが外部へのデータ送信になるか (SPECv0.5.3)。
+    /// URLのホストが localhost / 127.0.0.1 / [::1] ならローカル送信とみなし、
+    /// 外部送信の同意ダイアログを出さない。URL未設定は既定の公式APIへ解決されるため外部扱い。
+    pub fn is_external(&self) -> bool {
+        let url = self.api_url.trim();
+        if url.is_empty() {
+            return true;
+        }
+        let rest = url.split("://").nth(1).unwrap_or(url);
+        if let Some(v6) = rest.strip_prefix('[') {
+            // IPv6リテラル (例: http://[::1]:8080/...)
+            return v6.split(']').next().unwrap_or("") != "::1";
+        }
+        let host = rest.split(['/', ':']).next().unwrap_or("");
+        !matches!(host, "localhost" | "127.0.0.1")
+    }
+
     /// このプロファイルで呼び出しを試みても失敗しないと分かる状態か(ボタンのグレーアウト判定用)。
     /// API URL/モデル名が未設定なら必ず失敗する。APIキーの空欄自体は許容するが、
     /// Gemini/Claude/ChatGPTの主要な公式URLではAPIキーが無いと必ず失敗するため許容しない。
@@ -488,6 +505,24 @@ pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// URLのホストで外部送信か否かを判定する (SPECv0.5.3: ローカルLLMは同意不要)
+    #[test]
+    fn is_external_はローカルホストのみ内部扱い() {
+        let mut p = ApiProfile::default();
+        for (url, expect) in [
+            ("http://localhost:11434/v1/chat/completions", false),
+            ("http://127.0.0.1:8080/v1/chat/completions", false),
+            ("http://[::1]:8080/v1", false),
+            ("https://api.openai.com/v1/chat/completions", true),
+            ("https://generativelanguage.googleapis.com/v1beta/models", true),
+            ("http://192.168.1.10:11434/v1/chat/completions", true),
+            ("", true),
+        ] {
+            p.api_url = url.into();
+            assert_eq!(p.is_external(), expect, "url={url}");
+        }
+    }
 
     /// 過去バージョンの設定 (Gemini/GPT の2プロファイルのみ・api_url欠落・
     /// default_api_profile未導入) を読み込むと、不足していた既定プロファイル

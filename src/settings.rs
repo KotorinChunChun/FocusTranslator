@@ -1132,10 +1132,20 @@ fn save(h: HWND, ask_consent: bool) {
 }
 
 fn confirm_default_consents(h: HWND, cfg: &mut Config) {
+    // LLM経由の場合、実際に使われるのは既定LLMプロファイル。ローカル(非外部URL)なら
+    // 外部送信は発生しないため同意を求めない (SPECv0.5.3)。
+    let llm_external = cfg
+        .api_profiles
+        .iter()
+        .find(|p| p.name == cfg.default_api_profile)
+        .is_none_or(|p| p.is_external());
     unsafe {
-        if matches!(cfg.default_translator.as_str(), "deepl" | "google" | "llm")
-            && !cfg.consent_text
-        {
+        let tr_external = match cfg.default_translator.as_str() {
+            "deepl" | "google" => true,
+            "llm" => llm_external,
+            _ => false,
+        };
+        if tr_external && !cfg.consent_text {
             let r = MessageBoxW(
                 Some(h),
                 w!("既定の翻訳エンジンはOCR済みテキストを外部サービスへ送信します。許可しますか?"),
@@ -1144,7 +1154,7 @@ fn confirm_default_consents(h: HWND, cfg: &mut Config) {
             );
             cfg.consent_text = r.0 == 6; // IDYES
         }
-        if cfg.default_ocr == "llm" && !cfg.consent_image {
+        if cfg.default_ocr == "llm" && llm_external && !cfg.consent_image {
             let r = MessageBoxW(
                 Some(h),
                 w!("既定のOCRエンジンはキャプチャ画像を外部サービスへ送信します。許可しますか?"),

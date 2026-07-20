@@ -79,6 +79,17 @@ pub fn run(
     focus: Focus,
     ctx: &crate::config::PromptContext,
 ) -> Result<OcrOutput, String> {
+    // LLM経路のエラーメッセージにAPIキーが混入しても漏れないよう伏字化する (SPECv0.5.3)
+    run_inner(engine, cfg, img, focus, ctx).map_err(|e| crate::translate::mask_keys(cfg, &e))
+}
+
+fn run_inner(
+    engine: &str,
+    cfg: &Config,
+    img: &Captured,
+    focus: Focus,
+    ctx: &crate::config::PromptContext,
+) -> Result<OcrOutput, String> {
     match engine {
         "oneocr" => crate::oneocr::ocr_oneocr(img, focus).map(|(text, focus_line)| OcrOutput {
             text,

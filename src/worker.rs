@@ -322,14 +322,12 @@ fn log_trans_llm(cfg: &Config, recog_id: Option<i64>, ms: u128, tr: &str, o: &oc
     );
 }
 
-/// 同意が無いクラウド/外部OCRエンジンをローカルへ置き換える (SPEC §9: 同意なしで外部送信しない)
+/// 既定OCRエンジンが未導入等で使えない場合のみローカルへ置き換える。
+/// 同意の有無によるフォールバックは行わない (SPECv0.5.3: 同意が無ければ
+/// ensure_ocr_consent がその場で同意を求め、拒否されたら実行自体を中断する)。
 fn effective_ocr(cfg: &Config) -> String {
     let e = cfg.default_ocr.as_str();
-    let allowed = match e {
-        "llm" => cfg.consent_image,
-        _ => true,
-    };
-    if allowed && cfg.engine_available(e) {
+    if cfg.engine_available(e) {
         e.to_string()
     } else if cfg.engine_available("oneocr") {
         "oneocr".to_string()
@@ -338,13 +336,103 @@ fn effective_ocr(cfg: &Config) -> String {
     }
 }
 
-fn effective_translator(cfg: &Config) -> String {
-    let e = cfg.default_translator.as_str();
-    let allowed = match e {
-        "deepl" | "google" | "llm" => cfg.consent_text,
-        _ => true,
+/// 自動サイクルの同意ダイアログをこのセッションで拒否済みか。
+/// ホールドキーを押すたびにダイアログが連発しないよう、拒否は起動中のみ記憶する
+/// (チップ等の明示操作による同意確認には影響しない)。
+static AUTO_CONSENT_DECLINED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// ワーカースレッドから外部送信の同意を確認する (SPECv0.5.3)。
+/// 最新の設定を読み直して判定し、未同意なら MessageBox で確認する。同意されたら設定へ
+/// 永続化し、メインスレッドへ WM_APP_CFG で再読込を通知する。拒否されたらセッション中は
+/// 再度尋ねず false を返す。
+fn request_consent_blocking(main: isize, want_image: bool) -> bool {
+    use std::sync::atomic::Ordering;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW,
     };
-    if allowed { e.to_string() } else { "local".to_string() }
+    let fresh = Config::load();
+    let need_text = !fresh.consent_text;
+    let need_image = want_image && !fresh.consent_image;
+    if !need_text && !need_image {
+        return true;
+    }
+    if AUTO_CONSENT_DECLINED.load(Ordering::Relaxed) {
+        return false;
+    }
+    let msg = if need_image {
+        "既定のエンジンはキャプチャ画像とテキスト・言語設定を外部サービスへ送信します。\n初回のみ確認しています。許可しますか?\n(拒否した場合、既定エンジンを変更するまでこの機能は実行されません)"
+    } else {
+        "既定のエンジンは読み取ったテキストと関連情報(アプリ名・ウィンドウタイトル等)を外部サービスへ送信します。\n初回のみ確認しています。許可しますか?\n(拒否した場合、既定エンジンを変更するまでこの機能は実行されません)"
+    };
+    let msg_w = util::to_wide(msg);
+    let r = unsafe {
+        MessageBoxW(
+            None,
+            windows::core::PCWSTR(msg_w.as_ptr()),
+            windows::core::PCWSTR(util::to_wide("外部送信の同意").as_ptr()),
+            MB_YESNO | MB_SETFOREGROUND | MB_TOPMOST,
+        )
+    };
+    if r == IDYES {
+        let mut c = Config::load();
+        if need_text {
+            c.consent_text = true;
+        }
+        if need_image {
+            c.consent_image = true;
+            // 画像には文字が写るため、画像同意はテキスト同意を内包する
+            c.consent_text = true;
+        }
+        c.save();
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(main as *mut _)),
+                crate::app_state::WM_APP_CFG,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+        true
+    } else {
+        AUTO_CONSENT_DECLINED.store(true, Ordering::Relaxed);
+        false
+    }
+}
+
+/// 自動サイクルでOCRエンジンが外部送信を要する場合の同意確認 (SPECv0.5.3)。
+/// LLM統合OCRかつアクティブプロファイルが外部URLのときのみ確認する。拒否なら Err。
+fn ensure_ocr_consent(cfg: &Config, engine: &str, main: isize) -> Result<(), String> {
+    if engine != "llm" {
+        return Ok(());
+    }
+    if !cfg.active_profile().is_some_and(|p| p.is_external()) {
+        return Ok(());
+    }
+    if request_consent_blocking(main, true) {
+        Ok(())
+    } else {
+        Err("外部送信の同意が得られないため、LLMによる画面読み取りを実行できません。設定画面で既定OCRエンジンを変更するか、同意を許可してください。".into())
+    }
+}
+
+/// 翻訳エンジンが外部送信を要する場合の同意確認 (SPECv0.5.3)。拒否なら Err。
+/// 自動・明示を問わず翻訳実行の直前に呼ぶ (明示操作はチップ側で同意済みのため、
+/// ここでは追加のダイアログは出ない)。
+fn ensure_tr_consent(cfg: &Config, engine: &str, main: isize) -> Result<(), String> {
+    let external = match engine {
+        "deepl" | "google" => true,
+        "llm" => cfg.active_profile().is_some_and(|p| p.is_external()),
+        _ => false,
+    };
+    if !external {
+        return Ok(());
+    }
+    if request_consent_blocking(main, false) {
+        Ok(())
+    } else {
+        Err("外部送信の同意が得られないため翻訳をスキップしました。設定画面で既定翻訳エンジンを変更するか、同意を許可してください。".into())
+    }
 }
 
 /// 検索用の正規化: 空白を除去し小文字化する (OCRとUIA Nameの表記ゆれ吸収)
@@ -485,7 +573,7 @@ fn adopt_uia_text(
 /// キャプチャ領域は UIA検出結果 (行矩形/要素/直下要素) を優先し、無ければ既定帯。
 pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Config, main: isize) {
     std::thread::spawn(move || {
-        let tr_engine = effective_translator(&cfg);
+        let tr_engine = cfg.default_translator.clone();
         init_com();
         let t0 = Instant::now();
         let mut ctx = AppContext::capture(x, y, HWND(target as *mut _));
@@ -506,6 +594,11 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
 
         // 経路B: WGC + キャプチャOCR (直下要素 → 段落帯 → 既定帯)
         let engine = effective_ocr(&cfg);
+        // 外部LLMへの画像送信となる場合は同意を確認し、拒否なら実行しない (SPECv0.5.3)
+        if let Err(e) = ensure_ocr_consent(&cfg, &engine, main) {
+            post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), clear_source: false });
+            return;
+        }
         let cap = match capture_plan::capture_probe(x, y, target, &probe) {
             Ok(c) => c,
             Err(e) => {
@@ -597,6 +690,12 @@ fn translate(
         return;
     }
     std::thread::spawn(move || {
+        // 外部送信を要するエンジンは実行直前に同意を確認する (SPECv0.5.3:
+        // 同意なしのローカルへの無言フォールバックは廃止。拒否時はスキップ表示)。
+        if let Err(msg) = ensure_tr_consent(&cfg, &engine, main) {
+            post(main, generation, WorkerMsg::TranslationSkipped { msg });
+            return;
+        }
         let t0 = Instant::now();
         match crate::translate::translate(&engine, &cfg, &text, &pc) {
             Ok(t) => {
@@ -781,7 +880,7 @@ pub fn retranslate(
 /// 範囲指定モード: 選択矩形をOCRして段落結合→翻訳、最初からピン留め (SPEC §3.2)
 pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
     std::thread::spawn(move || {
-        let tr_engine = effective_translator(&cfg);
+        let tr_engine = cfg.default_translator.clone();
         init_com();
         let t0 = Instant::now();
         let cx = (rect.left + rect.right) / 2;
@@ -836,6 +935,11 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
         };
 
         let engine = effective_ocr(&cfg);
+        // 外部LLMへの画像送信となる場合は同意を確認し、拒否なら実行しない (SPECv0.5.3)
+        if let Err(e) = ensure_ocr_consent(&cfg, &engine, main) {
+            post(main, generation, WorkerMsg::Error { msg: e, anchor, clear_source: false });
+            return;
+        }
         // Focus::All → 全行を段落結合
         let ctx = AppContext::capture(cx, cy, root);
         let pc = prompt_ctx(&ctx, &engine);
@@ -915,7 +1019,9 @@ pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, prof
             });
             return;
         };
-        let result = crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt));
+        let result = crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt))
+            // エラーメッセージにAPIキーが混入しても表示・ログへ漏れないよう伏字化する (SPECv0.5.3)
+            .map_err(|e| crate::translate::mask_keys(&cfg, &e));
         let ms = t0.elapsed().as_millis();
         if cfg.log_enabled {
             match &result {

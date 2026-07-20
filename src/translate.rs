@@ -131,7 +131,9 @@ pub fn translate(
         }
     }
 
-    let result = translate_once(engine, cfg, text, &target, ctx);
+    // エラーメッセージにURL等の形でAPIキーが混入しても表示・ログへ漏れないよう伏字化する
+    // (SPECv0.5.3)。
+    let result = translate_once(engine, cfg, text, &target, ctx).map_err(|e| mask_keys(cfg, &e));
     match result {
         Ok((t, detail, db_rid)) => {
             let mut guard = CACHE.lock().unwrap();
@@ -219,14 +221,17 @@ fn translate_google(cfg: &Config, text: &str, target: &str) -> Result<(String, T
     if key.is_empty() {
         return Err("Google APIキーが未設定です".into());
     }
-    let url = format!("https://translation.googleapis.com/language/translate/v2?key={key}");
+    // APIキーはURLクエリではなくヘッダーで送る (SPECv0.5.3: エラーメッセージ等に
+    // URLが含まれてもキーが露出しないようにするため)。
+    let url = "https://translation.googleapis.com/language/translate/v2";
     let body = serde_json::json!({ "q": text, "target": target, "format": "text" });
     let req_json = mask_keys(cfg, &body.to_string());
     if let Some((cached_text, rid)) = check_db_cache(cfg, "google", None, &req_json) {
         let detail = TransDetail { request_json: Some(req_json), ..Default::default() };
         return Ok((cached_text, detail, Some(rid)));
     }
-    let mut res = ureq::post(&url)
+    let mut res = ureq::post(url)
+        .header("X-goog-api-key", &key)
         .send_json(&body)
         .map_err(|e| format!("Google翻訳呼び出し失敗: {e}"))?;
     let v: serde_json::Value =
