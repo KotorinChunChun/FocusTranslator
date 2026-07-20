@@ -235,15 +235,15 @@ pub fn downscale_max(img: &Captured, max_dim: u32) -> Captured {
             for sy in sy0..sy1 {
                 for sx in sx0..sx1 {
                     let s = ((sy * img.width + sx) * 4) as usize;
-                    for c in 0..4 {
-                        acc[c] += img.bgra[s + c] as u32;
+                    for (c, a) in acc.iter_mut().enumerate() {
+                        *a += img.bgra[s + c] as u32;
                     }
                     n += 1;
                 }
             }
             let d = ((oy * nw + ox) * 4) as usize;
-            for c in 0..4 {
-                out[d + c] = (acc[c] / n.max(1)) as u8;
+            for (c, a) in acc.iter().enumerate() {
+                out[d + c] = (a / n.max(1)) as u8;
             }
         }
     }
@@ -285,6 +285,27 @@ pub fn draw_red_frame(img: &mut Captured, rect: RECT, thickness: i32) {
     }
 }
 
+/// BGRA → PNG エンコード(外部OCR/Gemini送信用)
+pub fn to_png(img: &Captured) -> Vec<u8> {
+    let mut rgba = vec![0u8; img.bgra.len()];
+    for i in (0..img.bgra.len()).step_by(4) {
+        rgba[i] = img.bgra[i + 2];
+        rgba[i + 1] = img.bgra[i + 1];
+        rgba[i + 2] = img.bgra[i];
+        rgba[i + 3] = 255;
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, img.width, img.height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        if let Ok(mut writer) = enc.write_header() {
+            let _ = writer.write_image_data(&rgba);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,25 +340,4 @@ mod tests {
         assert_eq!(px(50, 50), [0, 0, 0], "矩形内部は塗り潰さない");
         assert_eq!(px(10, 10), [0, 0, 0], "枠の外は変更しない");
     }
-}
-
-/// BGRA → PNG エンコード(外部OCR/Gemini送信用)
-pub fn to_png(img: &Captured) -> Vec<u8> {
-    let mut rgba = vec![0u8; img.bgra.len()];
-    for i in (0..img.bgra.len()).step_by(4) {
-        rgba[i] = img.bgra[i + 2];
-        rgba[i + 1] = img.bgra[i + 1];
-        rgba[i + 2] = img.bgra[i];
-        rgba[i + 3] = 255;
-    }
-    let mut out = Vec::new();
-    {
-        let mut enc = png::Encoder::new(&mut out, img.width, img.height);
-        enc.set_color(png::ColorType::Rgba);
-        enc.set_depth(png::BitDepth::Eight);
-        if let Ok(mut writer) = enc.write_header() {
-            let _ = writer.write_image_data(&rgba);
-        }
-    }
-    out
 }

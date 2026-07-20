@@ -133,7 +133,7 @@ pub struct Config {
     pub region_hotkey: String,
     /// 既定OCRエンジン: "oneocr" | "win" | "paddle" | "llm"
     pub default_ocr: String,
-    /// 既定翻訳エンジン: "local" | "deepl" | "google" | "gemini"
+    /// 既定翻訳エンジン: "local" | "deepl" | "google" | "llm"
     pub default_translator: String,
     /// 訳先言語 (原文がCJKの場合は自動で "en" へ反転)
     pub target_lang: String,
