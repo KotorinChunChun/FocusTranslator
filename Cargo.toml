@@ -1,6 +1,6 @@
 [package]
 name = "focus-translator"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 
 [dependencies]
@@ -13,6 +13,8 @@ sha2 = "0.10"
 ort = { version = "2.0.0-rc.12", features = ["copy-dylibs", "download-binaries", "ndarray"] }
 tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dependencies.windows]
 version = "0.62.2"
@@ -50,6 +52,7 @@ features = [
     "Win32_System_WinRT_Graphics_Capture",
     "Win32_UI_Accessibility",
     "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",

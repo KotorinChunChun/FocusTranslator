@@ -58,6 +58,8 @@ pub enum WorkerMsg {
     },
     Explanation {
         text: String,
+        /// 実際に解説を生成したLLMプロファイル名 (SPECv0.5.2追補: プロファイル別チップ用)
+        profile: String,
     },
 }
 
@@ -89,6 +91,9 @@ pub struct AppContext {
     pub uia_path: String,
     /// UIAパスの各ノード (ボタン化してオーバーレイに表示。クリックでOCRの代わりに採用)
     pub uia_nodes: Vec<uia::UiaPathNode>,
+    /// uia_nodes をJSON化したもの (SPECv0.5.2追補: ControlType/AutomationId/Name/矩形等を
+    /// 落とさずログDBへ記録するため)
+    pub uia_json: String,
     /// カーソル位置要素のUIA ControlType名 (入力内容ログ用; SPECv0.4.8追補)
     pub control_type: Option<String>,
     /// カーソル位置要素で選択中のテキスト (SPECv0.5追補)。
@@ -105,6 +110,7 @@ impl AppContext {
             exe,
             title: title.unwrap_or_default(),
             uia_path: build_uia_path_log(&uia_nodes),
+            uia_json: uia::nodes_to_json(&uia_nodes),
             uia_nodes,
             control_type,
             selected_text: None,
@@ -204,7 +210,7 @@ fn log_cap(cfg: &Config, mode: &str, ctx: &AppContext, image: Option<&Captured>,
     }
     let crop_rect = extent.rect.map(|r| (r.left, r.top, r.right - r.left, r.bottom - r.top));
     let id = crate::logdb::log_capture(
-        mode, ctx.exe.as_deref(), Some(&ctx.title), Some(&ctx.uia_path), ctx.control_type.as_deref(),
+        mode, ctx.exe.as_deref(), Some(&ctx.title), Some(&ctx.uia_path), Some(&ctx.uia_json), ctx.control_type.as_deref(),
         image, cfg.debug_mode,
         crate::logdb::CaptureExtent {
             full_image: extent.full,
@@ -553,8 +559,15 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
+                let ms = t0.elapsed().as_millis();
                 let capture_id = log_cap(&cfg, "hold", &ctx, None, Extent::none());
-                log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
+                let recog_id = log_recog(&cfg, capture_id, "ocr", &engine, ms, None, Some(&e), None);
+                // OCRエンジン切替チップで再試行できるよう、キャプチャした画像はエラーでも
+                // 保持画像として送っておく (原文は空欄のまま; SPECv0.5.2追補)。
+                post(main, generation, ctx.source_msg(
+                    String::new(), "OCR", Some(engine.clone()), Some(Arc::new(used.img)), false,
+                    (x, y), focus, ms, capture_id, recog_id, Some(Arc::new(used.full)), None,
+                ));
                 post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), clear_source: false });
             }
         }
@@ -846,18 +859,26 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
+                let ms = t0.elapsed().as_millis();
                 let capture_id = log_cap(&cfg, "region", &ctx, None, Extent::none());
-                log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
+                let recog_id = log_recog(&cfg, capture_id, "ocr", &engine, ms, None, Some(&e), None);
+                // OCRエンジン切替チップで再試行できるよう、キャプチャした画像はエラーでも
+                // 保持画像として送っておく (原文は空欄のまま; SPECv0.5.2追補)。
+                let full_img = Arc::new(full);
+                post(main, generation, ctx.source_msg(
+                    String::new(), "OCR", Some(engine.clone()), Some(Arc::new(img)), false, anchor,
+                    ocr::Focus::All, ms, capture_id, recog_id, Some(full_img), Some(img_rect),
+                ));
                 post(main, generation, WorkerMsg::Error { msg: e, anchor, clear_source: false });
             }
         }
     });
 }
 
-/// 解説プロンプトを組み立てる (LLMプロファイル未設定時は None)。
-/// アプリ名・UIAパス等のコンテキストはテンプレートのプレースホルダで埋め込む (SPECv0.4 §7.2)。
-pub fn build_explain_prompt(cfg: &Config, ctx: &crate::config::PromptContext) -> Option<String> {
-    let prof = cfg.active_profile()?;
+/// 指定プロファイル名の解説プロンプトを組み立てる (SPECv0.5.2追補: 解説チップの
+/// プロファイル別ボタン用。指定プロファイルが見つからなければ None)。
+pub fn build_explain_prompt_for(cfg: &Config, profile: &str, ctx: &crate::config::PromptContext) -> Option<String> {
+    let prof = cfg.api_profiles.iter().find(|p| p.name == profile)?;
     Some(cfg.fill_prompt(&prof.explain_prompt, ctx))
 }
 
@@ -866,17 +887,18 @@ pub fn build_explain_prompt(cfg: &Config, ctx: &crate::config::PromptContext) ->
 pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, profile: String, main: isize) {
     std::thread::spawn(move || {
         init_com();
-        // 同一送信プロンプト(input_text)の成功済み解説がDBにあれば、APIを呼ばずそれを使う
-        // (SPECv0.4.8追補: 別の親であっても検索対象。別の親なら同内容を新規に記帳する)。
+        // 同一プロファイル+同一送信プロンプト(input_text)の成功済み解説がDBにあれば、
+        // APIを呼ばずそれを使う (SPECv0.5.2追補: プロファイル別チップのため、テンプレートが
+        // 同一で input_text が一致していても別プロファイルのキャッシュは流用しない)。
         if cfg.log_enabled
-            && let Some((cached_rid, cached_profile, cached_text)) = crate::logdb::find_cached_explanation(&prompt)
+            && let Some((cached_rid, cached_text)) = crate::logdb::find_cached_explanation_for_profile(&profile, &prompt)
         {
             if cached_rid != recog_id {
                 crate::logdb::log_explanation(
-                    recog_id, &cached_profile, 0, &prompt, Some(&cached_text), None, Some(0), Some(0),
+                    recog_id, &profile, 0, &prompt, Some(&cached_text), None, Some(0), Some(0),
                 );
             }
-            post(main, generation, WorkerMsg::Explanation { text: cached_text });
+            post(main, generation, WorkerMsg::Explanation { text: cached_text, profile });
             return;
         }
         let t0 = Instant::now();
@@ -908,7 +930,7 @@ pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, prof
         }
         match result {
             Ok(res) => {
-                post(main, generation, WorkerMsg::Explanation { text: res.text });
+                post(main, generation, WorkerMsg::Explanation { text: res.text, profile: prof.name.clone() });
             }
             Err(e) => {
                 post(main, generation, WorkerMsg::Error {

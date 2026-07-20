@@ -245,6 +245,28 @@ pub fn make_font(size: i32, bold: bool) -> HFONT {
     }
 }
 
+/// 等幅フォント (解説Markdownのコードブロック表示用。SPECv0.5.2追補)
+pub fn make_mono_font(size: i32, bold: bool) -> HFONT {
+    unsafe {
+        CreateFontW(
+            -size,
+            0,
+            0,
+            0,
+            if bold { FW_BOLD.0 as i32 } else { FW_NORMAL.0 as i32 },
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            FONT_OUTPUT_PRECISION(0),
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            DEFAULT_PITCH.0.into(),
+            w!("Consolas"),
+        )
+    }
+}
+
 /// 指定IDのチェックボックスの状態を設定する
 pub fn check_set(parent: HWND, id: i32, checked: bool) {
     unsafe {

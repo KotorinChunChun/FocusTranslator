@@ -304,16 +304,19 @@ fn first_meaningful_line(s: &str) -> String {
 }
 
 /// パスノードの種別。祖先ノード(パス階層)か、末端ノードの子孫テキストを連結した合成ノードか。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum NodeKind {
     /// 祖先要素 (AutomationId/Name/ControlType のパス階層)
+    #[default]
     Ancestor,
     /// カーソル直下の末端要素の子孫テキストをすべて連結した合成ノード
     ChildrenConcat,
 }
 
 /// UIAパスの1ノード。ボタン化・クリック時のテキスト採用・ログ記録に使う。
-#[derive(Clone, Debug)]
+/// SPECv0.5.2追補: 取得元プロパティを落とさずJSONで記録するため各値を保持する
+/// (ChildrenConcatノードは合成ノードのため control_type 等は空のまま)。
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct UiaPathNode {
     /// ボタン表示用の短い識別ラベル (AutomationId/Name/ControlType)。
     /// text が空の場合のフォールバック表示にも使う。
@@ -321,7 +324,23 @@ pub struct UiaPathNode {
     /// このノードから抽出したテキスト (クリック時に原文として採用する全文)
     pub text: String,
     pub kind: NodeKind,
+    /// UIA ControlType の表示名 (例: "Edit", "Pane")
+    #[serde(default)]
+    pub control_type: String,
+    /// UIA AutomationId
+    #[serde(default)]
+    pub automation_id: String,
+    /// UIA Name プロパティ
+    #[serde(default)]
+    pub name: String,
+    /// UIA ClassName プロパティ
+    #[serde(default)]
+    pub class_name: String,
+    /// スクリーン座標での矩形 (left, top, width, height)
+    #[serde(default)]
+    pub rect: Option<(i32, i32, i32, i32)>,
 }
+
 
 /// 子孫走査の上限(パフォーマンスと無関係テキスト混入の抑制のため)
 const DESC_MAX_DEPTH: u32 = 6;
@@ -352,7 +371,17 @@ pub fn path_nodes_at_point(x: i32, y: i32) -> Vec<UiaPathNode> {
             let name = element_node_name(&e);
             if !name.is_empty() {
                 let text = element_own_text(&e);
-                path.push(UiaPathNode { label: name, text, kind: NodeKind::Ancestor });
+                let (control_type, automation_id, elem_name, class_name, rect) = element_props(&e);
+                path.push(UiaPathNode {
+                    label: name,
+                    text,
+                    kind: NodeKind::Ancestor,
+                    control_type,
+                    automation_id,
+                    name: elem_name,
+                    class_name,
+                    rect,
+                });
             }
             cur = walker.GetParentElement(&e).ok();
         }
@@ -368,10 +397,17 @@ pub fn path_nodes_at_point(x: i32, y: i32) -> Vec<UiaPathNode> {
                 label: "子要素".into(),
                 text: lines.join("\n"),
                 kind: NodeKind::ChildrenConcat,
+                ..Default::default()
             });
         }
         path
     }
+}
+
+/// UIAパスノード列をJSON文字列へシリアライズする (SPECv0.5.2追補: ログDB記録用)。
+/// 失敗時(通常は起きない)は空配列文字列を返す。
+pub fn nodes_to_json(nodes: &[UiaPathNode]) -> String {
+    serde_json::to_string(nodes).unwrap_or_else(|_| "[]".into())
 }
 
 /// 要素自身のテキストを抽出する。TextPattern があれば全文、無ければ ValuePattern、
@@ -504,6 +540,23 @@ fn control_type_label(id: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID)
         UIA_SemanticZoomControlTypeId => "SemanticZoom",
         UIA_AppBarControlTypeId => "AppBar",
         _ => "Unknown",
+    }
+}
+
+/// element_props() の戻り値: (ControlType表示名, AutomationId, Name, ClassName,
+/// スクリーン矩形(left,top,w,h))
+type ElemProps = (String, String, String, String, Option<(i32, i32, i32, i32)>);
+
+/// SPECv0.5.2追補: JSON記録用にノードのUIAプロパティ一式を取得する。
+/// RuntimeIdはセッション限りの値で保存価値が低いため取得しない。
+fn element_props(e: &IUIAutomationElement) -> ElemProps {
+    unsafe {
+        let control_type = control_type_name(e).unwrap_or_default();
+        let automation_id = e.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();
+        let name = e.CurrentName().map(|s| s.to_string()).unwrap_or_default();
+        let class_name = e.CurrentClassName().map(|s| s.to_string()).unwrap_or_default();
+        let rect = e.CurrentBoundingRectangle().ok().map(|r| (r.left, r.top, r.right - r.left, r.bottom - r.top));
+        (control_type, automation_id, name, class_name, rect)
     }
 }
 

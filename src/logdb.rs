@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
@@ -96,6 +96,7 @@ fn init_db() -> Result<Connection, String> {
             app_exe TEXT,
             app_title TEXT,
             uia_path TEXT,
+            uia_json TEXT,
             control_type TEXT,
             image_path TEXT,
             image_w INTEGER,
@@ -254,6 +255,7 @@ pub fn log_capture(
     app_exe: Option<&str>,
     app_title: Option<&str>,
     uia_path: Option<&str>,
+    uia_json: Option<&str>,
     control_type: Option<&str>,
     image: Option<&crate::capture::Captured>,
     debug: bool,
@@ -261,9 +263,9 @@ pub fn log_capture(
 ) -> Option<i64> {
     with_conn_opt(|guard| {
         if let Err(e) = guard.execute(
-            "INSERT INTO captures (ts_ms, mode, app_exe, app_title, uia_path, control_type, image_path, image_w, image_h)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, NULL)",
-            rusqlite::params![now_ms(), mode, app_exe, app_title, uia_path, control_type],
+            "INSERT INTO captures (ts_ms, mode, app_exe, app_title, uia_path, uia_json, control_type, image_path, image_w, image_h)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL)",
+            rusqlite::params![now_ms(), mode, app_exe, app_title, uia_path, uia_json, control_type],
         ) {
             util::app_log(&format!("log_capture failed: {e}"));
             return None;
@@ -357,21 +359,37 @@ pub fn find_cached_translation(engine: &str, profile: Option<&str>, request_json
     })
 }
 
-/// 同一 input_text (送信プロンプト全文) の成功済み解説結果があれば、その
-/// (recognition_id, llm_profile, explanation_text) を返す (SPECv0.4.8追補: 解説APIキャッシュ)。
-/// 最新のものを優先する。
-pub fn find_cached_explanation(input_text: &str) -> Option<(i64, String, String)> {
+/// 同一プロファイル+同一 input_text の成功済み解説結果があれば (recognition_id, explanation_text)
+/// を返す (SPECv0.5.2追補: 解説チップのプロファイル別実行で、テンプレートが同一で input_text が
+/// 一致していても別プロファイルのキャッシュを誤って流用しないための厳密版)。
+pub fn find_cached_explanation_for_profile(profile: &str, input_text: &str) -> Option<(i64, String)> {
     with_conn_opt(|guard| {
         guard
             .query_row(
-                "SELECT recognition_id, llm_profile, explanation_text FROM explanations
-                 WHERE input_text = ?1 AND success = 1 AND explanation_text IS NOT NULL
+                "SELECT recognition_id, explanation_text FROM explanations
+                 WHERE input_text = ?1 AND llm_profile = ?2 AND success = 1 AND explanation_text IS NOT NULL
                  ORDER BY ts_ms DESC LIMIT 1",
-                rusqlite::params![input_text],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                rusqlite::params![input_text, profile],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .ok()
     })
+}
+
+/// 指定 recognition の指定プロファイルでの最新の成功済み解説文を取得する
+/// (SPECv0.5.2追補: 解説チップのプロファイル別「現在の解説」表示・キャッシュ即時表示用)。
+pub fn latest_explanation_for_profile(recognition_id: i64, profile: &str) -> Option<String> {
+    with_conn_opt(|guard| {
+        guard
+            .query_row(
+                "SELECT explanation_text FROM explanations
+                 WHERE recognition_id=?1 AND llm_profile=?2 AND success=1 AND explanation_text IS NOT NULL
+                 ORDER BY ts_ms DESC LIMIT 1",
+                rusqlite::params![recognition_id, profile],
+                |r| r.get(0),
+            )
+            .ok()
+    }).flatten()
 }
 
 /// 翻訳ログを記録する。
@@ -476,6 +494,8 @@ pub struct CaptureRow {
     pub app_exe: Option<String>,
     pub app_title: Option<String>,
     pub uia_path: Option<String>,
+    /// uia_path のノード群のJSON表現 (SPECv0.5.2追補: ControlType/AutomationId/Name/矩形等)
+    pub uia_json: Option<String>,
     pub control_type: Option<String>,
     pub image_path: Option<String>,
     pub image_w: Option<i64>,
@@ -555,19 +575,20 @@ fn map_capture_row(r: &rusqlite::Row) -> rusqlite::Result<CaptureRow> {
         app_exe: r.get(3)?,
         app_title: r.get(4)?,
         uia_path: r.get(5)?,
-        control_type: r.get(6)?,
-        image_path: r.get(7)?,
-        image_w: r.get(8)?,
-        image_h: r.get(9)?,
-        full_image_path: r.get(10)?,
-        full_image_w: r.get(11)?,
-        full_image_h: r.get(12)?,
-        crop_x: r.get(13)?,
-        crop_y: r.get(14)?,
-        crop_w: r.get(15)?,
-        crop_h: r.get(16)?,
-        focus_kind: r.get(17)?,
-        focus_y: r.get(18)?,
+        uia_json: r.get(6)?,
+        control_type: r.get(7)?,
+        image_path: r.get(8)?,
+        image_w: r.get(9)?,
+        image_h: r.get(10)?,
+        full_image_path: r.get(11)?,
+        full_image_w: r.get(12)?,
+        full_image_h: r.get(13)?,
+        crop_x: r.get(14)?,
+        crop_y: r.get(15)?,
+        crop_w: r.get(16)?,
+        crop_h: r.get(17)?,
+        focus_kind: r.get(18)?,
+        focus_y: r.get(19)?,
     })
 }
 
@@ -629,7 +650,7 @@ impl ExplainRow {
     }
 }
 
-const CAPTURE_COLS: &str = "id, ts_ms, mode, app_exe, app_title, uia_path, control_type, image_path, image_w, image_h,
+const CAPTURE_COLS: &str = "id, ts_ms, mode, app_exe, app_title, uia_path, uia_json, control_type, image_path, image_w, image_h,
     full_image_path, full_image_w, full_image_h, crop_x, crop_y, crop_w, crop_h, focus_kind, focus_y";
 
 /// 入力履歴を新しい順に検索取得。query は配下の原文/訳文の部分一致、app_exe は完全一致。
@@ -884,7 +905,7 @@ mod tests {
 
         // 4工程ツリー: capture → recognition → translation / explanation
         let cid = log_capture(
-            "hold", Some("game.exe"), Some("Game Window"), Some("Root > Panel"), Some("Edit"), None, false,
+            "hold", Some("game.exe"), Some("Game Window"), Some("Root > Panel"), Some("[]"), Some("Edit"), None, false,
             CaptureExtent::default(),
         )
         .expect("capture id");
@@ -942,11 +963,12 @@ mod tests {
         );
         assert_eq!(find_cached_translation("llm", Some("prof1"), "{\"req\":no-match}"), None);
         assert_eq!(
-            find_cached_explanation("prompt text"),
-            Some((rid, "prof1".to_string(), "解説文".to_string())),
-            "同一input_textの成功済み解説がヒットする(失敗ログは無視)"
+            find_cached_explanation_for_profile("prof1", "prompt text"),
+            Some((rid, "解説文".to_string())),
+            "同一プロファイル+同一input_textの成功済み解説がヒットする(失敗ログは無視)"
         );
-        assert_eq!(find_cached_explanation("no-match"), None);
+        assert_eq!(find_cached_explanation_for_profile("prof2", "prompt text"), None, "プロファイルが違えばヒットしない");
+        assert_eq!(find_cached_explanation_for_profile("prof1", "no-match"), None);
 
         // CASCADE削除: recognition を消すと配下の翻訳・解説も消える
         delete_recognition(rid);
@@ -962,7 +984,7 @@ mod tests {
         // ローテーション: captures 件数で絞り、配下はCASCADE
         let mut last_rid = 0;
         for i in 0..4 {
-            let c = log_capture("hold", None, None, None, None, None, false, CaptureExtent::default()).unwrap();
+            let c = log_capture("hold", None, None, None, None, None, None, false, CaptureExtent::default()).unwrap();
             last_rid = log_recognition(c, "ocr", "win", 100, Some(&format!("line{i}")), None, None).unwrap();
         }
         rotate(2);

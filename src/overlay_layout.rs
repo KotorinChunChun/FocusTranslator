@@ -6,7 +6,7 @@ use crate::overlay::{
     EditTool, OverlayContent, CHIP_CLOSE, CHIP_COPY, CHIP_COPY_INFO,
     CHIP_COPY_SRC, CHIP_COPY_TR, CHIP_EDIT_APPLY, CHIP_EDIT_CANCEL, CHIP_EDIT_ERASE,
     CHIP_EDIT_LASSO, CHIP_EDIT_RECT, CHIP_EDIT_RESET, CHIP_EDIT_UNDO, CHIP_EXPLAIN,
-    CHIP_EXPLAIN_QUICK, CHIP_IMAGE, CHIP_OCR_BASE, CHIP_OPEN_LOG, CHIP_PIN, CHIP_SETTINGS,
+    CHIP_EXPLAIN_BASE, CHIP_IMAGE, CHIP_OCR_BASE, CHIP_OPEN_LOG, CHIP_PIN, CHIP_SETTINGS,
     CHIP_SWAP_LANG, CHIP_TR_BASE, CHIP_UIA_NODE_BASE, CHIP_EDIT_SRC, CHIP_EDIT_TR, CHIP_EDIT_EXP,
     CHIP_SELECTED_TEXT, CHIP_EDIT_RESTORE_FULL,
 };
@@ -137,7 +137,7 @@ pub const CHIP_H: i32 = 24;
 pub const CLOSE_SIZE: i32 = 20;
 
 pub enum Item {
-    Text { rect: RECT, text: String, size: i32, color: u32, bold: bool },
+    Text { rect: RECT, text: String, size: i32, color: u32, bold: bool, mono: bool },
     Chip { rect: RECT, label: String, id: usize, active: bool, enabled: bool },
 }
 
@@ -164,8 +164,13 @@ const EDIT_PREVIEW_MAX_H: i32 = 460;
 pub use crate::ui_helpers::make_font;
 
 pub fn measure(hdc: HDC, text: &str, size: i32, bold: bool, maxw: i32) -> (i32, i32) {
+    measure_font(hdc, text, size, bold, false, maxw)
+}
+
+/// measure() の等幅フォント版 (解説Markdownのコードブロック用。SPECv0.5.2追補)
+fn measure_font(hdc: HDC, text: &str, size: i32, bold: bool, mono: bool, maxw: i32) -> (i32, i32) {
     unsafe {
-        let font = make_font(size, bold);
+        let font = if mono { crate::ui_helpers::make_mono_font(size, bold) } else { make_font(size, bold) };
         let old = SelectObject(hdc, HGDIOBJ(font.0));
         let mut wide: Vec<u16> = text.encode_utf16().collect();
         if wide.is_empty() {
@@ -204,6 +209,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 size: FONT_HEADING,
                 color: thm.status,
                 bold: false,
+                mono: false,
             });
             y += th + PAD;
             need_w = need_w.max(tw + PAD * 2 + 4);
@@ -227,6 +233,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 size: FONT_HEADING,
                 color,
                 bold: false,
+                mono: false,
             });
             
             // チップ全体の幅を計算
@@ -336,6 +343,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 size: FONT_HEADING,
                 color: thm.status,
                 bold: false,
+                mono: false,
             });
         }
         let sys_row_h = row_h.max(sys_text_h);
@@ -388,6 +396,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                     size: FONT_INFO,
                     color: thm.text,
                     bold: false,
+                    mono: false,
                 });
                 app_row_cap_btn = Some((cap_w, sel_w, y));
                 need_w = need_w.max(PAD + tw + 12 + btns_w + PANEL_MARGIN + 6);
@@ -429,6 +438,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                             size: FONT_CHIP,
                             color: thm.label,
                             bold: false,
+                            mono: false,
                         });
                         x += sep_w + 6;
                     }
@@ -484,7 +494,9 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         }
 
         // 【OCR結果】(UIA経路の場合はOCRを行わないため専用の見出しにする): コピーは左端
-        if !content.source.is_empty() {
+        // 原文が空でも、保持画像がある(=直近のOCRが失敗しただけ)ならブロック自体は表示し続け、
+        // OCRエンジン切替チップで再試行できるようにする (SPECv0.5.2追補)。
+        if !content.source.is_empty() || content.has_image {
             let block_start = y;
             let heading = if content.via_uia {
                 "【画面読み取り結果 (UIA取得)】".to_string()
@@ -512,6 +524,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 size: FONT_BODY,
                 color: thm.text,
                 bold: false,
+                mono: false,
             });
             y += text_h + 6;
             need_w = need_w.max(sw + PAD * 2 + 4);
@@ -561,7 +574,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             );
             y += hh + 4;
 
-            let (tw, th) = measure(hdc, t, FONT_BODY, true, MAXW);
+            let (tw, th) = measure(hdc, t, FONT_BODY, false, MAXW);
             let text_h = th.max(24);
             let rect = RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h };
             items.push(Item::Text {
@@ -569,7 +582,8 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 text: t.clone(),
                 size: FONT_BODY,
                 color: thm.text,
-                bold: true,
+                bold: false,
+                mono: false,
             });
             y += text_h + 8;
             need_w = need_w.max(tw + PAD * 2 + 4);
@@ -623,44 +637,126 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 size: FONT_HEADING,
                 color: thm.status,
                 bold: false,
+                mono: false,
             });
             y += th + 8;
             need_w = need_w.max(tw + PAD * 2 + 4);
         } else if let Some(expl) = &content.explanation {
-            let (tw, th) = measure(hdc, expl, FONT_BODY, false, MAXW);
-            let text_h = th.max(20);
-            let rect = RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h };
-            items.push(Item::Text {
-                rect,
-                text: expl.clone(),
-                size: FONT_BODY,
-                color: thm.text,
-                bold: false,
-            });
-            y += text_h + 8;
-            need_w = need_w.max(tw + PAD * 2 + 4);
+            // Markdownをブロック単位で解析し、見出し/箇条書き/コードブロック/強調段落/水平線を
+            // それぞれのスタイルで描画する (SPECv0.5.2追補)。コピーは常にMarkdown原文を扱う。
+            for b in crate::markdown::parse(expl) {
+                match b.kind {
+                    crate::markdown::BlockKind::Rule => {
+                        let text = "─".repeat(40);
+                        let (tw, th) = measure(hdc, &text, FONT_INFO, false, MAXW);
+                        items.push(Item::Text {
+                            rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
+                            text,
+                            size: FONT_INFO,
+                            color: thm.panel_border,
+                            bold: false,
+                            mono: false,
+                        });
+                        y += th + 6;
+                        need_w = need_w.max(tw + PAD * 2 + 4);
+                    }
+                    crate::markdown::BlockKind::Heading(level) => {
+                        let size = match level {
+                            1 => FONT_BODY + 4,
+                            2 => FONT_BODY + 2,
+                            _ => FONT_BODY,
+                        };
+                        let (tw, th) = measure(hdc, &b.text, size, true, MAXW);
+                        items.push(Item::Text {
+                            rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
+                            text: b.text,
+                            size,
+                            color: thm.text,
+                            bold: true,
+                            mono: false,
+                        });
+                        y += th + 6;
+                        need_w = need_w.max(tw + PAD * 2 + 4);
+                    }
+                    crate::markdown::BlockKind::ListItem { depth } => {
+                        let indent = PAD + (depth as i32) * 16;
+                        let item_maxw = (MAXW - (depth as i32) * 16).max(80);
+                        let (tw, th) = measure(hdc, &b.text, FONT_BODY, b.bold, item_maxw);
+                        let text_h = th.max(20);
+                        items.push(Item::Text {
+                            rect: RECT { left: indent, top: y, right: indent + item_maxw, bottom: y + text_h },
+                            text: b.text,
+                            size: FONT_BODY,
+                            color: thm.text,
+                            bold: b.bold,
+                            mono: false,
+                        });
+                        y += text_h + 4;
+                        need_w = need_w.max(indent + tw + PAD + 4);
+                    }
+                    crate::markdown::BlockKind::CodeBlock => {
+                        let indent = PAD + 8;
+                        let code_maxw = MAXW - 8;
+                        let (tw, th) = measure_font(hdc, &b.text, FONT_INFO, false, true, code_maxw);
+                        let text_h = th.max(16);
+                        items.push(Item::Text {
+                            rect: RECT { left: indent, top: y, right: indent + code_maxw, bottom: y + text_h },
+                            text: b.text,
+                            size: FONT_INFO,
+                            color: thm.label,
+                            bold: false,
+                            mono: true,
+                        });
+                        y += text_h + 8;
+                        need_w = need_w.max(indent + tw + PAD + 4);
+                    }
+                    crate::markdown::BlockKind::Paragraph => {
+                        let (tw, th) = measure(hdc, &b.text, FONT_BODY, b.bold, MAXW);
+                        let text_h = th.max(20);
+                        items.push(Item::Text {
+                            rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h },
+                            text: b.text,
+                            size: FONT_BODY,
+                            color: thm.text,
+                            bold: b.bold,
+                            mono: false,
+                        });
+                        y += text_h + 8;
+                        need_w = need_w.max(tw + PAD * 2 + 4);
+                    }
+                }
+            }
         }
 
-        // 操作チップ: 解説 / プロンプト編集
-        let mut x = PAD;
-        let ops: &[(&str, usize)] = &[
-            ("解説", CHIP_EXPLAIN_QUICK),
-            ("解説プロンプトを編集して送信", CHIP_EXPLAIN),
-        ];
-        for (lab, id) in ops {
+        // 解説チップ: OCR/翻訳と同様、呼び出し可能なLLMプロファイル1つにつき1ボタン (SPECv0.5.2追補)。
+        // クリックしたプロファイルの既定解説プロンプトをそのまま送信する。
+        let explain_chip_y = y;
+        chip_row(
+            &mut items,
+            &mut y,
+            &content.explain_keys,
+            &content.explain_labels,
+            &content.cur_explain_chip_key,
+            &content.explain_enabled,
+            CHIP_EXPLAIN_BASE,
+            &mut need_w,
+        );
+
+        // プロンプトを編集してから送信するボタン: プロファイルチップと同じ行の右端に固定配置する
+        {
+            let lab = "解説プロンプトを編集して送信";
             let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
             let w = cw + 20;
+            let right = PAD + MAXW;
             items.push(Item::Chip {
-                rect: RECT { left: x, top: y, right: x + w, bottom: y + CHIP_H },
+                rect: RECT { left: right - w, top: explain_chip_y, right, bottom: explain_chip_y + CHIP_H },
                 label: lab.to_string(),
-                id: *id,
+                id: CHIP_EXPLAIN,
                 active: false,
                 enabled: true,
             });
-            x += w + 6;
+            need_w = need_w.max(MAXW + PAD);
         }
-        need_w = need_w.max(x + PAD - 6);
-        y += CHIP_H + 6;
 
         panel_spans.push((block_start, y, thm.accent_explain));
         y += 6;
@@ -686,9 +782,10 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 if let Item::Chip { id, enabled, .. } = item {
                     let forbidden = *id < CHIP_OCR_BASE + engine::OCR_KEYS.len()
                         || (*id >= CHIP_TR_BASE && *id < CHIP_COPY)
+                        || (*id >= CHIP_EXPLAIN_BASE && *id < CHIP_EXPLAIN_BASE + content.explain_keys.len())
                         || matches!(
                             *id,
-                            CHIP_EXPLAIN | CHIP_EXPLAIN_QUICK | CHIP_SWAP_LANG
+                            CHIP_EXPLAIN | CHIP_SWAP_LANG
                                 | CHIP_EDIT_SRC | CHIP_EDIT_TR | CHIP_EDIT_EXP | CHIP_SELECTED_TEXT
                         )
                         || *id >= CHIP_UIA_NODE_BASE;

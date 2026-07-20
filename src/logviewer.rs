@@ -955,6 +955,35 @@ fn on_cap_selected(idx: usize) {
         && !p.is_empty() {
             d.push_str(&format!("\n【UIAパス】\n{p}\n"));
         }
+    if let Some(j) = &cap.uia_json
+        && !j.is_empty()
+        && let Ok(nodes) = serde_json::from_str::<Vec<crate::uia::UiaPathNode>>(j)
+        && !nodes.is_empty()
+    {
+        d.push_str("\n【UIAノード詳細】\n");
+        for n in &nodes {
+            let kind = match n.kind {
+                crate::uia::NodeKind::Ancestor => "祖先",
+                crate::uia::NodeKind::ChildrenConcat => "子要素連結",
+            };
+            d.push_str(&format!("- [{kind}] label={}\n", n.label));
+            if !n.control_type.is_empty() {
+                d.push_str(&format!("    ControlType: {}\n", n.control_type));
+            }
+            if !n.automation_id.is_empty() {
+                d.push_str(&format!("    AutomationId: {}\n", n.automation_id));
+            }
+            if !n.name.is_empty() {
+                d.push_str(&format!("    Name: {}\n", n.name));
+            }
+            if !n.class_name.is_empty() {
+                d.push_str(&format!("    ClassName: {}\n", n.class_name));
+            }
+            if let Some((x, y, w, h)) = n.rect {
+                d.push_str(&format!("    Rect: ({x}, {y}, {w}x{h})\n"));
+            }
+        }
+    }
     set_edit(IDC_CAP_DETAIL, &d);
 
     // 画像デコード (OCR対象画像 / 対象アプリ全体画像。SPECv0.5.2追補)
@@ -1828,7 +1857,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     } else {
                         // 取得元アプリ名は一律【FocusTranslator】として記録する
                         let cid = logdb::log_capture(
-                            "manual", Some(MANUAL_APP_NAME), Some(MANUAL_APP_NAME), None, None, None, false,
+                            "manual", Some(MANUAL_APP_NAME), Some(MANUAL_APP_NAME), None, None, None, None, false,
                             logdb::CaptureExtent::default(),
                         );
                         if let Some(cid) = cid {

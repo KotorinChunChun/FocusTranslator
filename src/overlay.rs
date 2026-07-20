@@ -47,8 +47,6 @@ pub const CHIP_SETTINGS: usize = 105;
 pub const CHIP_PIN: usize = 106;
 pub const CHIP_IMAGE: usize = 107;
 pub const CHIP_COPY_INFO: usize = 108;
-/// 解説(即時): 既定プロンプトを編集ダイアログ無しでそのまま送信する
-pub const CHIP_EXPLAIN_QUICK: usize = 109;
 /// 翻訳方向の反転 (source_lang ⇄ target_lang)
 pub const CHIP_SWAP_LANG: usize = 110;
 /// ログビューアを開く
@@ -88,6 +86,9 @@ pub const CHIP_SELECTED_TEXT: usize = 126;
 /// これまでの矩形を選択状態にする (SPECv0.5.2追補)。全体画像を保持していないセッションでは
 /// 非表示 (has_full == false)。
 pub const CHIP_EDIT_RESTORE_FULL: usize = 127;
+/// 解説のLLMプロファイル別ボタン基点 (SPECv0.5.2追補: OCR/翻訳チップと同様、
+/// 呼び出し可能なプロファイル1つにつき1ボタン。CHIP_UIA_NODE_BASE(200)未満に収める)
+pub const CHIP_EXPLAIN_BASE: usize = 150;
 
 /// テキストのインライン編集対象ブロック
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -179,6 +180,13 @@ pub struct OverlayContent {
     pub tr_engine_detail: Option<String>,
     /// 解説を生成するLLMの表示名 (解説結果ブロックの見出し用。例: "Gemini")
     pub explain_engine: String,
+    /// 解説チップに並べる呼び出し可能なLLMプロファイル名一覧 (SPECv0.5.2追補:
+    /// OCR/翻訳と同様にプロファイルごとにボタン化する)
+    pub explain_keys: Vec<String>,
+    pub explain_labels: Vec<String>,
+    pub explain_enabled: Vec<bool>,
+    /// 現在の解説を生成したプロファイル名 (チップのアクティブ表示用)
+    pub cur_explain_chip_key: String,
     /// 直近の認識が UIA 経路(OCR不要)で得られたか
     pub via_uia: bool,
     pub ocr_keys: Vec<String>,
@@ -1054,11 +1062,15 @@ fn paint(hwnd: HWND) {
         LAYOUT.with(|l| {
             for item in &l.borrow().items {
                 match item {
-                    Item::Text { rect, text, size, color, bold } => {
+                    Item::Text { rect, text, size, color, bold, mono } => {
                         let mut r = *rect;
                         r.top -= sy;
                         r.bottom -= sy;
-                        let font = overlay_layout::make_font(*size, *bold);
+                        let font = if *mono {
+                            crate::ui_helpers::make_mono_font(*size, *bold)
+                        } else {
+                            overlay_layout::make_font(*size, *bold)
+                        };
                         let old = SelectObject(mem, HGDIOBJ(font.0));
                         SetTextColor(mem, COLORREF(*color));
                         let mut wide: Vec<u16> = text.encode_utf16().collect();
