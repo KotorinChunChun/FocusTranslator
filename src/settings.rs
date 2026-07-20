@@ -117,9 +117,9 @@ const WM_LLAMA_MMPROJ_PROGRESS: u32 = WM_APP + 17;
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
 /// 左下欄外のバージョン情報 (SPECv0.5.2追補)
-const APP_VERSION_LABEL: &str = "なにこれ - FocusTransrator";
+const APP_VERSION_LABEL: &str = "なにこれ - FocusTranslator";
 const APP_UPDATE_DATE: &str = "2026/7/20";
-const GITHUB_RELEASES_URL: &str = "https://github.com/KotorinChunChun/FocusTransrator/releases";
+const GITHUB_RELEASES_URL: &str = "https://github.com/KotorinChunChun/FocusTranslator";
 
 const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
 const OCR_KEYS: [&str; 4] = ["oneocr", "win", "paddle", "llm"];
