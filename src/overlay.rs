@@ -84,6 +84,10 @@ pub const CHIP_FORCE_PIN: usize = 125;
 /// 選択中の文字列を読み取り結果として(再)採用する (SPECv0.5追補)。
 /// 「キャプチャ画像」チップの左に配置。選択が検出できていないときは無効。
 pub const CHIP_SELECTED_TEXT: usize = 126;
+/// アプリケーション全体画像の復元: 作業中画像を対象アプリ全体のキャプチャ画像へ差し替え、
+/// これまでの矩形を選択状態にする (SPECv0.5.2追補)。全体画像を保持していないセッションでは
+/// 非表示 (has_full == false)。
+pub const CHIP_EDIT_RESTORE_FULL: usize = 127;
 
 /// テキストのインライン編集対象ブロック
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -127,6 +131,9 @@ pub struct EditLayoutInfo {
     pub zoom: f32,
     /// 元に戻せる履歴があるか (EditState.undo から直接算出する)
     pub has_undo: bool,
+    /// 「アプリケーション全体画像の復元」ボタンを表示できるか (全体画像を保持しているか。
+    /// SPECv0.5.2追補)
+    pub has_full: bool,
 }
 
 /// 画像編集の実データ(選択中の画像・ドラッグ中の座標)。マウス操作のたびに直接更新する。
@@ -145,8 +152,13 @@ struct EditState {
     resize_handle: Option<Handle>,
     /// マウスホイールでのズーム倍率
     zoom: f32,
-    /// 「選択範囲を残す/消す」適用前の画像履歴 (DBとは別にメモリ上でのみ、最大10件)
-    undo: Vec<Arc<Captured>>,
+    /// 「選択範囲を残す/消す」「全体画像の復元」適用前の (画像, rect_in_full) 履歴
+    /// (DBとは別にメモリ上でのみ、最大10件)
+    undo: Vec<(Arc<Captured>, Option<RECT>)>,
+    /// 対象アプリ全体のキャプチャ画像 (「全体画像の復元」ボタン用。無ければボタン非表示)
+    full: Option<Arc<Captured>>,
+    /// full 内での img の位置 (物理ピクセル座標)。「選択範囲を残す」のたびに補正する。
+    rect_in_full: Option<RECT>,
 }
 
 #[derive(Default, Clone)]
@@ -222,8 +234,9 @@ thread_local! {
     static EDIT: RefCell<Option<EditState>> = const { RefCell::new(None) };
 }
 
-/// 画像編集モードを開始する
-pub fn enter_edit_mode(img: Arc<Captured>) {
+/// 画像編集モードを開始する。full/rect_in_full はそれぞれ対象アプリ全体のキャプチャ画像と、
+/// その内での img の位置 (無ければ「全体画像の復元」ボタンは使えない。SPECv0.5.2追補)。
+pub fn enter_edit_mode(img: Arc<Captured>, full: Option<Arc<Captured>>, rect_in_full: Option<RECT>) {
     EDIT.with(|e| {
         *e.borrow_mut() = Some(EditState {
             img,
@@ -234,6 +247,8 @@ pub fn enter_edit_mode(img: Arc<Captured>) {
             resize_handle: None,
             zoom: 1.0,
             undo: Vec::new(),
+            full,
+            rect_in_full,
         });
     });
 }
@@ -300,9 +315,9 @@ pub fn refresh(hwnd: HWND) {
     update(hwnd, content);
 }
 
-/// 直前の画像をUndo履歴へ積む (最大10件、超過分は最古を破棄)
-fn push_undo(st: &mut EditState, img: Arc<Captured>) {
-    st.undo.push(img);
+/// 直前の (画像, rect_in_full) をUndo履歴へ積む (最大10件、超過分は最古を破棄)
+fn push_undo(st: &mut EditState, img: Arc<Captured>, rect_in_full: Option<RECT>) {
+    st.undo.push((img, rect_in_full));
     if st.undo.len() > 10 {
         st.undo.remove(0);
     }
@@ -317,17 +332,28 @@ fn clear_selection_state(st: &mut EditState) {
 }
 
 /// 「選択範囲を残す」(旧「切り抜き」): 選択範囲でクロップし作業中画像を差し替える。
-/// 編集モードは終了しない。失敗時はユーザー向けメッセージを返す。
+/// rect_in_full (全体画像内での img の位置) も選択範囲の分だけ合成補正する
+/// (SPECv0.5.2追補: ログ・編集復元での位置ズレを防ぐ)。編集モードは終了しない。
+/// 失敗時はユーザー向けメッセージを返す。
 pub fn apply_crop_keep_selection() -> Result<(), String> {
     let Some((img, sel)) = take_edit_selection() else {
         return Err("選択範囲がありません".into());
+    };
+    let Some((l, t, r, b)) = image_edit::selection_bounds_clamped(&img, &sel) else {
+        return Err("選択範囲が小さすぎます".into());
     };
     let Some(cropped) = image_edit::apply(&img, &sel) else {
         return Err("選択範囲が小さすぎます".into());
     };
     EDIT.with(|e| {
         if let Some(st) = e.borrow_mut().as_mut() {
-            push_undo(st, img);
+            push_undo(st, img, st.rect_in_full);
+            st.rect_in_full = st.rect_in_full.map(|rf| RECT {
+                left: rf.left + l,
+                top: rf.top + t,
+                right: rf.left + r,
+                bottom: rf.top + b,
+            });
             st.img = Arc::new(cropped);
             clear_selection_state(st);
             st.zoom = 1.0; // サイズが変わるため新しい画像に合わせて再フィット
@@ -337,7 +363,8 @@ pub fn apply_crop_keep_selection() -> Result<(), String> {
 }
 
 /// 「選択範囲を消す」: 選択範囲の内側を隣接色で塗りつぶす(サイズは変わらない)。
-/// 編集モードは終了しない。失敗時はユーザー向けメッセージを返す。
+/// サイズが変わらないため rect_in_full は補正不要。編集モードは終了しない。
+/// 失敗時はユーザー向けメッセージを返す。
 pub fn erase_selection_action() -> Result<(), String> {
     let Some((img, sel)) = take_edit_selection() else {
         return Err("選択範囲がありません".into());
@@ -347,7 +374,7 @@ pub fn erase_selection_action() -> Result<(), String> {
     };
     EDIT.with(|e| {
         if let Some(st) = e.borrow_mut().as_mut() {
-            push_undo(st, img);
+            push_undo(st, img, st.rect_in_full);
             st.img = Arc::new(erased);
             clear_selection_state(st);
             // サイズは変わらないためズーム(表示位置)は維持する
@@ -356,26 +383,48 @@ pub fn erase_selection_action() -> Result<(), String> {
     Ok(())
 }
 
-/// 直近の「選択範囲を残す/消す」を1段階巻き戻す。履歴が無ければ何もせず false を返す。
+/// 「アプリケーション全体画像の復元」: 作業中画像を対象アプリ全体のキャプチャ画像へ
+/// 差し替え、これまで保持している rect_in_full を矩形選択状態にする (SPECv0.5.2追補)。
+/// 全体画像を保持していないセッション(旧データ等)では何もしない。
+pub fn restore_full_image() {
+    EDIT.with(|e| {
+        if let Some(st) = e.borrow_mut().as_mut()
+            && let Some(full) = st.full.clone()
+        {
+            push_undo(st, st.img.clone(), st.rect_in_full);
+            st.img = full;
+            st.tool = EditTool::Rect;
+            st.rect = st.rect_in_full.map(|r| (r.left, r.top, r.right, r.bottom));
+            st.lasso.clear();
+            st.dragging = false;
+            st.resize_handle = None;
+            st.zoom = 1.0;
+        }
+    });
+}
+
+/// 直近の「選択範囲を残す/消す/全体画像の復元」を1段階巻き戻す。
+/// 履歴が無ければ何もせず false を返す。
 pub fn undo_edit() -> bool {
     EDIT.with(|e| {
         let mut g = e.borrow_mut();
         let Some(st) = g.as_mut() else { return false };
-        let Some(prev) = st.undo.pop() else { return false };
-        st.img = prev;
+        let Some((prev_img, prev_rect)) = st.undo.pop() else { return false };
+        st.img = prev_img;
+        st.rect_in_full = prev_rect;
         clear_selection_state(st);
         true
     })
 }
 
-/// 編集セッションを終了する。編集(選択範囲を残す/消す)が1度でも行われていれば
-/// 最終的な作業中画像を返す(呼び出し側はこれをApp/DBへ確定し再認識する)。
-/// 何も変更されていなければ None を返す(単なるキャンセルとして扱う)。
-pub fn finish_edit_session() -> Option<Arc<Captured>> {
+/// 編集セッションを終了する。編集(選択範囲を残す/消す/全体画像の復元)が1度でも行われて
+/// いれば最終的な作業中画像とその全体画像内での位置を返す(呼び出し側はこれをApp/DBへ
+/// 確定し再認識する)。何も変更されていなければ None を返す(単なるキャンセルとして扱う)。
+pub fn finish_edit_session() -> Option<(Arc<Captured>, Option<RECT>)> {
     let result = EDIT.with(|e| {
-        e.borrow()
-            .as_ref()
-            .and_then(|st| if st.undo.is_empty() { None } else { Some(st.img.clone()) })
+        e.borrow().as_ref().and_then(|st| {
+            if st.undo.is_empty() { None } else { Some((st.img.clone(), st.rect_in_full)) }
+        })
     });
     exit_edit_mode();
     result
@@ -425,6 +474,7 @@ pub fn update(hwnd: HWND, mut content: OverlayContent) {
             },
             zoom: st.zoom,
             has_undo: !st.undo.is_empty(),
+            has_full: st.full.is_some(),
         })
     });
 

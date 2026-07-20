@@ -77,6 +77,10 @@ pub struct App {
     pub last_img: Option<Arc<capture::Captured>>,
     /// 保持画像の行選択モード (再OCR時に同じモードで認識する)
     pub last_focus: crate::ocr::Focus,
+    /// 対象アプリ全体のキャプチャ画像 (画像編集の「全体画像の復元」用。SPECv0.5.2追補)
+    pub last_full_img: Option<Arc<capture::Captured>>,
+    /// last_full_img 内での last_img の位置 (物理ピクセル座標)
+    pub last_crop_rect: Option<RECT>,
     pub anchor: (i32, i32),
     pub error_only: bool,
     pub capture_id: Option<i64>,
@@ -168,6 +172,8 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             cur_tr,
             last_img: None,
             last_focus: crate::ocr::Focus::All,
+            last_full_img: None,
+            last_crop_rect: None,
             anchor: (0, 0),
             error_only: false,
             capture_id: None,
@@ -459,6 +465,8 @@ pub fn close_overlay(app: &mut App) {
     app.error_only = false;
     app.last_img = None;
     app.last_focus = crate::ocr::Focus::All;
+    app.last_full_img = None;
+    app.last_crop_rect = None;
     app.capture_id = None;
     app.recog_id = None;
     app.explanation = None;
@@ -479,7 +487,10 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
         app.busy = false;
         match msg {
             worker::WorkerMsg::Source(src) => {
-                let worker::SourceMsg { text, method, engine, img, pin, anchor, focus, ms, capture_id, recog_id, ctx } = *src;
+                let worker::SourceMsg {
+                    text, method, engine, img, pin, anchor, focus, ms, capture_id, recog_id, ctx,
+                    full_img, crop_rect,
+                } = *src;
                 if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
                     return;
                 }
@@ -490,6 +501,8 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 }
                 app.last_img = img;
                 app.last_focus = focus;
+                app.last_full_img = full_img;
+                app.last_crop_rect = crop_rect;
                 if app.via_uia {
                     app.status = Some("UIからの文字抽出に成功しました。".to_string());
                 } else {
@@ -541,9 +554,15 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.status = Some(msg);
                 sync_overlay(app);
             }
-            worker::WorkerMsg::Error { msg, anchor } => {
+            worker::WorkerMsg::Error { msg, anchor, clear_source } => {
                 app.explaining = false;
-                if !app.source.is_empty() {
+                if clear_source {
+                    // OCRエンジン切替・画像編集後の再認識失敗: 古い認識結果を残さず消す
+                    app.source.clear();
+                    app.translation = None;
+                    app.status = Some(msg);
+                    app.error_only = false;
+                } else if !app.source.is_empty() {
                     app.status = Some(msg);
                     app.error_only = false;
                 } else {

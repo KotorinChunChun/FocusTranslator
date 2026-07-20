@@ -27,6 +27,10 @@ pub struct SourceMsg {
     pub recog_id: Option<i64>,
     /// キャプチャ時点の対象アプリコンテキスト (exe名/タイトル/UIAパス/選択文字列)
     pub ctx: AppContext,
+    /// 対象アプリ全体のキャプチャ画像 (画像編集の「全体画像の復元」用。SPECv0.5.2追補)
+    pub full_img: Option<Arc<Captured>>,
+    /// full_img 内での img の位置 (物理ピクセル座標)
+    pub crop_rect: Option<RECT>,
 }
 
 /// ワーカーからメインスレッド（ウィンドウプロシージャ）への通知。
@@ -48,6 +52,9 @@ pub enum WorkerMsg {
     Error {
         msg: String,
         anchor: (i32, i32),
+        /// true: 既存の原文表示を消してからエラーを出す (OCRエンジン切替・画像編集後の再認識失敗)。
+        /// false: 原文はそのまま残しステータス行にのみエラーを出す (解説失敗など)。
+        clear_source: bool,
     },
     Explanation {
         text: String,
@@ -120,6 +127,8 @@ impl AppContext {
         ms: u128,
         capture_id: Option<i64>,
         recog_id: Option<i64>,
+        full_img: Option<Arc<Captured>>,
+        crop_rect: Option<RECT>,
     ) -> WorkerMsg {
         WorkerMsg::Source(Box::new(SourceMsg {
             text,
@@ -133,6 +142,8 @@ impl AppContext {
             capture_id,
             recog_id,
             ctx: self.clone(),
+            full_img,
+            crop_rect,
         }))
     }
 }
@@ -169,15 +180,38 @@ fn build_uia_path_log(nodes: &[uia::UiaPathNode]) -> String {
     s
 }
 
+/// log_cap に渡すOCR抽出範囲情報 (全体画像・全体内での位置・行選択基準)。
+/// 値が無い(全体画像を持たない/失敗時など)場合は Extent::none() を渡す (SPECv0.5.2追補)。
+#[derive(Default, Clone, Copy)]
+struct Extent<'a> {
+    full: Option<&'a Captured>,
+    rect: Option<RECT>,
+    focus_kind: Option<&'static str>,
+    focus_y: Option<f32>,
+}
+
+impl<'a> Extent<'a> {
+    fn none() -> Self {
+        Extent::default()
+    }
+}
+
 /// 入力(キャプチャ)ログを記録し capture_id を返す(ログOFF時は None)。
 /// 画像はデバッグモード時のみPNG保存される。ローテーションもここで行う。
-fn log_cap(cfg: &Config, mode: &str, ctx: &AppContext, image: Option<&Captured>) -> Option<i64> {
+fn log_cap(cfg: &Config, mode: &str, ctx: &AppContext, image: Option<&Captured>, extent: Extent) -> Option<i64> {
     if !cfg.log_enabled {
         return None;
     }
+    let crop_rect = extent.rect.map(|r| (r.left, r.top, r.right - r.left, r.bottom - r.top));
     let id = crate::logdb::log_capture(
         mode, ctx.exe.as_deref(), Some(&ctx.title), Some(&ctx.uia_path), ctx.control_type.as_deref(),
         image, cfg.debug_mode,
+        crate::logdb::CaptureExtent {
+            full_image: extent.full,
+            crop_rect,
+            focus_kind: extent.focus_kind,
+            focus_y: extent.focus_y,
+        },
     );
     crate::logdb::rotate(cfg.log_max_records);
     id
@@ -370,6 +404,20 @@ fn dispatch_translation(
     }
 }
 
+/// 帯画像(img)を focus に応じてログ保存用に切り出し、全体画像(band_rect の元)内での
+/// 位置も算出する (SPECv0.5.2追補: OCR抽出範囲の記録)。
+/// 戻り値: (保存用画像, 全体画像内での矩形)
+fn crop_for_log(band_rect: RECT, img: &Captured, focus: ocr::Focus) -> (Captured, RECT) {
+    let (cropped, sub) = ocr::crop_for_focus_rect(img, focus);
+    let full_rect = RECT {
+        left: band_rect.left + sub.left,
+        top: band_rect.top + sub.top,
+        right: band_rect.left + sub.right,
+        bottom: band_rect.top + sub.bottom,
+    };
+    (cropped.into_owned(), full_rect)
+}
+
 /// UIA経路(選択文字列/カーソル位置テキスト)の採用結果を記録・送信・翻訳する共通処理。
 /// 選択文字列(経路S)とカーソル位置テキスト(経路A)のどちらも、OCRを行わず同じ形で
 /// 扱えるため recognize_cycle から共用する。
@@ -397,15 +445,30 @@ fn adopt_uia_text(
         .as_ref()
         .map(|(b, kind)| capture_plan::focus_for(*kind, b.focus_y))
         .unwrap_or(ocr::Focus::All);
-    let log_img: Option<Captured> =
-        cap.as_ref().map(|(b, _)| ocr::crop_for_focus(&b.img, focus).into_owned());
-    let img = cap.map(|(b, _)| Arc::new(b.img));
+    let mut log_img: Option<Captured> = None;
+    let mut extent_rect: Option<RECT> = None;
+    let mut focus_y_full: Option<f32> = None;
+    if let Some((b, _)) = &cap {
+        let (cropped, full_rect) = crop_for_log(b.rect, &b.img, focus);
+        log_img = Some(cropped);
+        extent_rect = Some(full_rect);
+        focus_y_full = focus.y().map(|fy| b.rect.top as f32 + fy);
+    }
+    let (img, full_img) = match cap {
+        Some((b, _)) => (Some(Arc::new(b.img)), Some(Arc::new(b.full))),
+        None => (None, None),
+    };
 
-    let capture_id = log_cap(&cfg, "hold", ctx, log_img.as_ref());
+    let capture_id = log_cap(&cfg, "hold", ctx, log_img.as_ref(), Extent {
+        full: full_img.as_deref(),
+        rect: extent_rect,
+        focus_kind: Some(focus.kind_str()),
+        focus_y: focus_y_full,
+    });
     let hash = log_img.as_ref().map(crate::capture::hash_hex);
     let recog_id = log_recog(&cfg, capture_id, "uia", "uia", ms, Some(&text), None, hash.as_deref());
     post(main, generation, ctx.source_msg(
-        text.clone(), "UIA", None, img, false, (x, y), focus, ms, capture_id, recog_id,
+        text.clone(), "UIA", None, img, false, (x, y), focus, ms, capture_id, recog_id, full_img, extent_rect,
     ));
     // UIA経路なので ocr_engine は空文字 (SPECv0.4 §7.1)
     let pc = prompt_ctx(ctx, "");
@@ -440,9 +503,9 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         let cap = match capture_plan::capture_probe(x, y, target, &probe) {
             Ok(c) => c,
             Err(e) => {
-                let capture_id = log_cap(&cfg, "hold", &ctx, None);
+                let capture_id = log_cap(&cfg, "hold", &ctx, None, Extent::none());
                 log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
-                post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y) });
+                post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), clear_source: false });
                 return;
             }
         };
@@ -472,21 +535,27 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("source OCR({engine}) {ms}ms"));
                 // ログにはOCR対象領域だけを保存する (全体は保持画像=再OCR用)
-                let log_img = ocr::crop_for_focus(&used.img, focus);
+                let (log_img, full_rect) = crop_for_log(used.rect, &used.img, focus);
                 let hash = crate::capture::hash_hex(&log_img);
-                let capture_id = log_cap(&cfg, "hold", &ctx, Some(&log_img));
+                let capture_id = log_cap(&cfg, "hold", &ctx, Some(&log_img), Extent {
+                    full: Some(&used.full),
+                    rect: Some(full_rect),
+                    focus_kind: Some(focus.kind_str()),
+                    focus_y: focus.y().map(|fy| used.rect.top as f32 + fy),
+                });
                 let recog_id = log_recog(&cfg, capture_id, "ocr", &engine, ms, Some(&o.text), None, Some(&hash));
                 let pin = false;
+                let full_img = Arc::new(used.full);
                 post(main, generation, ctx.source_msg(
                     o.text.clone(), "OCR", Some(engine.clone()), Some(Arc::new(used.img)), pin,
-                    (x, y), focus, ms, capture_id, recog_id,
+                    (x, y), focus, ms, capture_id, recog_id, Some(full_img), Some(full_rect),
                 ));
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
-                let capture_id = log_cap(&cfg, "hold", &ctx, None);
+                let capture_id = log_cap(&cfg, "hold", &ctx, None, Extent::none());
                 log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
-                post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y) });
+                post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), clear_source: false });
             }
         }
     });
@@ -554,6 +623,12 @@ pub struct ReocrJob {
     pub force_pin: bool,
     /// パフォーマンスログの表示名 ("reocr" / "reocr_edited")
     pub perf_label: &'static str,
+    /// 保持画像(img=Some)のときに使う、対象アプリ全体のキャプチャ画像 (SPECv0.5.2追補)。
+    /// 再キャプチャ時 (img=None) は無視され、新しく撮影したものに置き換わる。
+    pub held_full_img: Option<Arc<Captured>>,
+    /// held_full_img 内での img の位置。画像編集で確定した場合は呼び出し側が新しい矩形を
+    /// 渡す (あらかじめ DB へも反映しておくこと)。
+    pub held_crop_rect: Option<RECT>,
 }
 
 /// 再認識: 保持画像(無ければ再キャプチャ)で選択エンジンOCR→再翻訳 (SPEC §8)。
@@ -567,14 +642,15 @@ pub fn reocr(job: ReocrJob) {
         init_com();
         let ReocrJob {
             generation, capture_id, img, focus, x, y, target, ocr_engine, tr_engine, cfg, main,
-            anchor, ctx: held_ctx, force_pin, perf_label,
+            anchor, ctx: held_ctx, force_pin, perf_label, held_full_img, held_crop_rect,
         } = job;
         let t0 = Instant::now();
         let mut hover_text: Option<String> = None;
         let mut fresh_selected_text: Option<String> = None;
         let held = img.is_some();
-        let (image, focus) = match img {
-            Some(i) => (i, focus),
+        // full_img/band_rect: 全体画像とその内での image の位置 (無ければ全体画像機能は使えない)
+        let (image, focus, full_img, band_rect) = match img {
+            Some(i) => (i, focus, held_full_img, held_crop_rect),
             None => {
                 // 保持画像なし: 初回と同じ基準 (UIA検出領域優先) で再キャプチャする。
                 // 対象が変わっている可能性があるため、この場合のみ新しいcaptureとして扱う。
@@ -584,10 +660,10 @@ pub fn reocr(job: ReocrJob) {
                         let f = capture_plan::focus_for(kind, b.focus_y);
                         hover_text = probe.hover_text;
                         fresh_selected_text = probe.selected_text;
-                        (Arc::new(b.img), f)
+                        (Arc::new(b.img), f, Some(Arc::new(b.full)), Some(b.rect))
                     }
                     Err(e) => {
-                        post(main, generation, WorkerMsg::Error { msg: e, anchor });
+                        post(main, generation, WorkerMsg::Error { msg: e, anchor, clear_source: true });
                         return;
                     }
                 }
@@ -605,14 +681,27 @@ pub fn reocr(job: ReocrJob) {
             c
         };
         let pc = prompt_ctx(&ctx, &ocr_engine);
-        // ログにはOCR対象領域だけを保存する (Focus::All なら全体のまま)
-        let log_img = ocr::crop_for_focus(&image, focus);
+        // ログにはOCR対象領域だけを保存する (Focus::All なら全体のまま)。band_rect が分かって
+        // いれば、全体画像内での位置も合わせて算出する (SPECv0.5.2追補)。
+        let (log_img, full_rect) = match band_rect {
+            Some(r) => {
+                let (li, fr) = crop_for_log(r, &image, focus);
+                (li, Some(fr))
+            }
+            None => (ocr::crop_for_focus(&image, focus).into_owned(), None),
+        };
         let hash = crate::capture::hash_hex(&log_img);
+        let extent = Extent {
+            full: full_img.as_deref(),
+            rect: full_rect,
+            focus_kind: Some(focus.kind_str()),
+            focus_y: band_rect.zip(focus.y()).map(|(r, fy)| r.top as f32 + fy),
+        };
 
         // 同一画像+同一エンジンの既存認識結果があれば再利用する (再OCRなし・ログ追記なし)
         // 保持画像があれば既存captureへ追記、無ければ(=対象が変わりうる)新規captureを作る。
         // ここでは画像ありのcapture_idを先に決める(エラー時は画像なしで作り直す)。
-        let capture_with_img = || if held { capture_id } else { log_cap(&cfg, "chip", &ctx, Some(&log_img)) };
+        let capture_with_img = || if held { capture_id } else { log_cap(&cfg, "chip", &ctx, Some(&log_img), extent) };
 
         // 同一画像+同一エンジンの既存認識結果があれば再OCRせず再利用する。
         // 操作の記録としてrecognition行は追記する (SPECv0.4.9追補: 切替操作をログに残す)
@@ -625,7 +714,7 @@ pub fn reocr(job: ReocrJob) {
             let pin = force_pin || text.contains('\n');
             post(main, generation, ctx.source_msg(
                 text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), pin, anchor, focus, ms,
-                use_capture_id, rid,
+                use_capture_id, rid, full_img.clone(), full_rect,
             ));
             let o = ocr::OcrOutput { text, ..Default::default() };
             dispatch_translation(generation, cfg, o, tr_engine, main, rid, pc, &t0);
@@ -649,14 +738,14 @@ pub fn reocr(job: ReocrJob) {
                 let pin = force_pin || o.text.contains('\n');
                 post(main, generation, ctx.source_msg(
                     o.text.clone(), "OCR", Some(ocr_engine.clone()), Some(image), pin, anchor, focus,
-                    ms, use_capture_id, recog_id,
+                    ms, use_capture_id, recog_id, full_img, full_rect,
                 ));
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
-                let use_capture_id = if held { capture_id } else { log_cap(&cfg, "chip", &ctx, None) };
+                let use_capture_id = if held { capture_id } else { log_cap(&cfg, "chip", &ctx, None, Extent::none()) };
                 log_recog(&cfg, use_capture_id, "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e), Some(&hash));
-                post(main, generation, WorkerMsg::Error { msg: e, anchor });
+                post(main, generation, WorkerMsg::Error { msg: e, anchor, clear_source: true });
             }
         }
     });
@@ -701,13 +790,14 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
             post(main, generation, WorkerMsg::Error {
                 msg: "このウィンドウは取得できません".into(),
                 anchor,
+                clear_source: false,
             });
             return;
         }
         let full = match crate::capture::capture_window(root) {
             Ok(f) => f,
             Err(e) => {
-                post(main, generation, WorkerMsg::Error { msg: e, anchor });
+                post(main, generation, WorkerMsg::Error { msg: e, anchor, clear_source: false });
                 return;
             }
         };
@@ -716,17 +806,18 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
         let rh = (r.bottom - r.top).max(1);
         let sx = full.width as f32 / rw as f32;
         let sy = full.height as f32 / rh as f32;
-        let crop = crate::capture::crop(
+        let crop = crate::capture::crop_with_rect(
             &full,
             (((rect.left - r.left) as f32) * sx) as i32,
             (((rect.top - r.top) as f32) * sy) as i32,
             (((rect.right - rect.left) as f32) * sx) as i32,
             (((rect.bottom - rect.top) as f32) * sy) as i32,
         );
-        let Some(img) = crop else {
+        let Some((img, img_rect)) = crop else {
             post(main, generation, WorkerMsg::Error {
                 msg: "選択範囲を切り出せませんでした".into(),
                 anchor,
+                clear_source: false,
             });
             return;
         };
@@ -740,18 +831,24 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("region OCR({engine}) {ms}ms"));
                 let hash = crate::capture::hash_hex(&img);
-                let capture_id = log_cap(&cfg, "region", &ctx, Some(&img));
+                let capture_id = log_cap(&cfg, "region", &ctx, Some(&img), Extent {
+                    full: Some(&full),
+                    rect: Some(img_rect),
+                    focus_kind: Some(ocr::Focus::All.kind_str()),
+                    focus_y: None,
+                });
                 let recog_id = log_recog(&cfg, capture_id, "ocr", &engine, ms, Some(&o.text), None, Some(&hash));
+                let full_img = Arc::new(full);
                 post(main, generation, ctx.source_msg(
                     o.text.clone(), "OCR", Some(engine.clone()), Some(Arc::new(img)), true, anchor,
-                    ocr::Focus::All, ms, capture_id, recog_id,
+                    ocr::Focus::All, ms, capture_id, recog_id, Some(full_img), Some(img_rect),
                 ));
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
-                let capture_id = log_cap(&cfg, "region", &ctx, None);
+                let capture_id = log_cap(&cfg, "region", &ctx, None, Extent::none());
                 log_recog(&cfg, capture_id, "ocr", &engine, t0.elapsed().as_millis(), None, Some(&e), None);
-                post(main, generation, WorkerMsg::Error { msg: e, anchor });
+                post(main, generation, WorkerMsg::Error { msg: e, anchor, clear_source: false });
             }
         }
     });
@@ -792,6 +889,7 @@ pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, prof
             post(main, generation, WorkerMsg::Error {
                 msg: "解説の取得に失敗しました: LLM APIプロファイルが設定されていません".into(),
                 anchor: (0, 0),
+                clear_source: false,
             });
             return;
         };
@@ -816,6 +914,7 @@ pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, prof
                 post(main, generation, WorkerMsg::Error {
                     msg: format!("解説の取得に失敗しました: {e}"),
                     anchor: (0, 0),
+                    clear_source: false,
                 });
             }
         }

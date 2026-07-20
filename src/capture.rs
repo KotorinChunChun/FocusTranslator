@@ -183,6 +183,12 @@ pub fn capture_window(hwnd: HWND) -> Result<Captured, String> {
 
 /// 画像から矩形を切り出す(範囲は自動でクランプ)
 pub fn crop(img: &Captured, x: i32, y: i32, w: i32, h: i32) -> Option<Captured> {
+    crop_with_rect(img, x, y, w, h).map(|(c, _)| c)
+}
+
+/// crop と同じだが、クランプ後に実際に使われた矩形 (img 内の物理ピクセル座標) も返す。
+/// 全体画像内でのOCR抽出範囲を正確に記録する (ログ保存・編集復元用) ために使う。
+pub fn crop_with_rect(img: &Captured, x: i32, y: i32, w: i32, h: i32) -> Option<(Captured, RECT)> {
     let x0 = x.max(0) as u32;
     let y0 = y.max(0) as u32;
     if x0 >= img.width || y0 >= img.height {
@@ -201,7 +207,8 @@ pub fn crop(img: &Captured, x: i32, y: i32, w: i32, h: i32) -> Option<Captured> 
         let d = (row * cw) as usize * 4;
         out[d..d + (cw * 4) as usize].copy_from_slice(&img.bgra[s..s + (cw * 4) as usize]);
     }
-    Some(Captured { width: cw, height: ch, bgra: out })
+    let rect = RECT { left: x0 as i32, top: y0 as i32, right: x1 as i32, bottom: y1 as i32 };
+    Some((Captured { width: cw, height: ch, bgra: out }, rect))
 }
 
 /// BGRA → PNG エンコード(外部OCR/Gemini送信用)

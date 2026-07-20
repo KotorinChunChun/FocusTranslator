@@ -20,6 +20,43 @@ pub fn apply(img: &Captured, sel: &Selection) -> Option<Captured> {
     }
 }
 
+/// apply() でクロップした際に実際に使われる矩形 (img 内、クランプ後、l<r かつ t<b) を返す。
+/// apply() が None を返す入力では None を返す (無効判定はここでも同じ基準を使う)。
+/// 全体画像内での img の位置を合成補正するために使う (SPECv0.5.2追補)。
+pub fn selection_bounds_clamped(img: &Captured, sel: &Selection) -> Option<(i32, i32, i32, i32)> {
+    let w = img.width as i32;
+    let h = img.height as i32;
+    match sel {
+        Selection::Rect { x0, y0, x1, y1 } => {
+            let (x0, y0, x1, y1) = (*x0, *y0, *x1, *y1);
+            let (l, r) = (x0.min(x1), x0.max(x1));
+            let (t, b) = (y0.min(y1), y0.max(y1));
+            if r - l < MIN_SEL || b - t < MIN_SEL {
+                return None;
+            }
+            let (l, t) = (l.max(0), t.max(0));
+            let (r, b) = (r.min(w), b.min(h));
+            if r - l < MIN_SEL || b - t < MIN_SEL {
+                return None;
+            }
+            Some((l, t, r, b))
+        }
+        Selection::Lasso(pts) => {
+            if pts.len() < 3 {
+                return None;
+            }
+            let l = pts.iter().map(|p| p.0).min()?.clamp(0, w - 1);
+            let r = pts.iter().map(|p| p.0).max()?.clamp(0, w);
+            let t = pts.iter().map(|p| p.1).min()?.clamp(0, h - 1);
+            let b = pts.iter().map(|p| p.1).max()?.clamp(0, h);
+            if r - l < MIN_SEL || b - t < MIN_SEL {
+                return None;
+            }
+            Some((l, t, r, b))
+        }
+    }
+}
+
 /// 最小の有効選択サイズ (これ未満はドラッグミスとみなす)
 const MIN_SEL: i32 = 4;
 

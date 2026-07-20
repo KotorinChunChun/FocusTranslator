@@ -51,6 +51,23 @@ impl Focus {
             _ => None,
         }
     }
+
+    /// ログ記録用の種別文字列 (captures.focus_kind)
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Focus::Line(_) => "line",
+            Focus::Paragraph(_) => "paragraph",
+            Focus::All => "all",
+        }
+    }
+
+    /// 基準Y座標 (Line/Paragraph のときのみ。渡した画像内での座標)
+    pub fn y(&self) -> Option<f32> {
+        match self {
+            Focus::Line(fy) | Focus::Paragraph(fy) => Some(*fy),
+            Focus::All => None,
+        }
+    }
 }
 
 /// 指定エンジンでOCRを実行する。
@@ -264,14 +281,25 @@ pub fn join_paragraph(lines: &[String]) -> String {
 /// Paragraph / All は画像全体を対象とする(段落・全行を拾うため)。
 /// 外部OCR/LLMへの送信画像と、ログ保存画像の切り出しで共用する。
 pub fn crop_for_focus(img: &Captured, focus: Focus) -> std::borrow::Cow<'_, Captured> {
+    crop_for_focus_rect(img, focus).0
+}
+
+/// crop_for_focus と同じだが、img 内で実際に切り出した矩形も返す。
+/// 呼び出し側はこれを元画像内でのオフセットと合成し、全体画像内でのOCR対象範囲を
+/// 復元できる (ログ保存・編集復元用)。切り出しが起きない場合は img 全体の矩形を返す。
+pub fn crop_for_focus_rect(
+    img: &Captured,
+    focus: Focus,
+) -> (std::borrow::Cow<'_, Captured>, windows::Win32::Foundation::RECT) {
+    use windows::Win32::Foundation::RECT;
     if let Focus::Line(fy) = focus {
         let h = 64; // 高さ64pxの帯に切り抜く(複数行を拾うのを防ぐ)
         let top = (fy - h as f32 / 2.0).round() as i32;
-        if let Some(cropped) = crate::capture::crop(img, 0, top, img.width as i32, h) {
-            return std::borrow::Cow::Owned(cropped);
+        if let Some((cropped, rect)) = crate::capture::crop_with_rect(img, 0, top, img.width as i32, h) {
+            return (std::borrow::Cow::Owned(cropped), rect);
         }
     }
-    std::borrow::Cow::Borrowed(img)
+    (std::borrow::Cow::Borrowed(img), RECT { left: 0, top: 0, right: img.width as i32, bottom: img.height as i32 })
 }
 
 /// LLM OCR+翻訳統合モード: 画像から原文と訳文を一括取得 (SPEC §8)

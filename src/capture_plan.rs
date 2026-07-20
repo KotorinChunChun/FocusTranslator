@@ -145,10 +145,14 @@ pub fn focus_for(kind: CapKind, fy: f32) -> ocr::Focus {
     }
 }
 
-/// キャプチャ結果の中間データ (画像 + フォーカスY座標)
+/// キャプチャ結果の中間データ (画像 + フォーカスY座標 + 全体画像 + 全体内での位置)
 pub struct Band {
     pub img: Captured,
     pub focus_y: f32,
+    /// 対象ウィンドウ全体のキャプチャ画像 (ログ保存・編集復元用。SPECv0.5.2追補)
+    pub full: Captured,
+    /// full 内での img の位置 (物理ピクセル座標)
+    pub rect: RECT,
 }
 
 /// 対象ウィンドウをキャプチャし、スクリーン座標の矩形 sr を切り出す。
@@ -170,9 +174,10 @@ pub fn capture_screen_rect(target: isize, sr: &RECT, y: i32) -> Result<Band, Str
     let top = ((sr.top - r.top) as f32 * scale_y) as i32;
     let w = ((sr.right - sr.left) as f32 * scale_x) as i32;
     let h = ((sr.bottom - sr.top) as f32 * scale_y) as i32;
-    let band = capture::crop(&full, left, top, w, h).ok_or("このウィンドウは取得できません")?;
+    let (band, rect) =
+        capture::crop_with_rect(&full, left, top, w, h).ok_or("このウィンドウは取得できません")?;
     let focus_y = ((y - sr.top.max(r.top)) as f32 * scale_y).max(0.0);
-    Ok(Band { img: band, focus_y })
+    Ok(Band { img: band, focus_y, full, rect })
 }
 
 /// ポインタ直下ウィンドウをキャプチャし、カーソル周辺の帯を切り出す (SPEC §6.3)
