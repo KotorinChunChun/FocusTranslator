@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
@@ -99,7 +99,16 @@ fn init_db() -> Result<Connection, String> {
             control_type TEXT,
             image_path TEXT,
             image_w INTEGER,
-            image_h INTEGER
+            image_h INTEGER,
+            full_image_path TEXT,
+            full_image_w INTEGER,
+            full_image_h INTEGER,
+            crop_x INTEGER,
+            crop_y INTEGER,
+            crop_w INTEGER,
+            crop_h INTEGER,
+            focus_kind TEXT,
+            focus_y REAL
          );
          CREATE TABLE IF NOT EXISTS recognitions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,8 +191,28 @@ fn remove_all_images() {
     }
 }
 
-/// 画像PNGを書き出して captures の image_path/image_w/image_h を更新する。
-fn store_capture_image(guard: &Connection, capture_id: i64, img: &crate::capture::Captured) {
+/// captures に付随して記録するOCR抽出範囲情報 (SPECv0.5.2追補: 冪等性確保のための記録)。
+/// 全体画像・その内でのOCR対象画像の位置・行選択の基準を、値がある項目だけ更新する。
+#[derive(Default, Clone, Copy)]
+pub struct CaptureExtent<'a> {
+    /// 対象アプリ全体のキャプチャ画像 (デバッグモード時のみPNG保存)
+    pub full_image: Option<&'a crate::capture::Captured>,
+    /// full_image 内でのOCR対象(保存)画像の位置 (x, y, w, h / 物理ピクセル座標)
+    pub crop_rect: Option<(i32, i32, i32, i32)>,
+    /// 行選択モード ("line" / "paragraph" / "all")
+    pub focus_kind: Option<&'static str>,
+    /// 行選択の基準Y座標 (full_image 内での座標。All のときは None)
+    pub focus_y: Option<f32>,
+}
+
+/// 画像PNGを書き出して captures の image_path/image_w/image_h を更新し、
+/// extent に含まれる全体画像・矩形・行選択基準もあわせて記録する。
+fn store_capture_extras(
+    guard: &Connection,
+    capture_id: i64,
+    img: &crate::capture::Captured,
+    extent: &CaptureExtent,
+) {
     let png = crate::capture::to_png(img);
     let rel = format!("images/{capture_id}.png");
     let path = images_dir().join(format!("{capture_id}.png")); // ディレクトリ作成込み
@@ -191,6 +220,29 @@ fn store_capture_image(guard: &Connection, capture_id: i64, img: &crate::capture
         let _ = guard.execute(
             "UPDATE captures SET image_path=?1, image_w=?2, image_h=?3 WHERE id=?4",
             rusqlite::params![rel, img.width as i64, img.height as i64, capture_id],
+        );
+    }
+    if let Some(full) = extent.full_image {
+        let fpng = crate::capture::to_png(full);
+        let frel = format!("images/{capture_id}_full.png");
+        let fpath = images_dir().join(format!("{capture_id}_full.png"));
+        if std::fs::write(&fpath, &fpng).is_ok() {
+            let _ = guard.execute(
+                "UPDATE captures SET full_image_path=?1, full_image_w=?2, full_image_h=?3 WHERE id=?4",
+                rusqlite::params![frel, full.width as i64, full.height as i64, capture_id],
+            );
+        }
+    }
+    if let Some((x, y, w, h)) = extent.crop_rect {
+        let _ = guard.execute(
+            "UPDATE captures SET crop_x=?1, crop_y=?2, crop_w=?3, crop_h=?4 WHERE id=?5",
+            rusqlite::params![x, y, w, h, capture_id],
+        );
+    }
+    if let Some(kind) = extent.focus_kind {
+        let _ = guard.execute(
+            "UPDATE captures SET focus_kind=?1, focus_y=?2 WHERE id=?3",
+            rusqlite::params![kind, extent.focus_y, capture_id],
         );
     }
 }
@@ -205,6 +257,7 @@ pub fn log_capture(
     control_type: Option<&str>,
     image: Option<&crate::capture::Captured>,
     debug: bool,
+    extent: CaptureExtent,
 ) -> Option<i64> {
     with_conn_opt(|guard| {
         if let Err(e) = guard.execute(
@@ -217,16 +270,27 @@ pub fn log_capture(
         }
         let id = guard.last_insert_rowid();
         if debug && let Some(img) = image {
-            store_capture_image(guard, id, img);
+            store_capture_extras(guard, id, img, &extent);
         }
         Some(id)
     })
 }
 
 /// キャプチャ画像を編集後の画像で上書き差し替える (SPECv0.4 §4-4 トリミング適用時)。
-pub fn replace_capture_image(capture_id: i64, image: &crate::capture::Captured) {
+/// 全体画像内での位置 (crop_rect) が分かっていれば、選択範囲の補正結果として合わせて更新する
+/// (SPECv0.5.2追補)。編集後は Focus::All で再認識するため focus_kind も揃えて更新する。
+pub fn replace_capture_image(
+    capture_id: i64,
+    image: &crate::capture::Captured,
+    crop_rect: Option<(i32, i32, i32, i32)>,
+) {
     with_conn((), |guard| {
-        store_capture_image(guard, capture_id, image);
+        store_capture_extras(guard, capture_id, image, &CaptureExtent {
+            full_image: None,
+            crop_rect,
+            focus_kind: crop_rect.map(|_| "all"),
+            focus_y: None,
+        });
     });
 }
 
@@ -377,21 +441,24 @@ pub fn log_explanation(
 /// 保持上限を超えた古い capture を削除する (配下の認識・翻訳・解説はCASCADE、PNGはファイル削除)。
 pub fn rotate(max_records: u32) {
     with_conn((), |guard| {
-        let sql = "SELECT id, image_path FROM captures ORDER BY id DESC LIMIT -1 OFFSET ?1";
+        let sql = "SELECT id, image_path, full_image_path FROM captures ORDER BY id DESC LIMIT -1 OFFSET ?1";
         let mut stmt = match guard.prepare(sql) {
             Ok(s) => s,
             Err(_) => return,
         };
-        let collected: Vec<(i64, Option<String>)> = match stmt
+        let collected: Vec<(i64, Option<String>, Option<String>)> = match stmt
             .query_map(rusqlite::params![max_records as i64], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
             }) {
             Ok(rows) => rows.flatten().collect(),
             Err(_) => Vec::new(),
         };
         drop(stmt);
-        for (id, image_path) in collected {
+        for (id, image_path, full_image_path) in collected {
             if let Some(rel) = image_path {
+                remove_image(&rel);
+            }
+            if let Some(rel) = full_image_path {
                 remove_image(&rel);
             }
             let _ = guard.execute("DELETE FROM captures WHERE id=?1", rusqlite::params![id]);
@@ -413,6 +480,18 @@ pub struct CaptureRow {
     pub image_path: Option<String>,
     pub image_w: Option<i64>,
     pub image_h: Option<i64>,
+    /// 対象アプリ全体のキャプチャ画像 (SPECv0.5.2追補: image_path はこの中の抽出範囲)
+    pub full_image_path: Option<String>,
+    pub full_image_w: Option<i64>,
+    pub full_image_h: Option<i64>,
+    /// full_image 内での image_path の位置 (物理ピクセル座標)
+    pub crop_x: Option<i64>,
+    pub crop_y: Option<i64>,
+    pub crop_w: Option<i64>,
+    pub crop_h: Option<i64>,
+    /// 行選択モード ("line" / "paragraph" / "all") と基準Y座標 (full_image 内での座標)
+    pub focus_kind: Option<String>,
+    pub focus_y: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -480,6 +559,15 @@ fn map_capture_row(r: &rusqlite::Row) -> rusqlite::Result<CaptureRow> {
         image_path: r.get(7)?,
         image_w: r.get(8)?,
         image_h: r.get(9)?,
+        full_image_path: r.get(10)?,
+        full_image_w: r.get(11)?,
+        full_image_h: r.get(12)?,
+        crop_x: r.get(13)?,
+        crop_y: r.get(14)?,
+        crop_w: r.get(15)?,
+        crop_h: r.get(16)?,
+        focus_kind: r.get(17)?,
+        focus_y: r.get(18)?,
     })
 }
 
@@ -541,7 +629,8 @@ impl ExplainRow {
     }
 }
 
-const CAPTURE_COLS: &str = "id, ts_ms, mode, app_exe, app_title, uia_path, control_type, image_path, image_w, image_h";
+const CAPTURE_COLS: &str = "id, ts_ms, mode, app_exe, app_title, uia_path, control_type, image_path, image_w, image_h,
+    full_image_path, full_image_w, full_image_h, crop_x, crop_y, crop_w, crop_h, focus_kind, focus_y";
 
 /// 入力履歴を新しい順に検索取得。query は配下の原文/訳文の部分一致、app_exe は完全一致。
 /// 両方空文字なら全件 (最大 limit 件)。
@@ -706,16 +795,20 @@ pub fn clear_all() {
 /// capture 1件を削除 (配下の認識・翻訳・解説はCASCADE、画像もファイル削除)。
 pub fn delete_capture(id: i64) {
     with_conn((), |guard| {
-        let img: Option<String> = guard
+        let imgs: Option<(Option<String>, Option<String>)> = guard
             .query_row(
-                "SELECT image_path FROM captures WHERE id=?1",
+                "SELECT image_path, full_image_path FROM captures WHERE id=?1",
                 rusqlite::params![id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .ok()
-            .flatten();
-        if let Some(rel) = img {
-            remove_image(&rel);
+            .ok();
+        if let Some((img, full_img)) = imgs {
+            if let Some(rel) = img {
+                remove_image(&rel);
+            }
+            if let Some(rel) = full_img {
+                remove_image(&rel);
+            }
         }
         let _ = guard.execute("DELETE FROM captures WHERE id=?1", rusqlite::params![id]);
     });
@@ -792,6 +885,7 @@ mod tests {
         // 4工程ツリー: capture → recognition → translation / explanation
         let cid = log_capture(
             "hold", Some("game.exe"), Some("Game Window"), Some("Root > Panel"), Some("Edit"), None, false,
+            CaptureExtent::default(),
         )
         .expect("capture id");
         let rid = log_recognition(cid, "ocr", "win", 200, Some("hello"), None, Some("hash-a")).expect("recognition id");
@@ -868,7 +962,7 @@ mod tests {
         // ローテーション: captures 件数で絞り、配下はCASCADE
         let mut last_rid = 0;
         for i in 0..4 {
-            let c = log_capture("hold", None, None, None, None, None, false).unwrap();
+            let c = log_capture("hold", None, None, None, None, None, false, CaptureExtent::default()).unwrap();
             last_rid = log_recognition(c, "ocr", "win", 100, Some(&format!("line{i}")), None, None).unwrap();
         }
         rotate(2);

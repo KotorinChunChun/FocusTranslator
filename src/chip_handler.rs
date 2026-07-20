@@ -17,6 +17,9 @@ struct ChipCtx {
     source: String,
     last_img: Option<std::sync::Arc<crate::capture::Captured>>,
     last_focus: crate::ocr::Focus,
+    /// 対象アプリ全体のキャプチャ画像とその内での last_img の位置 (SPECv0.5.2追補)
+    last_full_img: Option<std::sync::Arc<crate::capture::Captured>>,
+    last_crop_rect: Option<RECT>,
     origin: POINT,
     target: isize,
     main: isize,
@@ -67,10 +70,12 @@ fn adopt_text_and_retranslate(text: String, cur_tr: String, recog_id: Option<i64
 /// App/DBへ反映し、同一capture配下で再認識する (SPECv0.4 §4-3, §8.2.1)。
 /// 「選択範囲を残す/消す」「元に戻す」は編集セッション内(overlay.rs)で完結し、
 /// OCR/翻訳の再実行はここ(編集終了時)でのみ行う。
-fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
-    let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, held_ctx)) =
+/// final_rect: 全体画像内での最終画像の位置 (SPECv0.5.2追補。全体画像が無いセッションは None)。
+fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>, final_rect: Option<RECT>) {
+    let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, held_ctx, full_img)) =
         with_app(|app| {
             app.last_img = Some(new_img.clone());
+            app.last_crop_rect = final_rect;
             app.generation += 1;
             app.mode = Mode::Pinned;
             app.status = Some("再認識中…".into());
@@ -84,6 +89,7 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
                 app.main.0 as isize,
                 app.anchor,
                 app.held_ctx(),
+                app.last_full_img.clone(),
             )
         })
     else {
@@ -92,7 +98,8 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
     if cfg2.log_enabled && cfg2.debug_mode
         && let Some(cid) = cap_id
     {
-        crate::logdb::replace_capture_image(cid, &new_img);
+        let rect_tuple = final_rect.map(|r| (r.left, r.top, r.right - r.left, r.bottom - r.top));
+        crate::logdb::replace_capture_image(cid, &new_img, rect_tuple);
     }
     let new_gen = with_app(|app| app.generation).unwrap_or(0);
     // クロップ済みの新しい画像が対象のため、行/段落の絞り込みは行わず全体をOCRする
@@ -112,6 +119,8 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>) {
         ctx: held_ctx,
         force_pin: true,
         perf_label: "reocr_edited",
+        held_full_img: full_img,
+        held_crop_rect: final_rect,
     });
 }
 
@@ -167,6 +176,8 @@ pub fn handle_chip(id: usize) {
         source: app.source.clone(),
         last_img: app.last_img.clone(),
         last_focus: app.last_focus,
+        last_full_img: app.last_full_img.clone(),
+        last_crop_rect: app.last_crop_rect,
         origin: app.origin,
         target: app.target,
         main: app.main.0 as isize,
@@ -256,8 +267,8 @@ pub fn handle_chip(id: usize) {
         overlay::CHIP_IMAGE => {
             // 展開中(画像編集モード中)に再度押した場合は「編集終了」と同じ扱いにする。
             if overlay::is_editing_image() {
-                if let Some(final_img) = overlay::finish_edit_session() {
-                    commit_edited_image(final_img);
+                if let Some((final_img, final_rect)) = overlay::finish_edit_session() {
+                    commit_edited_image(final_img, final_rect);
                 } else {
                     with_app(sync_overlay);
                 }
@@ -265,14 +276,21 @@ pub fn handle_chip(id: usize) {
             }
             // キャプチャ画像のインライン編集モードを開始する (SPECv0.4 §1-§2)
             // 編集中はホールドキーを離してもオーバーレイが閉じないよう、ピン留め状態へ移行する。
-            let img = with_app(|app| app.last_img.clone()).flatten();
-            if let Some(i) = img {
-                overlay::enter_edit_mode(i);
+            let img = with_app(|app| (app.last_img.clone(), app.last_full_img.clone(), app.last_crop_rect));
+            if let Some((Some(i), full, rect)) = img {
+                overlay::enter_edit_mode(i, full, rect);
                 with_app(|app| {
                     app.mode = Mode::Pinned;
                     sync_overlay(app);
                 });
             }
+            return;
+        }
+        overlay::CHIP_EDIT_RESTORE_FULL => {
+            // アプリケーション全体画像の復元: 作業中画像を全体画像へ差し替え、これまでの
+            // 矩形を選択状態にする (SPECv0.5.2追補)。
+            overlay::restore_full_image();
+            with_app(sync_overlay);
             return;
         }
         overlay::CHIP_EDIT_RECT => {
@@ -293,8 +311,8 @@ pub fn handle_chip(id: usize) {
         overlay::CHIP_EDIT_CANCEL => {
             // 編集終了: セッション中に変更があれば最終画像を確定して再認識する。
             // 変更が無ければ単なるキャンセルとして扱う(OCR/翻訳は再実行しない)。
-            if let Some(final_img) = overlay::finish_edit_session() {
-                commit_edited_image(final_img);
+            if let Some((final_img, final_rect)) = overlay::finish_edit_session() {
+                commit_edited_image(final_img, final_rect);
             } else {
                 with_app(sync_overlay);
             }
@@ -668,6 +686,8 @@ fn switch_ocr_engine(id: usize, c: ChipCtx) {
         ctx: c.held_ctx,
         force_pin: false,
         perf_label: "reocr",
+        held_full_img: c.last_full_img,
+        held_crop_rect: c.last_crop_rect,
     });
 }
 

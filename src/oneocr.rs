@@ -268,9 +268,47 @@ impl EncodeWideNul for std::ffi::OsStr {
     }
 }
 
+/// OneOCRは画像が小さすぎると失敗することがあるため、失敗時はこの余白(px)を四方に追加し、
+/// 画像を大きくした状態で1度だけ再試行する
+const RETRY_PAD_PX: u32 = 64;
+
+/// 画像の四方に白背景の余白を追加する (小さすぎる画像でのOneOCR失敗に対する再試行用)
+fn pad_image(img: &Captured, pad: u32) -> Captured {
+    let new_w = img.width + pad * 2;
+    let new_h = img.height + pad * 2;
+    let mut bgra = vec![0xFFu8; new_w as usize * new_h as usize * 4];
+    let row_bytes = img.width as usize * 4;
+    for y in 0..img.height as usize {
+        let src = y * row_bytes;
+        let dst = ((y + pad as usize) * new_w as usize + pad as usize) * 4;
+        bgra[dst..dst + row_bytes].copy_from_slice(&img.bgra[src..src + row_bytes]);
+    }
+    Captured { width: new_w, height: new_h, bgra }
+}
+
+/// パディングで画像原点が (pad, pad) だけ動いた分、focus の基準Y座標を補正する
+fn shift_focus(focus: Focus, dy: f32) -> Focus {
+    match focus {
+        Focus::Line(fy) => Focus::Line(fy + dy),
+        Focus::Paragraph(fy) => Focus::Paragraph(fy + dy),
+        Focus::All => Focus::All,
+    }
+}
+
 /// OneOCRによるローカルOCR。
 /// 戻り値は ocr_windows と同形式: (採用テキスト, Paragraphモード時のカーソル直下1行)
+/// 失敗時は画像に余白を追加して1度だけ再試行する (画像が小さすぎることによる失敗の救済)。
 pub fn ocr_oneocr(img: &Captured, focus: Focus) -> Result<(String, Option<String>), String> {
+    match run_once(img, focus) {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            let padded = pad_image(img, RETRY_PAD_PX);
+            run_once(&padded, shift_focus(focus, RETRY_PAD_PX as f32)).map_err(|_| e)
+        }
+    }
+}
+
+fn run_once(img: &Captured, focus: Focus) -> Result<(String, Option<String>), String> {
     let mut guard = ENGINE.lock().map_err(|_| "OneOCRエンジンのロックに失敗しました".to_string())?;
     if guard.is_none() {
         *guard = Some(load_engine()?);

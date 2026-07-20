@@ -8,7 +8,7 @@ use crate::overlay::{
     CHIP_EDIT_LASSO, CHIP_EDIT_RECT, CHIP_EDIT_RESET, CHIP_EDIT_UNDO, CHIP_EXPLAIN,
     CHIP_EXPLAIN_QUICK, CHIP_IMAGE, CHIP_OCR_BASE, CHIP_OPEN_LOG, CHIP_PIN, CHIP_SETTINGS,
     CHIP_SWAP_LANG, CHIP_TR_BASE, CHIP_UIA_NODE_BASE, CHIP_EDIT_SRC, CHIP_EDIT_TR, CHIP_EDIT_EXP,
-    CHIP_SELECTED_TEXT,
+    CHIP_SELECTED_TEXT, CHIP_EDIT_RESTORE_FULL,
 };
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -864,13 +864,15 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             edit_max_x = edit_max_x.max(preview_rect.right + PAD);
             ey += ph + 10;
 
-            // 元に戻す/編集終了
+            // 全体画像の復元/元に戻す/編集終了
             let undo_enabled = info.has_undo && !content.busy;
             let mut ax = panel_left;
-            let acts: [(&str, usize, bool); 2] = [
-                ("元に戻す", CHIP_EDIT_UNDO, undo_enabled),
-                ("編集終了", CHIP_EDIT_CANCEL, !content.busy),
-            ];
+            let mut acts: Vec<(&str, usize, bool)> = Vec::with_capacity(3);
+            if info.has_full {
+                acts.push(("全体画像の復元", CHIP_EDIT_RESTORE_FULL, !content.busy));
+            }
+            acts.push(("元に戻す", CHIP_EDIT_UNDO, undo_enabled));
+            acts.push(("編集終了", CHIP_EDIT_CANCEL, !content.busy));
             for (lab, id, enabled) in acts {
                 let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                 let cwid = cw + 18;

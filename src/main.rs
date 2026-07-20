@@ -11,6 +11,7 @@ mod config;
 mod detect;
 mod engine;
 mod image_edit;
+mod image_preview;
 mod llm_api;
 mod logdb;
 mod logviewer;

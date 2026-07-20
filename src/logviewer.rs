@@ -9,9 +9,8 @@ use crate::util::to_wide;
 use std::cell::RefCell;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLOR_BTNFACE, DIB_RGB_COLORS, GetMonitorInfoW, HALFTONE, HBRUSH,
-    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, SetStretchBltMode,
-    StretchDIBits,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, COLOR_BTNFACE, DIB_RGB_COLORS, HALFTONE, HBRUSH,
+    HDC, InvalidateRect, SetStretchBltMode, StretchDIBits,
 };
 use windows::Win32::UI::Controls::{
     INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVCOLUMNW,
@@ -29,8 +28,8 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CBS_DROPDOWNLIST, CW_USEDEFAULT, CallWindowProcW,
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_WNDPROC, GetClientRect, GetCursorPos,
-    GetWindowRect, HMENU, IDC_ARROW, IDC_SIZENS, IDC_SIZEWE,
-    IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW, SWP_NOACTIVATE,
+    HMENU, IDC_ARROW, IDC_SIZENS, IDC_SIZEWE,
+    IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW,
     SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
     SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
     WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR,
@@ -114,8 +113,12 @@ struct State {
     sel_recog: Option<usize>,
     sel_trans: Option<usize>,
     sel_exp: Option<usize>,
-    /// 現在表示中画像のデコード済みRGBA (幅, 高さ, ピクセル)
+    /// 現在表示中のOCR対象画像のデコード済みRGBA (幅, 高さ, ピクセル)
     image: Option<(u32, u32, Vec<u8>)>,
+    /// 現在表示中の対象アプリ全体画像 (SPECv0.5.2追補。無いレコードは None)
+    full_image: Option<(u32, u32, Vec<u8>)>,
+    /// full_image 内での image の位置 (x, y, w, h / 物理ピクセル座標)
+    crop_rect: Option<(i32, i32, i32, i32)>,
 }
 
 /// 再OCR/再翻訳完了後、WM_APP_RELOAD で新規追加されたアイテムへフォーカスするための指示
@@ -133,7 +136,7 @@ thread_local! {
     static STATE: RefCell<State> = const { RefCell::new(State {
         caps: Vec::new(), recogs: Vec::new(), trans: Vec::new(), exps: Vec::new(),
         sel_cap: None, sel_recog: None, sel_trans: None, sel_exp: None,
-        image: None,
+        image: None, full_image: None, crop_rect: None,
     }) };
     static RELOAD_FOCUS: RefCell<ReloadFocus> = const { RefCell::new(ReloadFocus::None) };
 }
@@ -515,7 +518,10 @@ fn grid_bounds(h: HWND) -> (i32, i32, i32, i32) {
 struct Geo {
     cap_list: RECT,
     cap_text: RECT,
-    cap_img: RECT,
+    /// OCR対象画像の表示領域 (左半分)
+    cap_img_ocr: RECT,
+    /// 対象アプリ全体画像の表示領域 (右半分。SPECv0.5.2追補: 2画像を左右に並べる)
+    cap_img_full: RECT,
     cap_del_btn: RECT,
     add_group: RECT,
     add_edit: RECT,
@@ -607,6 +613,11 @@ fn geometry(h: HWND) -> Geo {
     let cap_text_h = cap_full_h * 3 / 4;
     let cap_text = RECT { left: cap_full.left, top: cap_full.top, right: cap_full.right, bottom: cap_full.top + cap_text_h - 2 };
     let cap_img = RECT { left: cap_full.left, top: cap_full.top + cap_text_h + 2, right: cap_full.right, bottom: cap_full.bottom };
+    // OCR対象画像(左) / 対象アプリ全体画像(右) を横に並べる (SPECv0.5.2追補)
+    let img_gap = 6;
+    let img_half_w = ((cap_img.right - cap_img.left - img_gap) / 2).max(1);
+    let cap_img_ocr = RECT { left: cap_img.left, top: cap_img.top, right: cap_img.left + img_half_w, bottom: cap_img.bottom };
+    let cap_img_full = RECT { left: cap_img.left + img_half_w + img_gap, top: cap_img.top, right: cap_img.right, bottom: cap_img.bottom };
 
     let cap_del_btn_y = cap_area_bottom + 4;
     let cap_del_btn = RECT { left: col_x[0], top: cap_del_btn_y, right: col_x[0] + 90, bottom: cap_del_btn_y + BTN_H };
@@ -624,7 +635,7 @@ fn geometry(h: HWND) -> Geo {
     let add_btn_clear = RECT { left: inner_right - add_btn_w, top: mid_btn + 4, right: inner_right, bottom: inner_bottom };
 
     Geo {
-        cap_list, cap_text, cap_img, cap_del_btn,
+        cap_list, cap_text, cap_img_ocr, cap_img_full, cap_del_btn,
         add_group, add_edit, add_btn_save, add_btn_clear,
         recog_list, recog_text, trans_list, trans_prompt, trans_text,
         exp_list, exp_prompt, exp_text,
@@ -893,6 +904,8 @@ fn reload() {
         st.sel_trans = None;
         st.sel_exp = None;
         st.image = None;
+        st.full_image = None;
+        st.crop_rect = None;
     });
     lv_clear(crate::ui_helpers::get_dlg_item(h, IDC_RECOG_LV));
     lv_clear(crate::ui_helpers::get_dlg_item(h, IDC_TRANS_LV));
@@ -904,7 +917,9 @@ fn reload() {
     set_edit(IDC_EXP_PROMPT, "");
     set_edit(IDC_EXP_DETAIL, "");
     unsafe {
-        let _ = InvalidateRect(Some(h), None, true);
+        // bErase=false: WM_ERASEBKGNDでの全消去→WM_PAINTでの再描画という二度塗りをなくし、
+        // 画像パネルの点滅を防ぐ (paint_imageが画像の有無に関わらず自身の領域を必ず塗り切る)
+        let _ = InvalidateRect(Some(h), None, false);
     }
 }
 
@@ -929,14 +944,26 @@ fn on_cap_selected(idx: usize) {
     if let (Some(w), Some(hh)) = (cap.image_w, cap.image_h) {
         d.push_str(&format!("画像: {w}x{hh}\n"));
     }
+    if let Some(fk) = &cap.focus_kind {
+        let fy = cap.focus_y.map(|y| format!(" (Y={y:.0})")).unwrap_or_default();
+        d.push_str(&format!("OCR基準: {fk}{fy}\n"));
+    }
+    if let (Some(fw), Some(fh)) = (cap.full_image_w, cap.full_image_h) {
+        d.push_str(&format!("全体画像: {fw}x{fh}\n"));
+    }
     if let Some(p) = &cap.uia_path
         && !p.is_empty() {
             d.push_str(&format!("\n【UIAパス】\n{p}\n"));
         }
     set_edit(IDC_CAP_DETAIL, &d);
 
-    // 画像デコード
+    // 画像デコード (OCR対象画像 / 対象アプリ全体画像。SPECv0.5.2追補)
     let image = cap.image_path.as_ref().and_then(|rel| decode_png(&logdb::logs_dir().join(rel)));
+    let full_image = cap.full_image_path.as_ref().and_then(|rel| decode_png(&logdb::logs_dir().join(rel)));
+    let crop_rect = match (cap.crop_x, cap.crop_y, cap.crop_w, cap.crop_h) {
+        (Some(x), Some(y), Some(w), Some(h)) => Some((x as i32, y as i32, w as i32, h as i32)),
+        _ => None,
+    };
 
     // 読み取り結果一覧
     let recogs = logdb::recognitions_for(cap.id);
@@ -962,6 +989,8 @@ fn on_cap_selected(idx: usize) {
         st.sel_trans = None;
         st.sel_exp = None;
         st.image = image;
+        st.full_image = full_image;
+        st.crop_rect = crop_rect;
     });
     lv_clear(crate::ui_helpers::get_dlg_item(h, IDC_TRANS_LV));
     lv_clear(crate::ui_helpers::get_dlg_item(h, IDC_EXP_LV));
@@ -975,7 +1004,8 @@ fn on_cap_selected(idx: usize) {
         on_recog_selected(0);
     }
     unsafe {
-        let _ = InvalidateRect(Some(h), None, true);
+        // bErase=false: 二度塗りによる画像パネルの点滅を防ぐ (reload と同じ理由)
+        let _ = InvalidateRect(Some(h), None, false);
     }
 }
 
@@ -1138,70 +1168,107 @@ fn decode_png(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
     Some((w, h, rgba))
 }
 
-/// 入力ブロック右下にキャプチャ画像を縮小描画する
+/// 画像を area 内へアスペクト比維持で縮小描画する(背景は暗灰色で塗る)。
+/// 戻り値は実際の描画位置とスケール (赤枠など重ね描画する座標計算に使う)。
+fn draw_scaled_image(hdc: HDC, area: RECT, iw: u32, ih: u32, rgba: &[u8]) -> (i32, i32, f32) {
+    unsafe {
+        let img_w = (area.right - area.left).max(1);
+        let img_h = (area.bottom - area.top).max(20);
+
+        // アスペクト比維持で img_w×img_h に収める
+        let scale = (img_w as f32 / iw as f32).min(img_h as f32 / ih as f32).min(1.0);
+        let dw = (iw as f32 * scale) as i32;
+        let dh = (ih as f32 * scale) as i32;
+        // 表示領域内で上下左右中央寄せ (§6)
+        let draw_x = area.left + (img_w - dw) / 2;
+        let draw_y = area.top + (img_h - dh) / 2;
+
+        // 背景を塗る
+        let bg = windows::Win32::Graphics::Gdi::CreateSolidBrush(COLORREF(0x00202020));
+        windows::Win32::Graphics::Gdi::FillRect(hdc, &area, bg);
+        let _ = windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(bg.0));
+
+        // RGBA → BGRA トップダウンDIB
+        let mut bgra = vec![0u8; rgba.len()];
+        for (o, px) in bgra.chunks_mut(4).zip(rgba.chunks(4)) {
+            o[0] = px[2];
+            o[1] = px[1];
+            o[2] = px[0];
+            o[3] = px[3];
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: iw as i32,
+                biHeight: -(ih as i32), // トップダウン
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        SetStretchBltMode(hdc, HALFTONE);
+        StretchDIBits(
+            hdc,
+            draw_x,
+            draw_y,
+            dw,
+            dh,
+            0,
+            0,
+            iw as i32,
+            ih as i32,
+            Some(bgra.as_ptr() as *const _),
+            &bmi,
+            DIB_RGB_COLORS,
+            windows::Win32::Graphics::Gdi::SRCCOPY,
+        );
+        (draw_x, draw_y, scale)
+    }
+}
+
+/// 入力ブロック右下にキャプチャ画像を縮小描画する。OCR対象画像(左)と対象アプリ全体画像
+/// (右)を並べ、全体画像には抽出範囲を赤枠で示す (SPECv0.5.2追補)。
+/// area を背景色(暗灰色)で塗りつぶすだけ。画像が無いときに前回の描画を消すのに使う
+/// (WM_ERASEBKGNDに頼らず、この関数とdraw_scaled_imageの塗りつぶしだけで領域を
+/// 常に埋め切ることで、選択変更のたびに全体を消去→再描画する二度塗りをなくし点滅を防ぐ)。
+fn clear_area(hdc: HDC, area: RECT) {
+    unsafe {
+        let bg = windows::Win32::Graphics::Gdi::CreateSolidBrush(COLORREF(0x00202020));
+        windows::Win32::Graphics::Gdi::FillRect(hdc, &area, bg);
+        let _ = windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(bg.0));
+    }
+}
+
 fn paint_image(h: HWND) {
-    // geometry() は STATE を借用しないが、借用順を固定するため先に取得する
+    // geometry() は STATE を借用しないが、borrow順を固定するため先に取得する
     let g = geometry(h);
     STATE.with(|s| {
         let st = s.borrow();
-        let Some((iw, ih, rgba)) = st.image.as_ref() else { return };
         unsafe {
-            let img_left = g.cap_img.left;
-            let img_top = g.cap_img.top;
-            let img_w = (g.cap_img.right - g.cap_img.left).max(1);
-            let img_h = (g.cap_img.bottom - g.cap_img.top).max(20);
-
-            // アスペクト比維持で img_w×img_h に収める
-            let scale = (img_w as f32 / *iw as f32).min(img_h as f32 / *ih as f32).min(1.0);
-            let dw = (*iw as f32 * scale) as i32;
-            let dh = (*ih as f32 * scale) as i32;
-            // 表示領域内で上下左右中央寄せ (§6)
-            let draw_x = img_left + (img_w - dw) / 2;
-            let draw_y = img_top + (img_h - dh) / 2;
-
             let hdc = windows::Win32::Graphics::Gdi::GetDC(Some(h));
-            // 背景を塗る
-            let bg = windows::Win32::Graphics::Gdi::CreateSolidBrush(COLORREF(0x00202020));
-            let area = RECT { left: img_left, top: img_top, right: img_left + img_w, bottom: img_top + img_h };
-            windows::Win32::Graphics::Gdi::FillRect(hdc, &area, bg);
-            let _ = windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(bg.0));
-
-            // RGBA → BGRA トップダウンDIB
-            let mut bgra = vec![0u8; rgba.len()];
-            for (o, px) in bgra.chunks_mut(4).zip(rgba.chunks(4)) {
-                o[0] = px[2];
-                o[1] = px[1];
-                o[2] = px[0];
-                o[3] = px[3];
+            match st.image.as_ref() {
+                Some((iw, ih, rgba)) => {
+                    draw_scaled_image(hdc, g.cap_img_ocr, *iw, *ih, rgba);
+                }
+                None => clear_area(hdc, g.cap_img_ocr),
             }
-            let bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: *iw as i32,
-                    biHeight: -(*ih as i32), // トップダウン
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            SetStretchBltMode(hdc, HALFTONE);
-            StretchDIBits(
-                hdc,
-                draw_x,
-                draw_y,
-                dw,
-                dh,
-                0,
-                0,
-                *iw as i32,
-                *ih as i32,
-                Some(bgra.as_ptr() as *const _),
-                &bmi,
-                DIB_RGB_COLORS,
-                windows::Win32::Graphics::Gdi::SRCCOPY,
-            );
+            match st.full_image.as_ref() {
+                Some((iw, ih, rgba)) => {
+                    let (dx, dy, scale) = draw_scaled_image(hdc, g.cap_img_full, *iw, *ih, rgba);
+                    if let Some((cx, cy, cw, ch)) = st.crop_rect {
+                        let r = RECT {
+                            left: dx + (cx as f32 * scale).round() as i32,
+                            top: dy + (cy as f32 * scale).round() as i32,
+                            right: dx + ((cx + cw) as f32 * scale).round() as i32,
+                            bottom: dy + ((cy + ch) as f32 * scale).round() as i32,
+                        };
+                        crate::image_preview::draw_red_box(hdc, r, 3);
+                    }
+                }
+                None => clear_area(hdc, g.cap_img_full),
+            }
             let _ = windows::Win32::Graphics::Gdi::ReleaseDC(Some(h), hdc);
         }
     });
@@ -1424,186 +1491,6 @@ fn start_reexplain(h: HWND) {
     });
 }
 
-// ---- 画像1:1表示ウィンドウ ----
-
-thread_local! {
-    static IMG1: RefCell<Option<(u32, u32, Vec<u8>)>> = const { RefCell::new(None) };
-    static IMG1_SCROLL: RefCell<(i32, i32)> = const { RefCell::new((0, 0)) };
-    static IMG1_REGISTERED: RefCell<bool> = const { RefCell::new(false) };
-    static IMG1_HWND: RefCell<Option<isize>> = const { RefCell::new(None) };
-}
-
-/// 親ウィンドウの隣(画面に余裕がある方向)に配置する座標を計算する
-fn place_beside_parent(parent: HWND, cw: i32, ch: i32) -> (i32, i32) {
-    unsafe {
-        let mut prect = RECT::default();
-        let _ = GetWindowRect(parent, &mut prect);
-        let hmon = MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST);
-        let mut mi = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        let _ = GetMonitorInfoW(hmon, &mut mi);
-        let work = mi.rcWork;
-        let space_right = work.right - prect.right;
-        let space_left = prect.left - work.left;
-        let y = prect.top.max(work.top).min((work.bottom - ch).max(work.top));
-        let x = if space_right >= space_left {
-            (prect.right).min(work.right - cw).max(work.left)
-        } else {
-            (prect.left - cw).max(work.left)
-        };
-        (x, y)
-    }
-}
-
-/// 現在の画像を原寸(1:1)表示する別ウィンドウを開く(既存があれば再利用し1つまでに制限)
-fn open_image_1to1(parent: HWND) {
-    let img = STATE.with(|s| s.borrow().image.clone());
-    let Some((iw, ih, _)) = img.as_ref().map(|(a, b, _)| (*a, *b, ())) else { return };
-    IMG1.with(|c| *c.borrow_mut() = img);
-    IMG1_SCROLL.with(|c| *c.borrow_mut() = (0, 0));
-
-    // 既存の1:1表示ウィンドウがあれば再利用する(2つ以上開かない)
-    let existing = IMG1_HWND.with(|c| *c.borrow());
-    if let Some(raw) = existing {
-        let h = HWND(raw as *mut _);
-        if unsafe { IsWindow(Some(h)) }.as_bool() {
-            let cw = (iw as i32 + 20).min(1400);
-            let ch = (ih as i32 + 40).min(900);
-            let (x, y) = place_beside_parent(parent, cw, ch);
-            unsafe {
-                let _ = SetWindowPos(h, None, x, y, cw, ch, SWP_NOACTIVATE);
-                let _ = InvalidateRect(Some(h), None, true);
-                let _ = ShowWindow(h, SW_SHOW);
-                let _ = SetForegroundWindow(h);
-            }
-            return;
-        }
-    }
-
-    let inst = unsafe {
-        HINSTANCE(
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-                .map(|m| m.0)
-                .unwrap_or(std::ptr::null_mut()),
-        )
-    };
-    unsafe {
-        let class = w!("FocusTranslatorImageView");
-        IMG1_REGISTERED.with(|r| {
-            if !*r.borrow() {
-                let wc = WNDCLASSW {
-                    lpfnWndProc: Some(img_wndproc),
-                    hInstance: inst,
-                    hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                    hIcon: crate::app_state::app_icon(),
-                    hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as usize as *mut _),
-                    lpszClassName: class,
-                    ..Default::default()
-                };
-                RegisterClassW(&wc);
-                *r.borrow_mut() = true;
-            }
-        });
-        // 画像サイズに合わせる(画面サイズにクランプ、スクロールバー付き)
-        let cw = (iw as i32 + 20).min(1400);
-        let ch = (ih as i32 + 40).min(900);
-        let (x, y) = place_beside_parent(parent, cw, ch);
-        if let Ok(iwnd) = CreateWindowExW(
-            WS_EX_TOPMOST,
-            class,
-            w!("画像 (原寸 1:1 / ホイール・矢印でスクロール)"),
-            WS_OVERLAPPEDWINDOW,
-            x,
-            y,
-            cw,
-            ch,
-            Some(parent),
-            None,
-            Some(inst),
-            None,
-        ) {
-            IMG1_HWND.with(|c| *c.borrow_mut() = Some(iwnd.0 as isize));
-            let _ = ShowWindow(iwnd, SW_SHOW);
-        }
-    }
-}
-
-unsafe extern "system" fn img_wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_MOUSEWHEEL};
-    // スクロールは SCROLLINFO を使わず、ホイール/矢印キーでオフセットを動かす簡易方式
-    match msg {
-        WM_MOUSEWHEEL => {
-            let delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as i32;
-            let shift = (wparam.0 & 0x0004) != 0; // MK_SHIFT で横スクロール
-            IMG1_SCROLL.with(|c| {
-                let mut sc = c.borrow_mut();
-                let step = delta / 120 * 48;
-                if shift { sc.0 = (sc.0 - step).max(0); } else { sc.1 = (sc.1 - step).max(0); }
-            });
-            unsafe { let _ = InvalidateRect(Some(h), None, true); }
-            LRESULT(0)
-        }
-        WM_KEYDOWN => {
-            let vk = wparam.0 as i32;
-            IMG1_SCROLL.with(|c| {
-                let mut sc = c.borrow_mut();
-                match vk {
-                    0x25 => sc.0 = (sc.0 - 40).max(0), // ←
-                    0x27 => sc.0 += 40,                // →
-                    0x26 => sc.1 = (sc.1 - 40).max(0), // ↑
-                    0x28 => sc.1 += 40,                // ↓
-                    _ => {}
-                }
-            });
-            unsafe { let _ = InvalidateRect(Some(h), None, true); }
-            LRESULT(0)
-        }
-        windows::Win32::UI::WindowsAndMessaging::WM_PAINT => {
-            unsafe {
-                let mut ps = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
-                let hdc = windows::Win32::Graphics::Gdi::BeginPaint(h, &mut ps);
-                IMG1.with(|c| {
-                    if let Some((iw, ih, rgba)) = c.borrow().as_ref() {
-                        let (sx, sy) = IMG1_SCROLL.with(|s| *s.borrow());
-                        let mut bgra = vec![0u8; rgba.len()];
-                        for (o, px) in bgra.chunks_mut(4).zip(rgba.chunks(4)) {
-                            o[0] = px[2]; o[1] = px[1]; o[2] = px[0]; o[3] = px[3];
-                        }
-                        let bmi = BITMAPINFO {
-                            bmiHeader: BITMAPINFOHEADER {
-                                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                                biWidth: *iw as i32,
-                                biHeight: -(*ih as i32),
-                                biPlanes: 1,
-                                biBitCount: 32,
-                                biCompression: BI_RGB.0,
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        };
-                        // 原寸(1:1)でスクロールオフセット分ずらして描画
-                        StretchDIBits(
-                            hdc, -sx, -sy, *iw as i32, *ih as i32,
-                            0, 0, *iw as i32, *ih as i32,
-                            Some(bgra.as_ptr() as *const _), &bmi, DIB_RGB_COLORS,
-                            windows::Win32::Graphics::Gdi::SRCCOPY,
-                        );
-                    }
-                });
-                let _ = windows::Win32::Graphics::Gdi::EndPaint(h, &ps);
-            }
-            LRESULT(0)
-        }
-        WM_CLOSE => {
-            unsafe { let _ = DestroyWindow(h); }
-            LRESULT(0)
-        }
-        _ => unsafe { DefWindowProcW(h, msg, wparam, lparam) },
-    }
-}
-
 /// リロード後、以前選択していた入力行を復元する
 fn restore_cap_selection(h: HWND, old_idx: Option<usize>) {
     if let Some(old_idx) = old_idx {
@@ -1687,9 +1574,17 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             } else if in_rect(&g.split_h, x, y) {
                 SPLIT_DRAG.with(|d| *d.borrow_mut() = Some(2));
                 unsafe { SetCapture(h); }
-            } else if in_rect(&g.cap_img, x, y) {
-                // 画像領域クリック → 原寸(1:1)表示ウィンドウ
-                open_image_1to1(h);
+            } else if in_rect(&g.cap_img_ocr, x, y) {
+                // OCR対象画像クリック → プレビューウィンドウ
+                let img = STATE.with(|s| s.borrow().image.clone());
+                crate::image_preview::open_preview(h, crate::image_preview::ImgKind::Ocr, img, None);
+            } else if in_rect(&g.cap_img_full, x, y) {
+                // 全体画像クリック → プレビューウィンドウ(赤枠付き)
+                let (img, box_rect) = STATE.with(|s| {
+                    let st = s.borrow();
+                    (st.full_image.clone(), st.crop_rect)
+                });
+                crate::image_preview::open_preview(h, crate::image_preview::ImgKind::Full, img, box_rect);
             }
             LRESULT(0)
         }
@@ -1934,6 +1829,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         // 取得元アプリ名は一律【FocusTranslator】として記録する
                         let cid = logdb::log_capture(
                             "manual", Some(MANUAL_APP_NAME), Some(MANUAL_APP_NAME), None, None, None, false,
+                            logdb::CaptureExtent::default(),
                         );
                         if let Some(cid) = cid {
                             logdb::log_recognition(cid, "manual", "manual", 0, Some(&text), None, None);
