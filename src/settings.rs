@@ -98,6 +98,8 @@ const IDC_LLAMA_MMPROJ_STATUS: i32 = 173;
 const IDC_LLAMA_MMPROJ_INSTALL: i32 = 174;
 const IDC_LLAMA_MMPROJ_PATH: i32 = 175;
 const IDC_LLAMA_MMPROJ_BROWSE: i32 = 176;
+/// プロファイル単位の最大応答トークン数 (SPECv0.5.3)
+const IDC_PROF_MAXTOK: i32 = 177;
 
 /// エディットコントロールの通知コード (windows クレートに定義がないもの)
 const EN_KILLFOCUS: u32 = 0x0200;
@@ -113,6 +115,8 @@ const WM_LLAMA_SERVER_DONE: u32 = WM_APP + 14;
 const WM_LLAMA_MODEL_PROGRESS: u32 = WM_APP + 15;
 const WM_LLAMA_MMPROJ_DONE: u32 = WM_APP + 16;
 const WM_LLAMA_MMPROJ_PROGRESS: u32 = WM_APP + 17;
+/// llama.cpp本体ダウンロードの進捗通知 (SPECv0.5.3: モデル導入と同じ形式)
+const WM_LLAMA_BIN_PROGRESS: u32 = WM_APP + 18;
 /// 各APIキーの発行ページ(実際に確認済みの現行URL)
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
@@ -409,7 +413,10 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         password_edit(h, inst, cx, y, key_w, IDC_PROF_KEY);
         y += STEP;
         label(h, inst, "モデル名", lx, y + 2, 84);
-        edit(h, inst, cx, y, 180, IDC_PROF_MODEL);
+        edit(h, inst, cx, y, 174, IDC_PROF_MODEL);
+        // 応答の最大トークン数 (SPECv0.5.3: 長い解説が途中で切れる場合に引き上げる)
+        label(h, inst, "最大Token", cx + 180, y + 2, 60);
+        edit(h, inst, cx + 240, y, 48, IDC_PROF_MAXTOK);
         y += STEP;
         // プロンプトは専用の編集ウィンドウで編集する (SPECv0.4.7 §1)
         label(h, inst, "プロンプト編集", lx, y + 4, 84);
@@ -608,6 +615,7 @@ fn ensure_local_llm_profile_if_ready(h: HWND) {
         ocr_prompt: crate::config::DEFAULT_GEMINI_OCR_PROMPT.into(),
         translate_prompt: crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT.into(),
         explain_prompt: crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT.into(),
+        max_tokens: crate::config::DEFAULT_MAX_TOKENS,
     };
     cfg.api_profiles.push(profile.clone());
     cfg.save();
@@ -734,6 +742,7 @@ fn load_profile_to_ui(h: HWND, idx: usize) {
             set_ctl_text(h, IDC_PROF_MODEL, &prof.model_name);
             set_ctl_text(h, IDC_PROF_URL, &prof.api_url);
             set_ctl_text(h, IDC_PROF_KEY, &prof.get_key());
+            set_ctl_text(h, IDC_PROF_MAXTOK, &prof.max_tokens.to_string());
         }
     });
 }
@@ -789,6 +798,36 @@ fn start_install(
         };
         unsafe {
             let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), done_msg, WPARAM(w), LPARAM(l));
+        }
+    });
+}
+
+/// llama.cpp本体ダウンロードボタン押下時の処理 (SPECv0.5.3)。
+/// モデル導入と同様、10秒おきの進捗をWM_LLAMA_BIN_PROGRESSで反映する。
+fn start_bin_install(h: HWND) {
+    unsafe {
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_INSTALL).unwrap_or_default(), false);
+    }
+    set_ctl_text(h, IDC_LLAMA_BIN_STATUS, "ダウンロード中…");
+    let hwnd_isize = h.0 as isize;
+    std::thread::spawn(move || {
+        let progress = move |downloaded: u64, total: Option<u64>| {
+            let label = match total {
+                Some(t) if t > 0 => format!("{}%", (downloaded * 100 / t).min(100)),
+                _ => format!("{}MB取得済み", downloaded / 1_000_000),
+            };
+            let ptr = Box::into_raw(Box::new(label)) as isize;
+            unsafe {
+                let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_BIN_PROGRESS, WPARAM(0), LPARAM(ptr));
+            }
+        };
+        let result = crate::llama_install::install_binary(progress);
+        let (w, l) = match result {
+            Ok(()) => (1usize, 0isize),
+            Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
+        };
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_BIN_DONE, WPARAM(w), LPARAM(l));
         }
     });
 }
@@ -910,6 +949,16 @@ fn auto_save(h: HWND, ask_consent: bool) {
     }
 }
 
+/// 最大応答トークン数の入力欄を解釈する (SPECv0.5.3)。
+/// 解釈不能・空欄は既定値。0 は「プロバイダ既定に任せる」として許容する。
+fn parse_max_tokens(h: HWND) -> u32 {
+    get_ctl_text(h, IDC_PROF_MAXTOK)
+        .trim()
+        .parse()
+        .unwrap_or(crate::config::DEFAULT_MAX_TOKENS)
+        .min(1_000_000)
+}
+
 /// プロファイル編集UI (名前/種別/URL/キー/モデル) が PROFILES の保存済み内容と異なるか
 fn profile_ui_dirty(h: HWND) -> bool {
     if PENDING_NEW.with(|f| *f.borrow()) {
@@ -925,6 +974,7 @@ fn profile_ui_dirty(h: HWND) -> bool {
             || prof.model_name != get_ctl_text(h, IDC_PROF_MODEL).trim()
             || prof.api_url != get_ctl_text(h, IDC_PROF_URL).trim()
             || prof.get_key() != get_ctl_text(h, IDC_PROF_KEY).trim()
+            || prof.max_tokens != parse_max_tokens(h)
     })
 }
 
@@ -968,6 +1018,7 @@ fn save_profile_from_ui(h: HWND, save_as: bool) -> Option<usize> {
         ocr_prompt: ocr_p,
         translate_prompt: tr_p,
         explain_prompt: exp_p,
+        max_tokens: parse_max_tokens(h),
     };
     prof.set_key(get_ctl_text(h, IDC_PROF_KEY).trim());
 
@@ -1132,10 +1183,20 @@ fn save(h: HWND, ask_consent: bool) {
 }
 
 fn confirm_default_consents(h: HWND, cfg: &mut Config) {
+    // LLM経由の場合、実際に使われるのは既定LLMプロファイル。ローカル(非外部URL)なら
+    // 外部送信は発生しないため同意を求めない (SPECv0.5.3)。
+    let llm_external = cfg
+        .api_profiles
+        .iter()
+        .find(|p| p.name == cfg.default_api_profile)
+        .is_none_or(|p| p.is_external());
     unsafe {
-        if matches!(cfg.default_translator.as_str(), "deepl" | "google" | "llm")
-            && !cfg.consent_text
-        {
+        let tr_external = match cfg.default_translator.as_str() {
+            "deepl" | "google" => true,
+            "llm" => llm_external,
+            _ => false,
+        };
+        if tr_external && !cfg.consent_text {
             let r = MessageBoxW(
                 Some(h),
                 w!("既定の翻訳エンジンはOCR済みテキストを外部サービスへ送信します。許可しますか?"),
@@ -1144,7 +1205,7 @@ fn confirm_default_consents(h: HWND, cfg: &mut Config) {
             );
             cfg.consent_text = r.0 == 6; // IDYES
         }
-        if cfg.default_ocr == "llm" && !cfg.consent_image {
+        if cfg.default_ocr == "llm" && llm_external && !cfg.consent_image {
             let r = MessageBoxW(
                 Some(h),
                 w!("既定のOCRエンジンはキャプチャ画像を外部サービスへ送信します。許可しますか?"),
@@ -1187,7 +1248,28 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             // クリック時、エディットはフォーカス喪失時に自動保存する。
             // プロファイル編集欄 (名前/種別/URL/キー/モデル) は【保存】ボタンで確定するため対象外。
             match id {
-                IDC_HOLDKEY | IDC_DETECT_KEY | IDC_SRCLANG | IDC_LANG | IDC_OVERLAY_THEME
+                IDC_HOLDKEY | IDC_DETECT_KEY
+                    if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE =>
+                {
+                    // キャプチャキーとプレビューキーの重複ガード (SPECv0.5.3):
+                    // 同じキーだと挙動が未定義になるため、警告して変更前の値へ戻す。
+                    if combo_sel(h, IDC_HOLDKEY) == combo_sel(h, IDC_DETECT_KEY) {
+                        unsafe {
+                            MessageBoxW(
+                                Some(h),
+                                w!("キャプチャキーとプレビューキーに同じキーは設定できません。"),
+                                w!("キー設定"),
+                                MB_OK | MB_ICONWARNING,
+                            );
+                        }
+                        let cfg = Config::load();
+                        combo_select(h, IDC_HOLDKEY, HOLD_KEYS.iter().position(|k| *k == cfg.hold_key).unwrap_or(0));
+                        combo_select(h, IDC_DETECT_KEY, HOLD_KEYS.iter().position(|k| *k == cfg.detect_key).unwrap_or(1));
+                    } else {
+                        auto_save(h, false);
+                    }
+                }
+                IDC_SRCLANG | IDC_LANG | IDC_OVERLAY_THEME
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE =>
                 {
                     auto_save(h, false);
@@ -1284,14 +1366,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     );
                 }
                 IDC_LLAMA_BIN_INSTALL => {
-                    start_install(
-                        h,
-                        IDC_LLAMA_BIN_STATUS,
-                        IDC_LLAMA_BIN_INSTALL,
-                        WM_LLAMA_BIN_DONE,
-                        "ダウンロード中…",
-                        crate::llama_install::install_binary,
-                    );
+                    start_bin_install(h);
                 }
                 IDC_LLAMA_MODEL_INSTALL => unsafe {
                     // 初回ダウンロード前に容量(約3GB)を警告し、同意を得てから開始する (SPECv0.5.2追補)。
@@ -1308,7 +1383,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 IDC_LLAMA_TOGGLE => {
                     let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT).trim().parse().unwrap_or(crate::llama_server::DEFAULT_PORT);
                     if crate::llama_server::is_running(port) {
-                        if let Err(e) = crate::llama_server::stop() {
+                        if let Err(e) = crate::llama_server::stop(port) {
                             unsafe {
                                 let wide = to_wide(&e);
                                 MessageBoxW(Some(h), PCWSTR(wide.as_ptr()), w!("サーバー停止エラー"), MB_OK);
@@ -1381,6 +1456,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     set_ctl_text(h, IDC_PROF_URL, "");
                     set_ctl_text(h, IDC_PROF_KEY, "");
                     set_ctl_text(h, IDC_PROF_MODEL, "");
+                    set_ctl_text(h, IDC_PROF_MAXTOK, &crate::config::DEFAULT_MAX_TOKENS.to_string());
                     combo_select(h, IDC_PROF_TYPE, 0);
                     // プロンプトはUI欄が無いため、保存時に既定値 (DEFAULT_GEMINI_*) を使う
                     PENDING_NEW.with(|f| *f.borrow_mut() = true);
@@ -1472,6 +1548,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 refresh_onnx_status,
                 "ローカルONNX翻訳モデルをインストールしました。",
             );
+            LRESULT(0)
+        }
+        WM_LLAMA_BIN_PROGRESS => {
+            let label = unsafe { *Box::from_raw(lparam.0 as *mut String) };
+            set_ctl_text(h, IDC_LLAMA_BIN_STATUS, &label);
             LRESULT(0)
         }
         WM_LLAMA_BIN_DONE => {

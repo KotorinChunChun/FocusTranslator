@@ -8,8 +8,10 @@ use crate::config::Config;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// キャッシュキー: (エンジン, プロファイル, 訳先言語, 原文)
-type CacheKey = (String, Option<String>, String, String);
+/// キャッシュキー: (エンジン, プロファイル, 翻訳元言語, 訳先言語, 原文)。
+/// LLM翻訳プロンプトは {{source_lang}} を含むため、元言語もキーに含める
+/// (SPECv0.5.3: 元言語だけを変更した直後に古い訳文が返るのを防ぐ)。
+type CacheKey = (String, Option<String>, String, String, String);
 static CACHE: Mutex<Option<HashMap<CacheKey, String>>> = Mutex::new(None);
 const CACHE_MAX: usize = 500;
 
@@ -110,7 +112,7 @@ pub fn translate(
     let ctx = &ctx;
     let (source, target) = (cfg.source_lang.clone(), cfg.target_lang.clone());
     let profile = if engine == "llm" { Some(cfg.active_api_profile.clone()) } else { None };
-    let key = (engine.to_string(), profile, target.clone(), text.to_string());
+    let key = (engine.to_string(), profile, source.clone(), target.clone(), text.to_string());
 
     // キャッシュ確認
     {
@@ -131,7 +133,9 @@ pub fn translate(
         }
     }
 
-    let result = translate_once(engine, cfg, text, &target, ctx);
+    // エラーメッセージにURL等の形でAPIキーが混入しても表示・ログへ漏れないよう伏字化する
+    // (SPECv0.5.3)。
+    let result = translate_once(engine, cfg, text, &target, ctx).map_err(|e| mask_keys(cfg, &e));
     match result {
         Ok((t, detail, db_rid)) => {
             let mut guard = CACHE.lock().unwrap();
@@ -219,14 +223,17 @@ fn translate_google(cfg: &Config, text: &str, target: &str) -> Result<(String, T
     if key.is_empty() {
         return Err("Google APIキーが未設定です".into());
     }
-    let url = format!("https://translation.googleapis.com/language/translate/v2?key={key}");
+    // APIキーはURLクエリではなくヘッダーで送る (SPECv0.5.3: エラーメッセージ等に
+    // URLが含まれてもキーが露出しないようにするため)。
+    let url = "https://translation.googleapis.com/language/translate/v2";
     let body = serde_json::json!({ "q": text, "target": target, "format": "text" });
     let req_json = mask_keys(cfg, &body.to_string());
     if let Some((cached_text, rid)) = check_db_cache(cfg, "google", None, &req_json) {
         let detail = TransDetail { request_json: Some(req_json), ..Default::default() };
         return Ok((cached_text, detail, Some(rid)));
     }
-    let mut res = ureq::post(&url)
+    let mut res = ureq::post(url)
+        .header("X-goog-api-key", &key)
         .send_json(&body)
         .map_err(|e| format!("Google翻訳呼び出し失敗: {e}"))?;
     let v: serde_json::Value =

@@ -322,14 +322,12 @@ fn log_trans_llm(cfg: &Config, recog_id: Option<i64>, ms: u128, tr: &str, o: &oc
     );
 }
 
-/// 同意が無いクラウド/外部OCRエンジンをローカルへ置き換える (SPEC §9: 同意なしで外部送信しない)
+/// 既定OCRエンジンが未導入等で使えない場合のみローカルへ置き換える。
+/// 同意の有無によるフォールバックは行わない (SPECv0.5.3: 同意が無ければ
+/// ensure_ocr_consent がその場で同意を求め、拒否されたら実行自体を中断する)。
 fn effective_ocr(cfg: &Config) -> String {
     let e = cfg.default_ocr.as_str();
-    let allowed = match e {
-        "llm" => cfg.consent_image,
-        _ => true,
-    };
-    if allowed && cfg.engine_available(e) {
+    if cfg.engine_available(e) {
         e.to_string()
     } else if cfg.engine_available("oneocr") {
         "oneocr".to_string()
@@ -338,13 +336,103 @@ fn effective_ocr(cfg: &Config) -> String {
     }
 }
 
-fn effective_translator(cfg: &Config) -> String {
-    let e = cfg.default_translator.as_str();
-    let allowed = match e {
-        "deepl" | "google" | "llm" => cfg.consent_text,
-        _ => true,
+/// 自動サイクルの同意ダイアログをこのセッションで拒否済みか。
+/// ホールドキーを押すたびにダイアログが連発しないよう、拒否は起動中のみ記憶する
+/// (チップ等の明示操作による同意確認には影響しない)。
+static AUTO_CONSENT_DECLINED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// ワーカースレッドから外部送信の同意を確認する (SPECv0.5.3)。
+/// 最新の設定を読み直して判定し、未同意なら MessageBox で確認する。同意されたら設定へ
+/// 永続化し、メインスレッドへ WM_APP_CFG で再読込を通知する。拒否されたらセッション中は
+/// 再度尋ねず false を返す。
+fn request_consent_blocking(main: isize, want_image: bool) -> bool {
+    use std::sync::atomic::Ordering;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDYES, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW,
     };
-    if allowed { e.to_string() } else { "local".to_string() }
+    let fresh = Config::load();
+    let need_text = !fresh.consent_text;
+    let need_image = want_image && !fresh.consent_image;
+    if !need_text && !need_image {
+        return true;
+    }
+    if AUTO_CONSENT_DECLINED.load(Ordering::Relaxed) {
+        return false;
+    }
+    let msg = if need_image {
+        "既定のエンジンはキャプチャ画像とテキスト・言語設定を外部サービスへ送信します。\n初回のみ確認しています。許可しますか?\n(拒否した場合、既定エンジンを変更するまでこの機能は実行されません)"
+    } else {
+        "既定のエンジンは読み取ったテキストと関連情報(アプリ名・ウィンドウタイトル等)を外部サービスへ送信します。\n初回のみ確認しています。許可しますか?\n(拒否した場合、既定エンジンを変更するまでこの機能は実行されません)"
+    };
+    let msg_w = util::to_wide(msg);
+    let r = unsafe {
+        MessageBoxW(
+            None,
+            windows::core::PCWSTR(msg_w.as_ptr()),
+            windows::core::PCWSTR(util::to_wide("外部送信の同意").as_ptr()),
+            MB_YESNO | MB_SETFOREGROUND | MB_TOPMOST,
+        )
+    };
+    if r == IDYES {
+        let mut c = Config::load();
+        if need_text {
+            c.consent_text = true;
+        }
+        if need_image {
+            c.consent_image = true;
+            // 画像には文字が写るため、画像同意はテキスト同意を内包する
+            c.consent_text = true;
+        }
+        c.save();
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(main as *mut _)),
+                crate::app_state::WM_APP_CFG,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+        true
+    } else {
+        AUTO_CONSENT_DECLINED.store(true, Ordering::Relaxed);
+        false
+    }
+}
+
+/// 自動サイクルでOCRエンジンが外部送信を要する場合の同意確認 (SPECv0.5.3)。
+/// LLM統合OCRかつアクティブプロファイルが外部URLのときのみ確認する。拒否なら Err。
+fn ensure_ocr_consent(cfg: &Config, engine: &str, main: isize) -> Result<(), String> {
+    if engine != "llm" {
+        return Ok(());
+    }
+    if !cfg.active_profile().is_some_and(|p| p.is_external()) {
+        return Ok(());
+    }
+    if request_consent_blocking(main, true) {
+        Ok(())
+    } else {
+        Err("外部送信の同意が得られないため、LLMによる画面読み取りを実行できません。設定画面で既定OCRエンジンを変更するか、同意を許可してください。".into())
+    }
+}
+
+/// 翻訳エンジンが外部送信を要する場合の同意確認 (SPECv0.5.3)。拒否なら Err。
+/// 自動・明示を問わず翻訳実行の直前に呼ぶ (明示操作はチップ側で同意済みのため、
+/// ここでは追加のダイアログは出ない)。
+fn ensure_tr_consent(cfg: &Config, engine: &str, main: isize) -> Result<(), String> {
+    let external = match engine {
+        "deepl" | "google" => true,
+        "llm" => cfg.active_profile().is_some_and(|p| p.is_external()),
+        _ => false,
+    };
+    if !external {
+        return Ok(());
+    }
+    if request_consent_blocking(main, false) {
+        Ok(())
+    } else {
+        Err("外部送信の同意が得られないため翻訳をスキップしました。設定画面で既定翻訳エンジンを変更するか、同意を許可してください。".into())
+    }
 }
 
 /// 検索用の正規化: 空白を除去し小文字化する (OCRとUIA Nameの表記ゆれ吸収)
@@ -485,7 +573,7 @@ fn adopt_uia_text(
 /// キャプチャ領域は UIA検出結果 (行矩形/要素/直下要素) を優先し、無ければ既定帯。
 pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Config, main: isize) {
     std::thread::spawn(move || {
-        let tr_engine = effective_translator(&cfg);
+        let tr_engine = cfg.default_translator.clone();
         init_com();
         let t0 = Instant::now();
         let mut ctx = AppContext::capture(x, y, HWND(target as *mut _));
@@ -506,6 +594,11 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
 
         // 経路B: WGC + キャプチャOCR (直下要素 → 段落帯 → 既定帯)
         let engine = effective_ocr(&cfg);
+        // 外部LLMへの画像送信となる場合は同意を確認し、拒否なら実行しない (SPECv0.5.3)
+        if let Err(e) = ensure_ocr_consent(&cfg, &engine, main) {
+            post(main, generation, WorkerMsg::Error { msg: e, anchor: (x, y), clear_source: false });
+            return;
+        }
         let cap = match capture_plan::capture_probe(x, y, target, &probe) {
             Ok(c) => c,
             Err(e) => {
@@ -597,6 +690,12 @@ fn translate(
         return;
     }
     std::thread::spawn(move || {
+        // 外部送信を要するエンジンは実行直前に同意を確認する (SPECv0.5.3:
+        // 同意なしのローカルへの無言フォールバックは廃止。拒否時はスキップ表示)。
+        if let Err(msg) = ensure_tr_consent(&cfg, &engine, main) {
+            post(main, generation, WorkerMsg::TranslationSkipped { msg });
+            return;
+        }
         let t0 = Instant::now();
         match crate::translate::translate(&engine, &cfg, &text, &pc) {
             Ok(t) => {
@@ -781,7 +880,7 @@ pub fn retranslate(
 /// 範囲指定モード: 選択矩形をOCRして段落結合→翻訳、最初からピン留め (SPEC §3.2)
 pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
     std::thread::spawn(move || {
-        let tr_engine = effective_translator(&cfg);
+        let tr_engine = cfg.default_translator.clone();
         init_com();
         let t0 = Instant::now();
         let cx = (rect.left + rect.right) / 2;
@@ -836,6 +935,11 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
         };
 
         let engine = effective_ocr(&cfg);
+        // 外部LLMへの画像送信となる場合は同意を確認し、拒否なら実行しない (SPECv0.5.3)
+        if let Err(e) = ensure_ocr_consent(&cfg, &engine, main) {
+            post(main, generation, WorkerMsg::Error { msg: e, anchor, clear_source: false });
+            return;
+        }
         // Focus::All → 全行を段落結合
         let ctx = AppContext::capture(cx, cy, root);
         let pc = prompt_ctx(&ctx, &engine);
@@ -882,20 +986,67 @@ pub fn build_explain_prompt_for(cfg: &Config, profile: &str, ctx: &crate::config
     Some(cfg.fill_prompt(&prof.explain_prompt, ctx))
 }
 
+/// 解説に添付するアプリ全体キャプチャ (SPECv0.5.3)。
+/// rect は full 内での解説対象範囲 (物理ピクセル座標)。赤枠を描いてから送信する。
+pub struct ExplainImage {
+    pub full: Arc<Captured>,
+    pub rect: Option<RECT>,
+}
+
+/// 解説送信用画像の長辺上限 (px)。全体キャプチャは大きくなりがちなため縮小して送る。
+const EXPLAIN_IMAGE_MAX_DIM: u32 = 1600;
+
+/// 解説用の送信画像を組み立てる: 縮小 → 対象範囲へ赤枠描画 → PNG。
+/// 戻り値: (PNGバイト列, 画像ハッシュ)。
+fn build_explain_image(img: &ExplainImage) -> (Vec<u8>, String) {
+    let full = &*img.full;
+    let scale_src = full.width.max(full.height).max(1);
+    let mut prepared = crate::capture::downscale_max(full, EXPLAIN_IMAGE_MAX_DIM);
+    if let Some(r) = img.rect {
+        // 縮小後の座標系へ矩形を変換してから赤枠を描く (先に描くと縮小で枠が痩せるため)
+        let s = prepared.width.max(prepared.height) as f32 / scale_src as f32;
+        let scaled = RECT {
+            left: (r.left as f32 * s) as i32,
+            top: (r.top as f32 * s) as i32,
+            right: (r.right as f32 * s) as i32,
+            bottom: (r.bottom as f32 * s) as i32,
+        };
+        crate::capture::draw_red_frame(&mut prepared, scaled, 3);
+    }
+    let hash = crate::capture::hash_hex(&prepared);
+    (crate::capture::to_png(&prepared), hash)
+}
+
 /// 解説の取得 (SPEC v0.3 §2.2.2 / v0.4 §8.2.4): 成功・失敗ともログへ追記してオーバーレイへ通知する。
 /// profile はダイアログで選択されたAPIプロファイル名 (見つからなければアクティブを使用)。
-pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, profile: String, main: isize) {
+/// image が Some なら、赤枠でマークした全体キャプチャを添付して送信する (SPECv0.5.3)。
+pub fn explain(
+    generation: u64,
+    recog_id: i64,
+    cfg: Config,
+    prompt: String,
+    profile: String,
+    main: isize,
+    image: Option<ExplainImage>,
+) {
     std::thread::spawn(move || {
         init_com();
+        // 画像添付時は送信画像を先に確定し、キャッシュキー(input_text)へ画像ハッシュを
+        // 含める (SPECv0.5.3: 同一プロンプトでも別画面のキャッシュを誤って流用しないため)。
+        let prepared = image.as_ref().map(build_explain_image);
+        let cache_text = match &prepared {
+            Some((_, hash)) => format!("{prompt}\n[添付画像hash: {}]", &hash[..16]),
+            None => prompt.clone(),
+        };
         // 同一プロファイル+同一送信プロンプト(input_text)の成功済み解説がDBにあれば、
         // APIを呼ばずそれを使う (SPECv0.5.2追補: プロファイル別チップのため、テンプレートが
         // 同一で input_text が一致していても別プロファイルのキャッシュは流用しない)。
         if cfg.log_enabled
-            && let Some((cached_rid, cached_text)) = crate::logdb::find_cached_explanation_for_profile(&profile, &prompt)
+            && let Some((cached_rid, cached_text)) = crate::logdb::find_cached_explanation_for_profile(&profile, &cache_text)
         {
             if cached_rid != recog_id {
                 crate::logdb::log_explanation(
-                    recog_id, &profile, 0, &prompt, Some(&cached_text), None, Some(0), Some(0),
+                    recog_id, &profile, 0, &cache_text, Some(&cached_text), None, Some(0), Some(0),
                 );
             }
             post(main, generation, WorkerMsg::Explanation { text: cached_text, profile });
@@ -915,16 +1066,27 @@ pub fn explain(generation: u64, recog_id: i64, cfg: Config, prompt: String, prof
             });
             return;
         };
-        let result = crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt));
+        let png_b64 = prepared.as_ref().map(|(png, _)| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(png)
+        });
+        let req = crate::llm_api::LlmRequest {
+            prompt: &prompt,
+            image_png_b64: png_b64.as_deref(),
+            json_mode: false,
+        };
+        let result = crate::llm_api::call(prof, &req)
+            // エラーメッセージにAPIキーが混入しても表示・ログへ漏れないよう伏字化する (SPECv0.5.3)
+            .map_err(|e| crate::translate::mask_keys(&cfg, &e));
         let ms = t0.elapsed().as_millis();
         if cfg.log_enabled {
             match &result {
                 Ok(res) => crate::logdb::log_explanation(
-                    recog_id, &prof.name, ms, &prompt, Some(&res.text), None,
+                    recog_id, &prof.name, ms, &cache_text, Some(&res.text), None,
                     res.tokens_in, res.tokens_out,
                 ),
                 Err(e) => crate::logdb::log_explanation(
-                    recog_id, &prof.name, ms, &prompt, None, Some(e), None, None,
+                    recog_id, &prof.name, ms, &cache_text, None, Some(e), None, None,
                 ),
             }
         }

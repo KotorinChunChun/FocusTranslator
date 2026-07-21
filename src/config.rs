@@ -26,6 +26,19 @@ pub struct ApiProfile {
     pub ocr_prompt: String,
     pub translate_prompt: String,
     pub explain_prompt: String,
+    /// 応答の最大トークン数 (SPECv0.5.3)。Claudeは max_tokens が必須のため常に適用
+    /// (0 なら既定の DEFAULT_MAX_TOKENS)。Gemini/OpenAI互換は 1 以上のときのみ
+    /// リクエストへ付与し、0 ならプロバイダ既定に任せる。
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+}
+
+/// max_tokens の既定値。従来のClaude固定値(1024)では長いMarkdown解説が途中で切れるため
+/// 引き上げた (SPECv0.5.3)。
+pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+fn default_max_tokens() -> u32 {
+    DEFAULT_MAX_TOKENS
 }
 
 /// Gemini/Claude/ChatGPTの公式APIエンドポイント。これらのURLで呼び出す場合はAPIキーが必須。
@@ -53,6 +66,23 @@ impl ApiProfile {
     /// チップ表示判定 (is_ready) と実呼び出し (llm_api::call) の双方がこの判定を共用する。
     pub fn requires_key(&self) -> bool {
         MAJOR_API_URLS.contains(&self.api_url.trim())
+    }
+
+    /// このプロファイルの呼び出しが外部へのデータ送信になるか (SPECv0.5.3)。
+    /// URLのホストが localhost / 127.0.0.1 / [::1] ならローカル送信とみなし、
+    /// 外部送信の同意ダイアログを出さない。URL未設定は既定の公式APIへ解決されるため外部扱い。
+    pub fn is_external(&self) -> bool {
+        let url = self.api_url.trim();
+        if url.is_empty() {
+            return true;
+        }
+        let rest = url.split("://").nth(1).unwrap_or(url);
+        if let Some(v6) = rest.strip_prefix('[') {
+            // IPv6リテラル (例: http://[::1]:8080/...)
+            return v6.split(']').next().unwrap_or("") != "::1";
+        }
+        let host = rest.split(['/', ':']).next().unwrap_or("");
+        !matches!(host, "localhost" | "127.0.0.1")
     }
 
     /// このプロファイルで呼び出しを試みても失敗しないと分かる状態か(ボタンのグレーアウト判定用)。
@@ -103,7 +133,7 @@ pub struct Config {
     pub region_hotkey: String,
     /// 既定OCRエンジン: "oneocr" | "win" | "paddle" | "llm"
     pub default_ocr: String,
-    /// 既定翻訳エンジン: "local" | "deepl" | "google" | "gemini"
+    /// 既定翻訳エンジン: "local" | "deepl" | "google" | "llm"
     pub default_translator: String,
     /// 訳先言語 (原文がCJKの場合は自動で "en" へ反転)
     pub target_lang: String,
@@ -178,20 +208,26 @@ pub struct Config {
     pub llama_mmproj_path: String,
 }
 
-/// 翻訳プロンプトの既定値
+/// 翻訳プロンプトの既定値 (SPECv0.5.3: 既に訳先言語ならそのまま返す指示を追加)
 pub const DEFAULT_GEMINI_TRANSLATE_PROMPT: &str =
+    "Translate the following text from {{source_lang}} to {{target_lang}}. If the text is already in {{target_lang}}, output it unchanged. Output only the translation.\n\n{{original_text}}";
+/// v0.5.2 までの翻訳プロンプト既定値 (SPECv0.5.3でテンプレートを変更したため移行判定用)
+const OLD_TRANSLATE_PROMPT_V52: &str =
     "Translate the following text from {{source_lang}} to {{target_lang}}. Output only the translation.\n\n{{original_text}}";
 /// OCR+翻訳統合プロンプトの既定値
 pub const DEFAULT_GEMINI_OCR_PROMPT: &str =
     "Extract the text in this image and translate it from {{source_lang}} to {{target_lang}}. Respond with JSON only: {\"source\": \"<extracted text>\", \"translation\": \"<translation>\"}";
-/// 解説プロンプトの既定値 (SPECv0.5.2 追補)
-pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されてている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されてているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
+/// 解説プロンプトの既定値 (SPECv0.5.3: 赤枠付き全体キャプチャ添付の説明を追加)
+pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n画像が添付されている場合、それは対象アプリ全体のスクリーンショットで、赤枠で囲んだ箇所が解説対象の表示位置です。画面全体の文脈も参考にしてください。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
 /// v0.3 までの解説プロンプト既定値 (設定移行の判定用。当時の文言そのままで比較する)
 const OLD_EXPLAIN_PROMPT: &str =
     "Explain the grammar, nuances, and background of the following text in {{target_lang}}.\n{{glossary}}\n\n{{original_text}}";
 /// v0.4〜v0.5.1 までの解説プロンプト既定値 (SPECv0.5.2でテンプレートを変更したため、
 /// 移行判定用にこの文言のまま保持する)
 const OLD_EXPLAIN_PROMPT_V4: &str = "以下は、{{app_title}} というタイトルのWindowsアプリケーションの中で表示されているテキストです。\nこれが何か{{target_lang}}で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 実行ファイル名\n{{app_exe}}\n\n## UIAパス\n{{uia_path}}\n\n## 表示テキスト\n{{original_text}}";
+/// v0.5.2 の解説プロンプト既定値 (SPECv0.5.3でテンプレートを変更したため、移行判定用に
+/// 当時の文言そのままで保持する。「表示されてている」の誤記も当時のまま)
+const OLD_EXPLAIN_PROMPT_V52: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されてている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されてているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
 
 /// 初回起動時・マイグレーション時に生成する既定LLMプロファイルの名前一覧
 pub const DEFAULT_PROFILE_NAMES: [&str; 4] =
@@ -220,6 +256,7 @@ fn seed_profile(name: &str) -> ApiProfile {
         ocr_prompt: DEFAULT_GEMINI_OCR_PROMPT.into(),
         translate_prompt: DEFAULT_GEMINI_TRANSLATE_PROMPT.into(),
         explain_prompt: DEFAULT_GEMINI_EXPLAIN_PROMPT.into(),
+        max_tokens: DEFAULT_MAX_TOKENS,
     }
 }
 
@@ -358,9 +395,28 @@ impl Config {
                     migrated = true;
                 }
             }
-            if p.explain_prompt == OLD_EXPLAIN_PROMPT || p.explain_prompt == OLD_EXPLAIN_PROMPT_V4 {
+            if p.explain_prompt == OLD_EXPLAIN_PROMPT
+                || p.explain_prompt == OLD_EXPLAIN_PROMPT_V4
+                || p.explain_prompt == OLD_EXPLAIN_PROMPT_V52
+            {
                 p.explain_prompt = DEFAULT_GEMINI_EXPLAIN_PROMPT.into();
                 migrated = true;
+            }
+            // 旧既定の翻訳プロンプトのままなら新しい既定へ差し替える (SPECv0.5.3)
+            if p.translate_prompt == OLD_TRANSLATE_PROMPT_V52 {
+                p.translate_prompt = DEFAULT_GEMINI_TRANSLATE_PROMPT.into();
+                migrated = true;
+            }
+            // プロンプト欄が欠落した旧設定 (フィールド無し=空文字) は既定で補完する (SPECv0.5.3)
+            for (prompt, default) in [
+                (&mut p.ocr_prompt, DEFAULT_GEMINI_OCR_PROMPT),
+                (&mut p.translate_prompt, DEFAULT_GEMINI_TRANSLATE_PROMPT),
+                (&mut p.explain_prompt, DEFAULT_GEMINI_EXPLAIN_PROMPT),
+            ] {
+                if prompt.trim().is_empty() {
+                    *prompt = default.into();
+                    migrated = true;
+                }
             }
             // 旧バージョンは Gemini の api_url を空欄のまま保存していた。
             // 実行時は url_or() が既定URLへ解決するため動作に支障は無いが、設定画面の
@@ -488,6 +544,24 @@ pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// URLのホストで外部送信か否かを判定する (SPECv0.5.3: ローカルLLMは同意不要)
+    #[test]
+    fn is_external_はローカルホストのみ内部扱い() {
+        let mut p = ApiProfile::default();
+        for (url, expect) in [
+            ("http://localhost:11434/v1/chat/completions", false),
+            ("http://127.0.0.1:8080/v1/chat/completions", false),
+            ("http://[::1]:8080/v1", false),
+            ("https://api.openai.com/v1/chat/completions", true),
+            ("https://generativelanguage.googleapis.com/v1beta/models", true),
+            ("http://192.168.1.10:11434/v1/chat/completions", true),
+            ("", true),
+        ] {
+            p.api_url = url.into();
+            assert_eq!(p.is_external(), expect, "url={url}");
+        }
+    }
 
     /// 過去バージョンの設定 (Gemini/GPT の2プロファイルのみ・api_url欠落・
     /// default_api_profile未導入) を読み込むと、不足していた既定プロファイル

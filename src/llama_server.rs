@@ -14,10 +14,12 @@ use std::time::Duration;
 
 static CHILD: Mutex<Option<Child>> = Mutex::new(None);
 
-/// 既定ポート (Ollama等でも広く使われる値。設定で変更可)
-pub const DEFAULT_PORT: u32 = 11434;
+/// 既定ポート (設定で変更可)。v0.5.2まではOllamaと同じ11434を使っていたが、Ollama稼働中の
+/// 環境で「起動済み」と誤判定してリクエストがOllamaへ流れる事故を避けるため、他ツールと
+/// 被りにくい値へ変更した (SPECv0.5.3)。既存ユーザーの保存済み設定は変更しない。
+pub const DEFAULT_PORT: u32 = 18434;
 /// llama.cpp種別プロファイルの既定URL (DEFAULT_PORTと値を合わせておくこと)
-pub const DEFAULT_URL: &str = "http://localhost:11434/v1/chat/completions";
+pub const DEFAULT_URL: &str = "http://localhost:18434/v1/chat/completions";
 /// コンソールウィンドウを作らずに子プロセスを起動するフラグ (Win32 CREATE_NO_WINDOW)
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -129,22 +131,98 @@ pub fn start(port: u32, model: &Path, mmproj: Option<&Path>) -> Result<(), Strin
     Err("サーバーの起動を確認できませんでした(モデル読み込みに時間がかかっている可能性があります)".into())
 }
 
-/// サーバーを停止する。このプロセスが起動した子プロセスがあればそれを終了し、
-/// 無ければ同名プロセスをイメージ名指定で終了させる(外部/前回セッションで起動された場合)。
-pub fn stop() -> Result<(), String> {
+/// サーバーを停止する。このプロセスが起動した子プロセスがあればそれを終了する。
+/// 無ければ (前回セッション等で起動されたものは) 対象ポートをLISTENしているPIDを特定し、
+/// 実行ファイル名が llama-server.exe であることを確認した上でそのPIDのみを終了させる
+/// (SPECv0.5.3: 旧実装のイメージ名一括 taskkill は、LM Studio等でユーザーが自分で
+/// 立てた無関係な llama-server まで巻き込むため廃止)。
+pub fn stop(port: u32) -> Result<(), String> {
     let child = CHILD.lock().unwrap_or_else(|e| e.into_inner()).take();
     if let Some(mut c) = child {
         let _ = c.kill();
         let _ = c.wait();
         return Ok(());
     }
-    let status = std::process::Command::new("taskkill")
-        .args(["/IM", "llama-server.exe", "/F"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        _ => Err("サーバーの停止に失敗しました(既に停止している可能性があります)".into()),
+    let Some(pid) = find_listening_pid(port) else {
+        return Err("サーバーの停止に失敗しました(既に停止している可能性があります)".into());
+    };
+    match process_image_name(pid) {
+        Some(name) if name.eq_ignore_ascii_case("llama-server.exe") => {}
+        Some(name) => {
+            return Err(format!(
+                "ポート{port}を使用しているのは {name} (PID {pid}) のため停止しません。設定のポート番号を確認してください。"
+            ));
+        }
+        None => {
+            return Err(format!("ポート{port}のプロセス(PID {pid})を確認できないため停止しません。"));
+        }
+    }
+    terminate_pid(pid)
+}
+
+/// 指定TCPポートを127.0.0.1/0.0.0.0でLISTENしているプロセスのPIDを netstat 出力から特定する。
+fn find_listening_pid(port: u32) -> Option<u32> {
+    let out = std::process::Command::new("netstat")
+        .args(["-ano", "-p", "TCP"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let needle = format!(":{port}");
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // 形式: TCP  ローカルアドレス  外部アドレス  状態  PID
+        if cols.len() >= 5
+            && cols[0].eq_ignore_ascii_case("TCP")
+            && cols[1].ends_with(&needle)
+            && cols[3].eq_ignore_ascii_case("LISTENING")
+            && let Ok(pid) = cols[4].parse::<u32>()
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+/// PIDから実行ファイル名 (ベースネーム) を取得する。
+fn process_image_name(pid: u32) -> Option<String> {
+    use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = vec![0u16; MAX_PATH as usize];
+        let mut size = MAX_PATH;
+        let ok = QueryFullProcessImageNameW(
+            h,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
+        .is_ok();
+        let _ = CloseHandle(h);
+        if !ok {
+            return None;
+        }
+        let full = String::from_utf16_lossy(&buf[..size as usize]);
+        std::path::Path::new(&full)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+    }
+}
+
+/// 指定PIDのプロセスを終了させる。
+fn terminate_pid(pid: u32) -> Result<(), String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE, false, pid)
+            .map_err(|e| format!("サーバーの停止に失敗しました: {e}"))?;
+        let r = TerminateProcess(h, 0);
+        let _ = CloseHandle(h);
+        r.map_err(|e| format!("サーバーの停止に失敗しました: {e}"))
     }
 }

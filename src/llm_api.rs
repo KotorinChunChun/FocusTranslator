@@ -5,8 +5,6 @@ use crate::config::{ApiProfile, ApiType};
 pub const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
 pub const DEFAULT_CLAUDE_URL: &str = "https://api.anthropic.com/v1/messages";
 pub const GEMINI_URL_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-/// Claude API は max_tokens が必須
-const CLAUDE_MAX_TOKENS: u32 = 1024;
 
 /// LLMへの1リクエスト。画像はOCR統合モードのみ付与する。
 pub struct LlmRequest<'a> {
@@ -53,20 +51,28 @@ pub fn call(prof: &ApiProfile, req: &LlmRequest) -> Result<LlmResponse, String> 
 /// 実送信前にDBキャッシュを検索するために使う (SPECv0.4.8追補: 翻訳APIキャッシュ)。
 pub fn build_request_json(prof: &ApiProfile, req: &LlmRequest) -> String {
     match prof.api_type {
-        ApiType::Gemini => gemini_body(req).to_string(),
+        ApiType::Gemini => gemini_body(prof, req).to_string(),
         ApiType::OpenAI | ApiType::LlamaCpp => openai_body(prof, req).to_string(),
         ApiType::Claude => claude_body(prof, req).to_string(),
     }
 }
 
-fn gemini_body(req: &LlmRequest) -> serde_json::Value {
+fn gemini_body(prof: &ApiProfile, req: &LlmRequest) -> serde_json::Value {
     let mut parts = vec![serde_json::json!({ "text": req.prompt })];
     if let Some(b64) = req.image_png_b64 {
         parts.push(serde_json::json!({ "inlineData": { "mimeType": "image/png", "data": b64 } }));
     }
     let mut body = serde_json::json!({ "contents": [{ "parts": parts }] });
+    let mut gen_cfg = serde_json::Map::new();
     if req.json_mode {
-        body["generationConfig"] = serde_json::json!({ "responseMimeType": "application/json" });
+        gen_cfg.insert("responseMimeType".into(), serde_json::json!("application/json"));
+    }
+    // 最大応答トークン数 (SPECv0.5.3: プロファイル設定。0 ならプロバイダ既定に任せる)
+    if prof.max_tokens > 0 {
+        gen_cfg.insert("maxOutputTokens".into(), serde_json::json!(prof.max_tokens));
+    }
+    if !gen_cfg.is_empty() {
+        body["generationConfig"] = serde_json::Value::Object(gen_cfg);
     }
     body
 }
@@ -86,6 +92,10 @@ fn openai_body(prof: &ApiProfile, req: &LlmRequest) -> serde_json::Value {
     if req.json_mode {
         body["response_format"] = serde_json::json!({ "type": "json_object" });
     }
+    // 最大応答トークン数 (SPECv0.5.3: プロファイル設定。0 ならプロバイダ既定に任せる)
+    if prof.max_tokens > 0 {
+        body["max_tokens"] = serde_json::json!(prof.max_tokens);
+    }
     body
 }
 
@@ -97,9 +107,15 @@ fn claude_body(prof: &ApiProfile, req: &LlmRequest) -> serde_json::Value {
         ]),
         None => serde_json::json!(req.prompt),
     };
+    // Claude API は max_tokens が必須のため、未設定(0)でも既定値を適用する (SPECv0.5.3)
+    let max_tokens = if prof.max_tokens > 0 {
+        prof.max_tokens
+    } else {
+        crate::config::DEFAULT_MAX_TOKENS
+    };
     serde_json::json!({
         "model": prof.model_name,
-        "max_tokens": CLAUDE_MAX_TOKENS,
+        "max_tokens": max_tokens,
         "messages": [{ "role": "user", "content": content }]
     })
 }
@@ -128,7 +144,7 @@ fn usage_i64(v: &serde_json::Value, obj: &str, field: &str) -> Option<i64> {
 }
 
 fn call_gemini(prof: &ApiProfile, key: &str, req: &LlmRequest) -> Result<LlmResponse, String> {
-    let body = gemini_body(req);
+    let body = gemini_body(prof, req);
     let base = url_or(&prof.api_url, GEMINI_URL_BASE);
     let url = format!("{base}/{}:generateContent", prof.model_name);
     let request_json = body.to_string();

@@ -518,6 +518,12 @@ fn chip_explain_with_profile(c: ChipCtx, profile: String) {
         });
         return;
     }
+    // 外部プロファイルへの解説依頼は同意を確認する (SPECv0.5.3)。
+    // 全体キャプチャがあれば赤枠付きで画像も送るため、画像送信の同意も対象。
+    let with_image = c.last_full_img.is_some();
+    if !ensure_consent_profile(&profile, with_image, &c.cfg) {
+        return;
+    }
     let pc = prompt_ctx_from_app(&c.source);
     let prompt = crate::worker::build_explain_prompt_for(&c.cfg, &profile, &pc).unwrap_or_default();
     if prompt.is_empty() {
@@ -538,7 +544,12 @@ fn chip_explain_with_profile(c: ChipCtx, profile: String) {
     })
     .unwrap_or(0);
     let cfg2 = Config::load();
-    crate::worker::explain(new_gen, r_id, cfg2, prompt, profile, c.main);
+    // 全体キャプチャがあれば赤枠付きで添付する (SPECv0.5.3)
+    let image = c.last_full_img.clone().map(|full| crate::worker::ExplainImage {
+        full,
+        rect: c.last_crop_rect,
+    });
+    crate::worker::explain(new_gen, r_id, cfg2, prompt, profile, c.main, image);
 }
 
 /// 解説 (CHIP_EXPLAIN): プロンプト編集ウィンドウ (モードB) を表示してから送信 (SPECv0.4.7 §2)
@@ -583,6 +594,9 @@ fn chip_explain(c: ChipCtx) {
 
         let pc = prompt_ctx_from_app(&c.source);
         let main_hwnd_val = c.main;
+        // 送信時に赤枠付き全体キャプチャを添付するため、閉包へ引き渡す (SPECv0.5.3)
+        let full_img = c.last_full_img.clone();
+        let crop_rect = c.last_crop_rect;
         let inst = with_app(|app| app.instance).unwrap_or_default();
         crate::prompt_edit::open(
             inst,
@@ -600,6 +614,12 @@ fn chip_explain(c: ChipCtx) {
                 )
             }),
             Some(Box::new(move |edited_prompt, profile| {
+                // プロンプト編集ウィンドウからの送信も、外部プロファイルなら同意を確認する
+                // (SPECv0.5.3)。プロファイルはウィンドウ内で切替できるため送信時点で判定する。
+                let cfg_now = Config::load();
+                if !ensure_consent_profile(&profile, full_img.is_some(), &cfg_now) {
+                    return;
+                }
                 let new_gen = with_app(|app| {
                     app.generation += 1;
                     app.mode = Mode::Pinned;
@@ -611,7 +631,12 @@ fn chip_explain(c: ChipCtx) {
                 })
                 .unwrap_or(0);
                 let cfg2 = Config::load();
-                crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val);
+                // 全体キャプチャがあれば赤枠付きで添付する (SPECv0.5.3)
+                let image = full_img.clone().map(|full| crate::worker::ExplainImage {
+                    full,
+                    rect: crop_rect,
+                });
+                crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val, image);
             })),
         );
     }
@@ -619,8 +644,14 @@ fn chip_explain(c: ChipCtx) {
 
 /// OCR/翻訳エンジンチップの押下位置から選択エンジンを解決し、利用可否と初回同意を確認する。
 /// チップの並びは「固定エンジン (llm除く) + 準備済みLLMプロファイル」(overlay_layout と対)。
+/// is_ocr: OCRチップ列なら true (LLMプロファイル選択時に画像送信の同意も確認する)。
 /// 返り値: (選択キー, 固定エンジンか, 実際に設定するエンジンキー)。範囲外・利用不可・同意拒否は None。
-fn resolve_engine_chip(idx: usize, fixed_keys: &[&str], cfg: &Config) -> Option<(String, bool, String)> {
+fn resolve_engine_chip(
+    idx: usize,
+    fixed_keys: &[&str],
+    cfg: &Config,
+    is_ocr: bool,
+) -> Option<(String, bool, String)> {
     let mut keys = Vec::new();
     for k in fixed_keys.iter() {
         if *k != "llm" {
@@ -646,7 +677,17 @@ fn resolve_engine_chip(idx: usize, fixed_keys: &[&str], cfg: &Config) -> Option<
         });
         return None;
     }
-    if is_fixed && !ensure_consent(&selected_key, cfg) {
+    // 初回同意: 固定エンジンは deepl/google のテキスト送信のみ該当。LLMプロファイルは
+    // 外部URLのときだけ確認する (ローカルLLMは対象外; SPECv0.5.3)。
+    let consent_ok = if is_fixed {
+        match selected_key.as_str() {
+            "deepl" | "google" => ensure_consent_send(!cfg.consent_text, false, cfg),
+            _ => true,
+        }
+    } else {
+        ensure_consent_profile(&selected_key, is_ocr, cfg)
+    };
+    if !consent_ok {
         return None;
     }
     Some((selected_key, is_fixed, target))
@@ -655,7 +696,7 @@ fn resolve_engine_chip(idx: usize, fixed_keys: &[&str], cfg: &Config) -> Option<
 /// OCRエンジン切替チップ: 保持画像で再認識→現行エンジンで再翻訳 (SPEC §8)
 fn switch_ocr_engine(id: usize, c: ChipCtx) {
     let idx = id - overlay::CHIP_OCR_BASE;
-    let Some((selected_key, is_fixed, target_ocr)) = resolve_engine_chip(idx, &engine::OCR_KEYS, &c.cfg)
+    let Some((selected_key, is_fixed, target_ocr)) = resolve_engine_chip(idx, &engine::OCR_KEYS, &c.cfg, true)
     else {
         return;
     };
@@ -703,7 +744,7 @@ fn switch_tr_engine(id: usize, c: ChipCtx) {
         return;
     }
     let idx = id - overlay::CHIP_TR_BASE;
-    let Some((selected_key, is_fixed, target_tr)) = resolve_engine_chip(idx, &engine::TR_KEYS, &c.cfg)
+    let Some((selected_key, is_fixed, target_tr)) = resolve_engine_chip(idx, &engine::TR_KEYS, &c.cfg, false)
     else {
         return;
     };
@@ -738,34 +779,33 @@ fn engine_unavailable_msg(key: &str) -> String {
     }
 }
 
-/// 初回同意ダイアログ (SPEC §9.2)。同意済みなら true。
-fn ensure_consent(engine_key: &str, cfg: &Config) -> bool {
+/// 初回同意ダイアログ (SPEC §9.2, SPECv0.5.3で送信種別ベースに再設計)。
+/// need_text / need_image は「この操作で新たに同意が必要な種別」。両方 false なら何もせず true。
+/// 同意が得られたら config へ永続化し、App 側の設定も更新する。拒否なら false。
+fn ensure_consent_send(need_text: bool, need_image: bool, _cfg: &Config) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_YESNO, MessageBoxW};
-    let (need, kind): (bool, &str) = match engine_key {
-        "deepl" | "google" => (!cfg.consent_text, "text"),
-        "llm" => (!cfg.consent_image || !cfg.consent_text, "image"),
-        _ => (false, ""),
-    };
-    if !need {
+    if !need_text && !need_image {
         return true;
     }
-    let msg = match kind {
-        "text" => w!(
-            "このエンジンはOCR済みの原文テキストを外部サービスへ送信します。\n初回のみ確認しています。許可しますか?"
-        ),
-        _ => w!(
-            "このエンジンはキャプチャ画像と言語設定を外部サービスへ送信する可能性があります。\n初回のみ確認しています。許可しますか?"
-        ),
+    let msg = if need_image {
+        w!(
+            "この操作はキャプチャ画像とテキスト・言語設定を外部サービスへ送信します。\n初回のみ確認しています。許可しますか?"
+        )
+    } else {
+        w!(
+            "この操作は読み取ったテキストと関連情報(アプリ名・ウィンドウタイトル等)を外部サービスへ送信します。\n初回のみ確認しています。許可しますか?"
+        )
     };
     let r = unsafe { MessageBoxW(Some(main_hwnd()), msg, w!("外部送信の同意"), MB_YESNO) };
     if r == IDYES {
         let mut c = Config::load();
-        match kind {
-            "text" => c.consent_text = true,
-            _ => {
-                c.consent_image = true;
-                c.consent_text = true;
-            }
+        if need_text {
+            c.consent_text = true;
+        }
+        if need_image {
+            c.consent_image = true;
+            // 画像には文字が写るため、画像同意はテキスト同意を内包する
+            c.consent_text = true;
         }
         c.save();
         with_app(|app| app.cfg = c);
@@ -773,4 +813,16 @@ fn ensure_consent(engine_key: &str, cfg: &Config) -> bool {
     } else {
         false
     }
+}
+
+/// 指定プロファイルの呼び出しに必要な同意を確認する (SPECv0.5.3)。
+/// ローカル(非外部)プロファイルは同意不要。with_image は画像を送る操作 (LLM統合OCR等) のとき true。
+fn ensure_consent_profile(profile_name: &str, with_image: bool, cfg: &Config) -> bool {
+    let Some(prof) = cfg.api_profiles.iter().find(|p| p.name == profile_name) else {
+        return true;
+    };
+    if !prof.is_external() {
+        return true;
+    }
+    ensure_consent_send(!cfg.consent_text, with_image && !cfg.consent_image, cfg)
 }

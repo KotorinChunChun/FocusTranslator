@@ -116,7 +116,7 @@ pub struct App {
     pub ctrl_z_prev: bool,
     /// 現在インライン編集中の対象ブロック (SPECv0.4)
     pub editing_block: overlay::EditBlock,
-    /// ホールド開始時刻 (5秒長押しでピン留め)
+    /// ホールド開始時刻 (pin_hold_seconds 秒の長押しでピン留め。既定3秒)
     pub hold_start: Option<std::time::Instant>,
 }
 
