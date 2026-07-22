@@ -103,7 +103,7 @@ impl ApiProfile {
 impl ApiType {
     pub fn default_model(&self) -> &'static str {
         match self {
-            ApiType::Gemini => "gemini-3.5-flash",
+            ApiType::Gemini => "gemini-3.6-flash",
             ApiType::OpenAI => "gpt-4o-mini",
             ApiType::Claude => "claude-haiku-4-5-20251001",
             ApiType::LlamaCpp => "gemma-4-e2b",
@@ -301,7 +301,7 @@ impl Default for Config {
             active_api_profile: "Gemini".into(),
             default_api_profile: "Gemini".into(),
             gemini_key_enc: String::new(),
-            gemini_model: "gemini-3.5-flash".into(),
+            gemini_model: "gemini-3.6-flash".into(),
             gpt_url: "https://api.openai.com/v1/chat/completions".into(),
             gpt_key_enc: String::new(),
             gpt_model: "gpt-4o-mini".into(),
@@ -592,7 +592,7 @@ mod tests {
             "target_lang": "ja",
             "source_lang": "en",
             "api_profiles": [
-                {"name": "Gemini", "api_type": "Gemini", "model_name": "gemini-3.5-flash", "api_url": "", "api_key_enc": ""},
+                {"name": "Gemini", "api_type": "Gemini", "model_name": "gemini-3.6-flash", "api_url": "", "api_key_enc": ""},
                 {"name": "GPT", "api_type": "OpenAI", "model_name": "gpt-4o-mini", "api_url": "https://api.openai.com/v1/chat/completions", "api_key_enc": ""}
             ],
             "active_api_profile": "Gemini"
