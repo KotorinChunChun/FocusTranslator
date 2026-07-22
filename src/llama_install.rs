@@ -49,6 +49,27 @@ pub fn installed() -> bool {
     server_exe_path().is_file()
 }
 
+/// 導入済みバイナリのバージョン情報(GitHub Releaseの tag_name / published_at)を記録する
+/// マーカーファイル (SPECv0.5.5: 更新確認のため導入時のバージョンを残しておく)。
+fn version_marker_path() -> PathBuf {
+    bin_dir().join("version.txt")
+}
+
+/// 導入済みバイナリの (tag_name, published_at) を返す。マーカーが無い場合
+/// (v0.5.4以前に導入したユーザー等)は None。
+pub fn installed_version() -> Option<(String, String)> {
+    let text = std::fs::read_to_string(version_marker_path()).ok()?;
+    let mut lines = text.lines();
+    let tag = lines.next()?.trim().to_string();
+    let published = lines.next().unwrap_or("").trim().to_string();
+    if tag.is_empty() { None } else { Some((tag, published)) }
+}
+
+/// バージョンマーカーファイルを書き出す
+fn write_version_marker(tag_name: &str, published_at: &str) {
+    let _ = std::fs::write(version_marker_path(), format!("{tag_name}\n{published_at}\n"));
+}
+
 /// モデルファイルが導入済みか (既定の管理下ディレクトリのみ判定。手動選択パスは
 /// resolve_model_path() 経由で別途確認する)
 pub fn model_installed() -> bool {
@@ -79,8 +100,18 @@ pub fn resolve_mmproj_path(override_path: &str) -> PathBuf {
     if trimmed.is_empty() { mmproj_path() } else { PathBuf::from(trimmed) }
 }
 
-/// GitHub Releasesの最新版からWindows CPU版zipのダウンロードURLを取得する
-fn resolve_latest_zip_url() -> Result<String, String> {
+/// GitHub Releasesの最新リリース情報 (SPECv0.5.5: 更新確認のためversion/公開日も保持する)
+pub struct LatestRelease {
+    /// 例: "b1234"
+    pub tag_name: String,
+    /// ISO8601形式の公開日時 (例: "2026-06-01T12:00:00Z")
+    pub published_at: String,
+    /// Windows CPU版zipのダウンロードURL
+    pub zip_url: String,
+}
+
+/// GitHub Releasesの最新版情報(タグ名・公開日・Windows CPU版zipのURL)を取得する
+fn fetch_latest_release() -> Result<LatestRelease, String> {
     let mut res = ureq::get(GITHUB_LATEST_RELEASE_API)
         .header("User-Agent", "FocusTranslator")
         .header("Accept", "application/vnd.github+json")
@@ -93,8 +124,10 @@ fn resolve_latest_zip_url() -> Result<String, String> {
         .body_mut()
         .read_json()
         .map_err(|e| format!("リリース情報の解析に失敗しました: {e}"))?;
+    let tag_name = json["tag_name"].as_str().unwrap_or("").to_string();
+    let published_at = json["published_at"].as_str().unwrap_or("").to_string();
     let assets = json["assets"].as_array().ok_or("リリース情報にアセットがありません")?;
-    assets
+    let zip_url = assets
         .iter()
         .find_map(|a| {
             let name = a["name"].as_str()?;
@@ -104,7 +137,18 @@ fn resolve_latest_zip_url() -> Result<String, String> {
                 None
             }
         })
-        .ok_or_else(|| "Windows CPU版のバイナリが見つかりませんでした".to_string())
+        .ok_or_else(|| "Windows CPU版のバイナリが見つかりませんでした".to_string())?;
+    Ok(LatestRelease { tag_name, published_at, zip_url })
+}
+
+/// 導入済みバージョンと最新リリースを比較する (SPECv0.5.5)。タグ名が異なる(または導入済み
+/// バージョン情報が無い=v0.5.4以前の導入)場合は更新ありとして Some を返す。
+pub fn check_for_update() -> Result<Option<LatestRelease>, String> {
+    let latest = fetch_latest_release()?;
+    match installed_version() {
+        Some((tag, _)) if tag == latest.tag_name => Ok(None),
+        _ => Ok(Some(latest)),
+    }
 }
 
 /// URLから target_path へストリームでダウンロードする(全文をメモリに載せない)。
@@ -180,6 +224,26 @@ fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// zipをダウンロードして bin_dir へ展開し、成功したらバージョンマーカーを書く共通処理
+/// (SPECv0.5.5: 新規導入・更新の両方で使う)。
+fn download_and_extract_binary(
+    release: &LatestRelease,
+    on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<(), String> {
+    let dir = bin_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("フォルダ作成に失敗しました: {e}"))?;
+    let zip_path = dir.join("llama.part.zip");
+    download_to_file(&release.zip_url, &zip_path, 300, on_progress)?;
+    let result = extract_zip(&zip_path, &dir);
+    let _ = std::fs::remove_file(&zip_path);
+    result?;
+    if !installed() {
+        return Err("展開後にllama-server.exeが見つかりませんでした".into());
+    }
+    write_version_marker(&release.tag_name, &release.published_at);
+    Ok(())
+}
+
 /// llama.cpp本体(CPU版)を導入する。既に導入済みなら何もしない。
 /// on_progress は10秒おきに (受信済みバイト数, 合計バイト数) を通知する (SPECv0.5.3:
 /// モデル/mmprojの導入と同様に設定画面へ進捗を反映するため)。
@@ -187,18 +251,19 @@ pub fn install_binary(on_progress: impl FnMut(u64, Option<u64>)) -> Result<(), S
     if installed() {
         return Ok(());
     }
-    let dir = bin_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("フォルダ作成に失敗しました: {e}"))?;
-    let url = resolve_latest_zip_url()?;
-    let zip_path = dir.join("llama.part.zip");
-    download_to_file(&url, &zip_path, 300, on_progress)?;
-    let result = extract_zip(&zip_path, &dir);
-    let _ = std::fs::remove_file(&zip_path);
-    result?;
-    if !installed() {
-        return Err("展開後にllama-server.exeが見つかりませんでした".into());
-    }
-    Ok(())
+    let release = fetch_latest_release()?;
+    download_and_extract_binary(&release, on_progress)
+}
+
+/// 導入済みのllama.cpp本体を、指定リリース(通常は check_for_update() で見つかった最新版)へ
+/// 更新する。install_binary() と異なり導入済みかどうかのガードは持たない — 呼び出し元
+/// (設定画面)が「更新する」と決めた後に呼ぶための経路 (SPECv0.5.5)。
+/// 呼び出し前に、サーバーが稼働中なら停止しておくこと(実行中のexeは上書きできない)。
+pub fn update_binary(
+    release: &LatestRelease,
+    on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<(), String> {
+    download_and_extract_binary(release, on_progress)
 }
 
 /// Gemma 4 E2B (Q4_0 GGUF) モデルを導入する。既に導入済みなら何もしない。

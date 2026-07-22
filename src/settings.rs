@@ -18,7 +18,7 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
     DestroyWindow, GetSystemMetrics,
-    IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
+    IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK,
     MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
     WM_DESTROY, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
 };
@@ -119,6 +119,9 @@ const WM_LLAMA_MMPROJ_DONE: u32 = WM_APP + 16;
 const WM_LLAMA_MMPROJ_PROGRESS: u32 = WM_APP + 17;
 /// llama.cpp本体ダウンロードの進捗通知 (SPECv0.5.3: モデル導入と同じ形式)
 const WM_LLAMA_BIN_PROGRESS: u32 = WM_APP + 18;
+/// 「更新を確認」の結果通知 (SPECv0.5.5)。wparam: 0=エラー(lparamにBox\<String\>) /
+/// 1=更新完了 / 2=既に最新版 / 3=ユーザーが更新をキャンセル。
+const WM_LLAMA_BIN_UPDATE_RESULT: u32 = WM_APP + 19;
 /// 各APIキーの発行ページ(実際に確認済みの現行URL)
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
@@ -642,14 +645,27 @@ fn refresh_llama_status(h: HWND) {
     let override_path = get_ctl_text(h, IDC_LLAMA_MODEL_PATH);
     let model_path = crate::llama_install::resolve_model_path(&override_path);
     let model_ok = model_path.is_file();
-    set_ctl_text(h, IDC_LLAMA_BIN_STATUS, if bin_ok { "導入済み" } else { "未導入" });
+    // バージョン情報が取れれば「{tag} 導入済み」、無ければ(v0.5.4以前の導入等)従来通り
+    // 「導入済み」にフォールバックする (SPECv0.5.5)。
+    let bin_status = if bin_ok {
+        match crate::llama_install::installed_version() {
+            Some((tag, _)) if !tag.is_empty() => format!("{tag} 導入済み"),
+            _ => "導入済み".to_string(),
+        }
+    } else {
+        "未導入".to_string()
+    };
+    set_ctl_text(h, IDC_LLAMA_BIN_STATUS, &bin_status);
     set_ctl_text(h, IDC_LLAMA_MODEL_STATUS, if model_ok { "選択済み" } else { "未選択" });
+    // 本体ボタンは導入済みでもグレーアウトせず、「更新を確認」に切り替えて常に押せる
+    // ようにする (SPECv0.5.5: 新しいバージョンが出たときに更新できるようにするため)。
+    set_ctl_text(h, IDC_LLAMA_BIN_INSTALL, if bin_ok { "更新を確認" } else { "インストール" });
     // ダウンロードボタンは既定の管理下ディレクトリに既にモデルがあれば無効化する
     // (SPECv0.5.2追補: 参照ボタンで指定した外部パスの有無は問わない。あくまで
     // 「このボタンでダウンロードした結果」の有無で判定する)。
     let downloaded = crate::llama_install::model_installed();
     unsafe {
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_INSTALL).unwrap_or_default(), !bin_ok);
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_INSTALL).unwrap_or_default(), true);
         let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MODEL_INSTALL).unwrap_or_default(), !downloaded);
     }
     // mmproj(画像入力対応)の状態: 任意項目のため、未選択でもサーバーはテキスト専用として起動できる
@@ -840,6 +856,82 @@ fn start_bin_install(h: HWND) {
         unsafe {
             let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_BIN_DONE, WPARAM(w), LPARAM(l));
         }
+    });
+}
+
+/// ISO8601形式の公開日時 ("2026-06-01T12:00:00Z") を "2026/06/01" 形式に整形する
+/// (確認ダイアログ表示用)。日付部分の抽出に失敗したら元の文字列をそのまま返す。
+fn format_release_date(published_at: &str) -> String {
+    published_at.split('T').next().unwrap_or(published_at).replace('-', "/")
+}
+
+/// 「更新を確認」ボタン押下時の処理 (SPECv0.5.5)。導入済みのバイナリがある状態でのみ
+/// 呼ばれる (未導入なら start_bin_install を使う)。最新リリースと比較し、更新があれば
+/// 確認ダイアログを出してからダウンロード・差し替える。サーバーが稼働中なら停止してから
+/// 更新する(実行中のexeは上書きできないため)。
+fn start_bin_check_update(h: HWND) {
+    unsafe {
+        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_INSTALL).unwrap_or_default(), false);
+    }
+    set_ctl_text(h, IDC_LLAMA_BIN_STATUS, "更新を確認中…");
+    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT).trim().parse().unwrap_or(crate::llama_server::DEFAULT_PORT);
+    let hwnd_isize = h.0 as isize;
+    std::thread::spawn(move || {
+        let hwnd = HWND(hwnd_isize as *mut _);
+        let post_result = |w: usize, l: isize| unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_LLAMA_BIN_UPDATE_RESULT, WPARAM(w), LPARAM(l));
+        };
+
+        let latest = match crate::llama_install::check_for_update() {
+            Ok(Some(latest)) => latest,
+            Ok(None) => {
+                post_result(2, 0);
+                return;
+            }
+            Err(e) => {
+                post_result(0, Box::into_raw(Box::new(e)) as isize);
+                return;
+            }
+        };
+
+        // MessageBoxWはワーカースレッドから呼んでも構わない(既存の同意ダイアログ等と
+        // 同じパターン。worker.rs の request_consent_blocking を参照)。
+        let msg = format!(
+            "新しいバージョン ({}) が利用可能です。\n公開日: {}\n更新しますか?",
+            latest.tag_name,
+            format_release_date(&latest.published_at)
+        );
+        let wide = to_wide(&msg);
+        let confirmed = unsafe {
+            MessageBoxW(Some(hwnd), PCWSTR(wide.as_ptr()), w!("llama.cppの更新"), MB_YESNO | MB_ICONQUESTION)
+                == windows::Win32::UI::WindowsAndMessaging::IDYES
+        };
+        if !confirmed {
+            post_result(3, 0);
+            return;
+        }
+
+        if crate::llama_server::is_running(port) {
+            let _ = crate::llama_server::stop(port);
+        }
+
+        let hwnd_isize2 = hwnd_isize;
+        let progress = move |downloaded: u64, total: Option<u64>| {
+            let label = match total {
+                Some(t) if t > 0 => format!("{}%", (downloaded * 100 / t).min(100)),
+                _ => format!("{}MB取得済み", downloaded / 1_000_000),
+            };
+            let ptr = Box::into_raw(Box::new(label)) as isize;
+            unsafe {
+                let _ = PostMessageW(Some(HWND(hwnd_isize2 as *mut _)), WM_LLAMA_BIN_PROGRESS, WPARAM(0), LPARAM(ptr));
+            }
+        };
+        let result = crate::llama_install::update_binary(&latest, progress);
+        let (w, l) = match result {
+            Ok(()) => (1usize, 0isize),
+            Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
+        };
+        post_result(w, l);
     });
 }
 
@@ -1377,7 +1469,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     );
                 }
                 IDC_LLAMA_BIN_INSTALL => {
-                    start_bin_install(h);
+                    if crate::llama_install::installed() {
+                        start_bin_check_update(h);
+                    } else {
+                        start_bin_install(h);
+                    }
                 }
                 IDC_LLAMA_MODEL_INSTALL => unsafe {
                     // 初回ダウンロード前に容量(約3GB)を警告し、同意を得てから開始する (SPECv0.5.2追補)。
@@ -1570,6 +1666,22 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
         WM_LLAMA_BIN_DONE => {
             handle_install_done(h, wparam, lparam, refresh_llama_status, "llama.cppをインストールしました。");
             ensure_local_llm_profile_if_ready(h);
+            LRESULT(0)
+        }
+        WM_LLAMA_BIN_UPDATE_RESULT => {
+            match wparam.0 {
+                1 => handle_install_done(h, wparam, lparam, refresh_llama_status, "llama.cppを更新しました。"),
+                0 => handle_install_done(h, wparam, lparam, refresh_llama_status, ""),
+                // 2=既に最新版 / 3=ユーザーが更新をキャンセル。どちらもエラーではないので
+                // ボタン・ステータス表示を元に戻すだけ (SPECv0.5.5)。
+                2 => {
+                    refresh_llama_status(h);
+                    unsafe {
+                        MessageBoxW(Some(h), w!("既に最新版です。"), crate::util::display_name_pcwstr(), MB_OK | MB_ICONINFORMATION);
+                    }
+                }
+                _ => refresh_llama_status(h),
+            }
             LRESULT(0)
         }
         WM_LLAMA_MODEL_PROGRESS => {
