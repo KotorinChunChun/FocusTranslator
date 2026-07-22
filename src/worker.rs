@@ -572,6 +572,43 @@ fn adopt_uia_text(
     translate(generation, cfg, text, tr_engine, main, recog_id, pc, false);
 }
 
+/// クリップボードのテキストを新規セッションとして取り込み翻訳する (SPECv0.5.4 §20)。
+/// 直前の右Ctrl取得の環境情報は引き継がず、capture(mode=clipboard) → recognition →
+/// translation を新規レコードとして記録する。
+pub fn clipboard_text(
+    generation: u64,
+    cfg: Config,
+    text: String,
+    tr_engine: String,
+    main: isize,
+    anchor: (i32, i32),
+) {
+    std::thread::spawn(move || {
+        init_com();
+        let t0 = Instant::now();
+        // クリップボード由来のためアプリ情報(exe/title/UIA)は持たない
+        let ctx = AppContext {
+            exe: None,
+            title: String::new(),
+            uia_path: String::new(),
+            uia_nodes: Vec::new(),
+            uia_json: String::new(),
+            control_type: None,
+            selected_text: None,
+        };
+        let ms = t0.elapsed().as_millis();
+        let capture_id = log_cap(&cfg, "clipboard", &ctx, None, Extent::none());
+        let recog_id = log_recog(&cfg, capture_id, "clipboard", "clipboard", ms, Some(&text), None, None);
+        post(main, generation, ctx.source_msg(
+            text.clone(), "clipboard", None, None, true, anchor, ocr::Focus::All, ms,
+            capture_id, recog_id, None, None,
+        ));
+        // OCRを経ていないため ocr_engine は空文字 (SPECv0.4 §7.1)
+        let pc = prompt_ctx(&ctx, "");
+        translate(generation, cfg, text, tr_engine, main, recog_id, pc, false);
+    });
+}
+
 /// ホールドモードの認識サイクル: 選択文字列 → UIA → WGCキャプチャOCR (SPEC §6.4, SPECv0.5追補)
 /// キャプチャ領域は UIA検出結果 (行矩形/要素/直下要素) を優先し、無ければ既定帯。
 pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Config, main: isize) {
@@ -758,6 +795,11 @@ pub struct ReocrJob {
     /// held_full_img 内での img の位置。画像編集で確定した場合は呼び出し側が新しい矩形を
     /// 渡す (あらかじめ DB へも反映しておくこと)。
     pub held_crop_rect: Option<RECT>,
+    /// true: 保持画像(img=Some)でも既存captureを引き継がず新規captureとして記録する
+    /// (SPECv0.5.4 §20: クリップボード画像取り込みは完全に新規のセッション扱い)。
+    pub fresh_capture: bool,
+    /// 新規captureを作るときの mode 文字列 (既存の保持画像再認識は "chip")。
+    pub log_mode: &'static str,
 }
 
 /// 再認識: 保持画像(無ければ再キャプチャ)で選択エンジンOCR→再翻訳 (SPEC §8)。
@@ -772,6 +814,7 @@ pub fn reocr(job: ReocrJob) {
         let ReocrJob {
             generation, capture_id, img, focus, x, y, target, ocr_engine, tr_engine, cfg, main,
             anchor, ctx: held_ctx, force_pin, perf_label, held_full_img, held_crop_rect,
+            fresh_capture, log_mode,
         } = job;
         let t0 = Instant::now();
         let mut hover_text: Option<String> = None;
@@ -830,7 +873,8 @@ pub fn reocr(job: ReocrJob) {
         // 同一画像+同一エンジンの既存認識結果があれば再利用する (再OCRなし・ログ追記なし)
         // 保持画像があれば既存captureへ追記、無ければ(=対象が変わりうる)新規captureを作る。
         // ここでは画像ありのcapture_idを先に決める(エラー時は画像なしで作り直す)。
-        let capture_with_img = || if held { capture_id } else { log_cap(&cfg, "chip", &ctx, Some(&log_img), extent) };
+        // クリップボード取り込み等 (fresh_capture) は保持画像でも新規captureを作る (SPECv0.5.4 §20)
+        let capture_with_img = || if held && !fresh_capture { capture_id } else { log_cap(&cfg, log_mode, &ctx, Some(&log_img), extent) };
 
         // 同一画像+同一エンジンの既存認識結果があれば再OCRせず再利用する。
         // 操作の記録としてrecognition行は追記する (SPECv0.4.9追補: 切替操作をログに残す)
@@ -872,7 +916,7 @@ pub fn reocr(job: ReocrJob) {
                 dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
             }
             Err(e) => {
-                let use_capture_id = if held { capture_id } else { log_cap(&cfg, "chip", &ctx, None, Extent::none()) };
+                let use_capture_id = if held && !fresh_capture { capture_id } else { log_cap(&cfg, log_mode, &ctx, None, Extent::none()) };
                 log_recog(&cfg, use_capture_id, "ocr", &ocr_engine, t0.elapsed().as_millis(), None, Some(&e), Some(&hash));
                 post(main, generation, WorkerMsg::Error { msg: e, anchor, clear_source: true });
             }

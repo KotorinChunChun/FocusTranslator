@@ -111,6 +111,9 @@ pub struct App {
     pub selected_text: Option<String>,
     /// 直近の認識が UIA 経路で得られたか
     pub via_uia: bool,
+    /// 直近の原文がクリップボードのテキスト取り込みか (SPECv0.5.4 §20: OCRを経ていないため
+    /// 見出しを「OCR結果」ではなく「取り込み結果」にする)
+    pub via_clipboard: bool,
     pub scroll_y: i32,
     /// 領域検出モード: 検出キー押下中でオーバーレイ表示中か
     detect_on: bool,
@@ -202,6 +205,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             control_type: None,
             selected_text: None,
             via_uia: false,
+            via_clipboard: false,
             scroll_y: 0,
             detect_on: false,
             detect_busy: false,
@@ -490,6 +494,7 @@ pub fn close_overlay(app: &mut App) {
     app.tr_pending = false;
     app.busy = false;
     app.via_uia = false;
+    app.via_clipboard = false;
     app.control_type = None;
     app.selected_text = None;
 }
@@ -550,6 +555,8 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 }
                 app.source = text;
                 app.via_uia = method == "UIA";
+                // クリップボードのテキスト取り込みはOCRを経ていない (SPECv0.5.4 §20)
+                app.via_clipboard = method == "clipboard";
                 if let Some(e) = engine {
                     app.cur_ocr = e;
                 }
@@ -774,6 +781,7 @@ pub fn sync_overlay(app: &mut App) {
         explain_enabled,
         cur_explain_chip_key: app.explain_profile.clone(),
         via_uia: app.via_uia,
+        via_clipboard: app.via_clipboard,
         ocr_keys,
         ocr_labels,
         ocr_enabled,
@@ -794,6 +802,8 @@ pub fn sync_overlay(app: &mut App) {
         scroll_y: app.scroll_y,
         has_image: app.last_img.is_some(),
         selected_text: app.selected_text.clone(),
+        // クリップボード種別をオーバーレイ同期毎に判定する (SPECv0.5.4 §20)
+        clipboard_kind: crate::util::clipboard_kind(),
         busy: app.busy,
         // overlay::update 内で EDIT (overlay.rs内) の実データから都度上書きされる
         edit: None,

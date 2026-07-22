@@ -3,7 +3,7 @@
 // overlay.rs の描画 (paint) とウィンドウ管理から分離して可読性を高める。
 use crate::engine;
 use crate::overlay::{
-    EditTool, OverlayContent, CHIP_CLOSE, CHIP_COPY, CHIP_COPY_INFO, CHIP_COPY_UIA_JSON,
+    EditTool, OverlayContent, CHIP_CLIPBOARD, CHIP_CLOSE, CHIP_COPY, CHIP_COPY_INFO, CHIP_COPY_UIA_JSON,
     CHIP_COPY_SRC, CHIP_COPY_TR, CHIP_EDIT_APPLY, CHIP_EDIT_CANCEL, CHIP_EDIT_ERASE,
     CHIP_EDIT_LASSO, CHIP_EDIT_RECT, CHIP_EDIT_RESET, CHIP_EDIT_UNDO, CHIP_EXPLAIN,
     CHIP_EXPLAIN_BASE, CHIP_IMAGE, CHIP_OCR_BASE, CHIP_OPEN_LOG, CHIP_PIN, CHIP_SETTINGS,
@@ -353,8 +353,10 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         y += sys_row_h + 8;
 
         // 【入力内容】: 対象アプリ情報 + UIAパスノードボタン + OCR対象画像ボタン。コピーは見出しラベルの左端。
+        // クリップボードに取り込める内容があれば「コピー中の内容」ボタンのため表示する (SPECv0.5.4 §20)
         if !content.app_title.is_empty() || content.has_image || !content.uia_nodes.is_empty()
-            || content.selected_text.is_some() {
+            || content.selected_text.is_some()
+            || content.clipboard_kind != crate::util::ClipboardKind::None {
             let block_start = y;
             // UIAノード詳細JSONがあるとき (=UIA経路) は、アプリ情報コピーの隣に
             // 詳細コピーボタンを並べる (SPECv0.5.4 §7)。
@@ -383,7 +385,10 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 };
                 let (sel_cw, _) = measure(hdc, "選択中の文字列", FONT_CHIP, false, 200);
                 let sel_w = sel_cw + 20;
-                let btns_w = sel_w + 6 + if cap_w > 0 { cap_w + 6 } else { 0 };
+                // 「コピー中の内容」ボタン分の幅も確保する (SPECv0.5.4 §20)
+                let (clip_cw, _) = measure(hdc, "コピー中の内容", FONT_CHIP, false, 200);
+                let clip_w = clip_cw + 20;
+                let btns_w = clip_w + 6 + sel_w + 6 + if cap_w > 0 { cap_w + 6 } else { 0 };
                 let reserve = btns_w + 12 + CLOSE_SIZE * 2 + 14;
                 let avail = (MAXW - reserve).max(80);
                 // 実行ファイル名を先に、続けてウィンドウタイトルを同じ行に併記する (SPECv0.5.4 §9)。
@@ -471,9 +476,26 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             }
 
             // アプリ名が無い場合のフォールバック
-            if content.app_title.is_empty() && (content.has_image || content.selected_text.is_some()) {
+            if content.app_title.is_empty()
+                && (content.has_image || content.selected_text.is_some()
+                    || content.clipboard_kind != crate::util::ClipboardKind::None)
+            {
                 let mut x = PAD;
                 let has_selection = content.selected_text.as_deref().is_some_and(|s| !s.trim().is_empty());
+                // 「コピー中の内容」を左端に置く (SPECv0.5.4 §20)。内容が無ければグレーアウト。
+                {
+                    let lab = "コピー中の内容";
+                    let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
+                    let chip_w = cw + 20;
+                    items.push(Item::Chip {
+                        rect: RECT { left: x, top: y, right: x + chip_w, bottom: y + CHIP_H },
+                        label: lab.to_string(),
+                        id: CHIP_CLIPBOARD,
+                        active: false,
+                        enabled: content.clipboard_kind != crate::util::ClipboardKind::None && !content.busy,
+                    });
+                    x += chip_w + 6;
+                }
                 if content.selected_text.is_some() {
                     let lab = "選択中の文字列";
                     let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
@@ -512,7 +534,10 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         // 再認識中もブロックを消さず「読み取り中…」を出す (SPECv0.5.4 §6)。
         if !content.source.is_empty() || content.has_image || content.ocr_pending {
             let block_start = y;
-            let heading = if content.via_uia {
+            let heading = if content.via_clipboard {
+                // クリップボードのテキスト取り込みはOCRを経ていない (SPECv0.5.4 §20)
+                "【取り込み結果 (クリップボード)】".to_string()
+            } else if content.via_uia {
                 "【画面読み取り結果 (UIA取得)】".to_string()
             } else {
                 format!("【OCR結果 ({})】", engine::ocr_label(&content.cur_ocr))
@@ -924,6 +949,18 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 active: has_selection
                     && content.selected_text.as_deref().map(str::trim) == Some(content.source.trim()),
                 enabled: has_selection && !content.busy,
+            });
+            // 「選択中の文字列」の左に「コピー中の内容」を置く (SPECv0.5.4 §20)。
+            // クリップボードにテキスト/画像が無ければグレーアウトする。
+            let (clip_cw2, _) = measure(hdc, "コピー中の内容", FONT_CHIP, false, 200);
+            let clip_w2 = clip_cw2 + 20;
+            let clip_right = sel_left - 6;
+            items.push(Item::Chip {
+                rect: RECT { left: clip_right - clip_w2, top: ty, right: clip_right, bottom: ty + CHIP_H },
+                label: "コピー中の内容".to_string(),
+                id: CHIP_CLIPBOARD,
+                active: false,
+                enabled: content.clipboard_kind != crate::util::ClipboardKind::None && !content.busy,
             });
         }
 

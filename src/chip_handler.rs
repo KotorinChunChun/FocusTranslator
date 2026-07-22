@@ -69,6 +69,129 @@ fn adopt_text_and_retranslate(text: String, cur_tr: String, recog_id: Option<i64
     crate::worker::retranslate(new_gen, cur_tr, cfg2, text, main, recog_id, pc);
 }
 
+/// 直前のキャプチャで得た環境情報を破棄して、新しい入力セッションを開始する
+/// (SPECv0.5.4 §20: クリップボード取り込みは右Ctrl取得分を引き継がない)。
+/// 戻り値は新しい世代番号と、翻訳エンジン・メインHWND・アンカー位置。
+fn begin_fresh_session(status: &str) -> Option<(u64, String, isize, (i32, i32))> {
+    with_app(|app| {
+        app.generation += 1;
+        app.mode = Mode::Pinned;
+        // 対象アプリ・UIA・選択・保持画像・ログIDをすべて破棄する
+        app.source.clear();
+        app.translation = None;
+        app.badge = None;
+        app.error_only = false;
+        app.app_title = String::new();
+        app.app_exe = String::new();
+        app.uia_path = String::new();
+        app.uia_json = String::new();
+        app.uia_nodes = Vec::new();
+        app.control_type = None;
+        app.selected_text = None;
+        app.last_img = None;
+        app.last_focus = crate::ocr::Focus::All;
+        app.last_full_img = None;
+        app.last_crop_rect = None;
+        app.capture_id = None;
+        app.recog_id = None;
+        app.explanation = None;
+        app.explain_profile = String::new();
+        app.explaining = false;
+        app.via_uia = false;
+        app.via_clipboard = false;
+        app.scroll_y = 0;
+        // 取り込み中は両ブロックを処理中表示にする (SPECv0.5.4 §6)
+        app.ocr_pending = true;
+        app.tr_pending = true;
+        app.status = Some(status.to_string());
+        app.busy = true;
+        sync_overlay(app);
+        (app.generation, app.cur_tr.clone(), app.main.0 as isize, app.anchor)
+    })
+}
+
+/// 「コピー中の内容」チップ (SPECv0.5.4 §20): クリップボードのテキスト/画像を
+/// 新規セッションとして取り込む。テキストはそのまま原文として、画像はOCRへ回して翻訳する。
+fn chip_clipboard(c: ChipCtx) {
+    match crate::util::clipboard_kind() {
+        crate::util::ClipboardKind::Text => {
+            let text = crate::util::get_clipboard_text(main_hwnd())
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty());
+            let Some(text) = text else {
+                with_app(|app| {
+                    app.badge = Some("クリップボードのテキストを取得できませんでした".into());
+                    sync_overlay(app);
+                });
+                return;
+            };
+            let Some((new_gen, cur_tr, main, anchor)) =
+                begin_fresh_session("コピー中のテキストを翻訳中…")
+            else {
+                return;
+            };
+            // 取り込んだテキストを即座に原文として見せる (OCRは不要なので pending も解除)
+            with_app(|app| {
+                app.source = text.clone();
+                app.via_clipboard = true;
+                app.ocr_pending = false;
+                sync_overlay(app);
+            });
+            crate::worker::clipboard_text(new_gen, Config::load(), text, cur_tr, main, anchor);
+        }
+        crate::util::ClipboardKind::Image => {
+            let Some(img) = crate::util::get_clipboard_image(main_hwnd()) else {
+                with_app(|app| {
+                    app.badge = Some("クリップボードの画像を取得できませんでした".into());
+                    sync_overlay(app);
+                });
+                return;
+            };
+            let Some((new_gen, cur_tr, main, anchor)) =
+                begin_fresh_session("コピー中の画像を認識中…")
+            else {
+                return;
+            };
+            let img = std::sync::Arc::new(img);
+            with_app(|app| {
+                app.last_img = Some(img.clone());
+                sync_overlay(app);
+            });
+            // 保持画像を新規capture (mode=clipboard) としてOCR→翻訳する
+            crate::worker::reocr(crate::worker::ReocrJob {
+                generation: new_gen,
+                capture_id: None,
+                img: Some(img),
+                focus: crate::ocr::Focus::All,
+                x: 0,
+                y: 0,
+                target: 0,
+                ocr_engine: c.cfg.default_ocr.clone(),
+                tr_engine: cur_tr,
+                cfg: Config::load(),
+                main,
+                anchor,
+                ctx: crate::worker::AppContext {
+                    exe: None,
+                    title: String::new(),
+                    uia_path: String::new(),
+                    uia_nodes: Vec::new(),
+                    uia_json: String::new(),
+                    control_type: None,
+                    selected_text: None,
+                },
+                force_pin: true,
+                perf_label: "clipboard_image",
+                held_full_img: None,
+                held_crop_rect: None,
+                fresh_capture: true,
+                log_mode: "clipboard",
+            });
+        }
+        crate::util::ClipboardKind::None => {}
+    }
+}
+
 /// 画像編集モードの「編集終了」確定処理: 編集セッション中に確定した最終画像を
 /// App/DBへ反映し、同一capture配下で再認識する (SPECv0.4 §4-3, §8.2.1)。
 /// 「選択範囲を残す/消す」「元に戻す」は編集セッション内(overlay.rs)で完結し、
@@ -127,6 +250,8 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>, final_
         perf_label: "reocr_edited",
         held_full_img: full_img,
         held_crop_rect: final_rect,
+        fresh_capture: false,
+        log_mode: "chip",
     });
 }
 
@@ -415,6 +540,8 @@ pub fn handle_chip(id: usize) {
             return;
         };
         adopt_text_and_retranslate(text, c.cur_tr, c.recog_id, c.main);
+    } else if id == overlay::CHIP_CLIPBOARD {
+        chip_clipboard(c);
     } else if id >= overlay::CHIP_UIA_NODE_BASE {
         // UIAパスノード選択: そのノードのテキストを原文として採用し再翻訳
         let idx = id - overlay::CHIP_UIA_NODE_BASE;
@@ -755,6 +882,8 @@ fn switch_ocr_engine(id: usize, c: ChipCtx) {
         perf_label: "reocr",
         held_full_img: c.last_full_img,
         held_crop_rect: c.last_crop_rect,
+        fresh_capture: false,
+        log_mode: "chip",
     });
 }
 

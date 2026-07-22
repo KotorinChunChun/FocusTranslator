@@ -7,9 +7,10 @@ use windows::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    SetClipboardData,
 };
-use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindow, GW_OWNER, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId};
 use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
@@ -54,7 +55,6 @@ pub fn config_dir() -> PathBuf {
 }
 
 pub fn set_clipboard_text(hwnd: HWND, text: &str) -> bool {
-    const CF_UNICODETEXT: u32 = 13;
     unsafe {
         if OpenClipboard(Some(hwnd)).is_err() {
             return false;
@@ -77,6 +77,156 @@ pub fn set_clipboard_text(hwnd: HWND, text: &str) -> bool {
         let _ = CloseClipboard();
         ok
     }
+}
+
+/// クリップボードの内容種別 (SPECv0.5.4 §20: 「コピー中の内容」ボタンの活性判定に使う)。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ClipboardKind {
+    /// テキストも画像も無い (ボタンはグレーアウト)
+    #[default]
+    None,
+    /// CF_UNICODETEXT が利用可能
+    Text,
+    /// CF_DIB (ビットマップ画像) が利用可能
+    Image,
+}
+
+const CF_UNICODETEXT: u32 = 13;
+const CF_DIB: u32 = 8;
+
+/// クリップボードの内容種別を判定する (SPECv0.5.4 §20)。OpenClipboard 不要で軽量なため
+/// オーバーレイ同期毎に呼べる。テキストを画像より優先する。
+pub fn clipboard_kind() -> ClipboardKind {
+    unsafe {
+        if IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok() {
+            ClipboardKind::Text
+        } else if IsClipboardFormatAvailable(CF_DIB).is_ok() {
+            ClipboardKind::Image
+        } else {
+            ClipboardKind::None
+        }
+    }
+}
+
+/// クリップボードのテキスト (CF_UNICODETEXT) を取得する (SPECv0.5.4 §20)。
+pub fn get_clipboard_text(hwnd: HWND) -> Option<String> {
+    unsafe {
+        if OpenClipboard(Some(hwnd)).is_err() {
+            return None;
+        }
+        let result = (|| {
+            let h = GetClipboardData(CF_UNICODETEXT).ok()?;
+            let ptr = GlobalLock(HGLOBAL(h.0)) as *const u16;
+            if ptr.is_null() {
+                return None;
+            }
+            let mut len = 0usize;
+            while *ptr.add(len) != 0 {
+                len += 1;
+            }
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+            let _ = GlobalUnlock(HGLOBAL(h.0));
+            Some(s)
+        })();
+        let _ = CloseClipboard();
+        result
+    }
+}
+
+/// クリップボードの画像 (CF_DIB) を取得して `Captured`(BGRA) へ変換する (SPECv0.5.4 §20)。
+/// BI_RGB の 24bit / 32bit のみ対応 (圧縮DIBは非対応で None)。ボトムアップ/トップダウンの
+/// どちらの向きにも対応する。
+pub fn get_clipboard_image(hwnd: HWND) -> Option<crate::capture::Captured> {
+    unsafe {
+        if OpenClipboard(Some(hwnd)).is_err() {
+            return None;
+        }
+        let result = (|| {
+            let h = GetClipboardData(CF_DIB).ok()?;
+            let hg = HGLOBAL(h.0);
+            let ptr = GlobalLock(hg) as *const u8;
+            if ptr.is_null() {
+                return None;
+            }
+            let size = GlobalSize(hg);
+            let parsed = parse_dib(std::slice::from_raw_parts(ptr, size));
+            let _ = GlobalUnlock(hg);
+            parsed
+        })();
+        let _ = CloseClipboard();
+        result
+    }
+}
+
+/// CF_DIB バイト列 (BITMAPINFOHEADER + ピクセル) を `Captured`(BGRA, トップダウン) へ変換する。
+fn parse_dib(data: &[u8]) -> Option<crate::capture::Captured> {
+    // BITMAPINFOHEADER の必要フィールドを読む (先頭40バイト)
+    if data.len() < 40 {
+        return None;
+    }
+    let rd_u32 = |off: usize| u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+    let rd_i32 = |off: usize| i32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+    let rd_u16 = |off: usize| u16::from_le_bytes([data[off], data[off + 1]]);
+
+    let bi_size = rd_u32(0) as usize;
+    let width = rd_i32(4);
+    let height_raw = rd_i32(8);
+    let bit_count = rd_u16(14);
+    let compression = rd_u32(16);
+    let clr_used = rd_u32(32) as usize;
+
+    // BI_RGB(0) と BI_BITFIELDS(3) の 24/32bit のみ対応 (圧縮DIBは非対応)
+    if (compression != 0 && compression != 3)
+        || !(bit_count == 24 || bit_count == 32)
+        || width <= 0
+        || height_raw == 0
+    {
+        app_log(&format!(
+            "clipboard DIB unsupported: bi_size={bi_size} bit={bit_count} comp={compression} w={width} h={height_raw}"
+        ));
+        return None;
+    }
+    let top_down = height_raw < 0;
+    let width = width as usize;
+    let height = height_raw.unsigned_abs() as usize;
+
+    // ピクセルデータ開始オフセット = ヘッダ + カラーマスク + カラーパレット。
+    // BI_BITFIELDS かつ BITMAPINFOHEADER(40) のときは、ヘッダ直後に12バイトのマスクが入る
+    // (BITMAPV4/V5HEADER ではマスクはヘッダ内に含まれるため加算しない)。
+    let mask_bytes = if compression == 3 && bi_size == 40 { 12 } else { 0 };
+    let palette_bytes = clr_used * 4;
+    let pixel_off = bi_size + mask_bytes + palette_bytes;
+    let bytes_per_px = (bit_count / 8) as usize;
+    // 各行は4バイト境界へパディングされる (DIBのstride規則)
+    let stride = width.saturating_mul(bytes_per_px).div_ceil(4) * 4;
+    if pixel_off.saturating_add(stride.saturating_mul(height)) > data.len() {
+        app_log(&format!(
+            "clipboard DIB size mismatch: need={} have={} (off={pixel_off} stride={stride} h={height})",
+            pixel_off + stride * height,
+            data.len()
+        ));
+        return None;
+    }
+
+    let mut bgra = vec![0u8; width * height * 4];
+    for row in 0..height {
+        // ボトムアップ(既定)は最下行から格納されているため、出力の行を反転する
+        let src_row = if top_down { row } else { height - 1 - row };
+        let src_line = pixel_off + src_row * stride;
+        for col in 0..width {
+            let sp = src_line + col * bytes_per_px;
+            let dp = (row * width + col) * 4;
+            bgra[dp] = data[sp]; // B
+            bgra[dp + 1] = data[sp + 1]; // G
+            bgra[dp + 2] = data[sp + 2]; // R
+            bgra[dp + 3] = if bytes_per_px == 4 { data[sp + 3] } else { 255 }; // A
+        }
+    }
+    Some(crate::capture::Captured {
+        width: width as u32,
+        height: height as u32,
+        bgra,
+    })
 }
 
 /// DPAPI でユーザー単位に暗号化し base64 で返す。空文字はそのまま。

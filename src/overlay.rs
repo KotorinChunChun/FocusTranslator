@@ -49,6 +49,8 @@ pub const CHIP_IMAGE: usize = 107;
 pub const CHIP_COPY_INFO: usize = 108;
 /// UIAノード詳細JSONをコピー (SPECv0.5.4 §7)
 pub const CHIP_COPY_UIA_JSON: usize = 109;
+/// クリップボードの内容(テキスト/画像)を新規セッションとして取り込む (SPECv0.5.4 §20)
+pub const CHIP_CLIPBOARD: usize = 128;
 /// 翻訳方向の反転 (source_lang ⇄ target_lang)
 pub const CHIP_SWAP_LANG: usize = 110;
 /// ログビューアを開く
@@ -191,6 +193,8 @@ pub struct OverlayContent {
     pub cur_explain_chip_key: String,
     /// 直近の認識が UIA 経路(OCR不要)で得られたか
     pub via_uia: bool,
+    /// 直近の原文がクリップボードのテキスト取り込みか (SPECv0.5.4 §20: 見出しの出し分け用)
+    pub via_clipboard: bool,
     pub ocr_keys: Vec<String>,
     pub ocr_labels: Vec<String>,
     pub ocr_enabled: Vec<bool>,
@@ -219,6 +223,8 @@ pub struct OverlayContent {
     /// カーソル位置要素で選択中のテキスト (SPECv0.5追補)。
     /// 「選択中の文字列」チップの活性判定・全文ツールチップに使う。
     pub selected_text: Option<String>,
+    /// クリップボードの内容種別 (SPECv0.5.4 §20: 「コピー中の内容」チップの活性判定)。
+    pub clipboard_kind: crate::util::ClipboardKind,
     /// 時間のかかる処理(再認識・再翻訳・解説取得)の実行中。
     pub busy: bool,
     /// 画像編集モードの要約 (overlay::update 内で EDIT の内容から自動的に設定される。
