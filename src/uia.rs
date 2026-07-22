@@ -1,7 +1,8 @@
 // UIA テキスト取得経路 (SPEC §6.1)
 // ElementFromPoint → TextPattern → RangeFromPoint → 行単位に拡張 → GetText
 // TextPattern が無ければ祖先を数段探索。取得不可なら text=None を返し OCR 経路へ。
-use windows::Win32::Foundation::{POINT, RECT};
+use windows::Win32::Foundation::{LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::Ole::{
     SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetUBound, SafeArrayUnaccessData,
@@ -165,6 +166,8 @@ const SELECTED_TEXT_MAX: usize = 800;
 
 /// 要素のTextPatternから現在選択中のテキストを取得する。選択が無い(長さ0)、
 /// TextPattern非対応、全選択範囲が空白のみの場合は None。
+/// 標準Win32 EDITコントロールはCOM UIAでもTextPatternに非対応のため常にここで失敗する
+/// (SPECv0.5.4 §12実測)。呼び出し元は失敗時に `selected_text_via_win32_edit` を試す。
 fn selected_text_of(e: &IUIAutomationElement) -> Option<String> {
     unsafe {
         let unk = e.GetCurrentPattern(UIA_TextPatternId).ok()?;
@@ -195,6 +198,60 @@ fn selected_text_of(e: &IUIAutomationElement) -> Option<String> {
             return None;
         }
         Some(parts.join(" "))
+    }
+}
+
+/// 標準Win32 EDITコントロール向けフォールバック (SPECv0.5.4 §12)。
+/// TextPatternに非対応でも、要素がネイティブウィンドウ(EDITクラス等)を持っていれば
+/// EM_GETSEL/WM_GETTEXTを直接送って選択範囲を取得できる。UIAパターンを介さないため
+/// フォーカスの有無やUIAプロキシの実装差に左右されない。
+fn selected_text_via_win32_edit(e: &IUIAutomationElement) -> Option<String> {
+    unsafe {
+        let hwnd = e.CurrentNativeWindowHandle().ok()?;
+        if hwnd.is_invalid() {
+            return None;
+        }
+        let mut start: u32 = 0;
+        let mut end: u32 = 0;
+        SendMessageW(
+            hwnd,
+            windows::Win32::UI::Controls::EM_GETSEL,
+            Some(WPARAM(&mut start as *mut u32 as usize)),
+            Some(LPARAM(&mut end as *mut u32 as isize)),
+        );
+        if end <= start {
+            return None;
+        }
+        let text_len = SendMessageW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::WM_GETTEXTLENGTH,
+            None,
+            None,
+        )
+        .0 as usize;
+        if text_len == 0 {
+            return None;
+        }
+        let mut buf: Vec<u16> = vec![0; text_len + 1];
+        let copied = SendMessageW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::WM_GETTEXT,
+            Some(WPARAM(buf.len())),
+            Some(LPARAM(buf.as_mut_ptr() as isize)),
+        )
+        .0 as usize;
+        buf.truncate(copied.min(buf.len()));
+        let (s, en) = (start as usize, (end as usize).min(buf.len()));
+        if s >= en || s >= buf.len() {
+            return None;
+        }
+        let selected = String::from_utf16_lossy(&buf[s..en]);
+        let sanitized = sanitize_uia_text(&selected);
+        let trimmed = sanitized.trim();
+        if trimmed.chars().count() > SELECTED_TEXT_MAX {
+            return Some(crate::util::truncate_chars(trimmed, SELECTED_TEXT_MAX));
+        }
+        if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
     }
 }
 
@@ -247,10 +304,12 @@ pub fn probe_at_point(x: i32, y: i32) -> UiaProbe {
             if let Some(r) = &hit.range {
                 p.line_rects = range_rects(r);
             }
-            p.selected_text = selected_text_of(&hit.element);
+            // TextPattern非対応(標準EDIT等)ならEM_GETSEL経由のフォールバックを試す (SPECv0.5.4 §12)
+            p.selected_text = selected_text_of(&hit.element)
+                .or_else(|| selected_text_via_win32_edit(&hit.element));
             p.text = Some(hit.text);
         } else if let Ok(name) = el.CurrentName() {
-            p.selected_text = selected_text_of(&el);
+            p.selected_text = selected_text_of(&el).or_else(|| selected_text_via_win32_edit(&el));
             // TextPattern なし: Name に要素の全テキストが入っていれば段落復元に使う
             let s = sanitize_uia_text(&name.to_string());
             let t = s.trim();

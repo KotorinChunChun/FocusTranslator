@@ -3,7 +3,7 @@
 // overlay.rs の描画 (paint) とウィンドウ管理から分離して可読性を高める。
 use crate::engine;
 use crate::overlay::{
-    EditTool, OverlayContent, CHIP_CLOSE, CHIP_COPY, CHIP_COPY_INFO,
+    EditTool, OverlayContent, CHIP_CLOSE, CHIP_COPY, CHIP_COPY_INFO, CHIP_COPY_UIA_JSON,
     CHIP_COPY_SRC, CHIP_COPY_TR, CHIP_EDIT_APPLY, CHIP_EDIT_CANCEL, CHIP_EDIT_ERASE,
     CHIP_EDIT_LASSO, CHIP_EDIT_RECT, CHIP_EDIT_RESET, CHIP_EDIT_UNDO, CHIP_EXPLAIN,
     CHIP_EXPLAIN_BASE, CHIP_IMAGE, CHIP_OCR_BASE, CHIP_OPEN_LOG, CHIP_PIN, CHIP_SETTINGS,
@@ -356,12 +356,19 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         if !content.app_title.is_empty() || content.has_image || !content.uia_nodes.is_empty()
             || content.selected_text.is_some() {
             let block_start = y;
+            // UIAノード詳細JSONがあるとき (=UIA経路) は、アプリ情報コピーの隣に
+            // 詳細コピーボタンを並べる (SPECv0.5.4 §7)。
+            let info_chips: Vec<(&str, usize, bool)> = if content.uia_json.is_empty() {
+                vec![("📋", CHIP_COPY_INFO, true)]
+            } else {
+                vec![("📋", CHIP_COPY_INFO, true), ("詳細📋", CHIP_COPY_UIA_JSON, true)]
+            };
             let hh = heading_row(
                 &mut items,
                 y,
                 "【入力内容】",
                 thm.accent_info,
-                &[("📋", CHIP_COPY_INFO, true)],
+                &info_chips,
                 &mut need_w,
             );
             y += hh + 4;
@@ -379,12 +386,18 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 let btns_w = sel_w + 6 + if cap_w > 0 { cap_w + 6 } else { 0 };
                 let reserve = btns_w + 12 + CLOSE_SIZE * 2 + 14;
                 let avail = (MAXW - reserve).max(80);
-                let mut info = format!("アプリケーション：{}", content.app_title);
+                // 実行ファイル名を先に、続けてウィンドウタイトルを同じ行に併記する (SPECv0.5.4 §9)。
+                let body = if content.app_exe.is_empty() {
+                    content.app_title.clone()
+                } else {
+                    format!("{}　{}", content.app_exe, content.app_title)
+                };
+                let base = "アプリケーション：";
+                let mut info = format!("{base}{body}");
                 let (mut tw, th) = measure(hdc, &info, FONT_INFO, false, 4000);
                 if tw > avail {
-                    let base = "アプリケーション：";
-                    let budget = ((avail as f32 / tw.max(1) as f32) * content.app_title.chars().count() as f32) as usize;
-                    info = format!("{base}{}", crate::util::truncate_chars(&content.app_title, budget.max(4)));
+                    let budget = ((avail as f32 / tw.max(1) as f32) * body.chars().count() as f32) as usize;
+                    info = format!("{base}{}", crate::util::truncate_chars(&body, budget.max(4)));
                     let (tw2, _) = measure(hdc, &info, FONT_INFO, false, 4000);
                     tw = tw2;
                 }
@@ -496,7 +509,8 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         // 【OCR結果】(UIA経路の場合はOCRを行わないため専用の見出しにする): コピーは左端
         // 原文が空でも、保持画像がある(=直近のOCRが失敗しただけ)ならブロック自体は表示し続け、
         // OCRエンジン切替チップで再試行できるようにする (SPECv0.5.2追補)。
-        if !content.source.is_empty() || content.has_image {
+        // 再認識中もブロックを消さず「読み取り中…」を出す (SPECv0.5.4 §6)。
+        if !content.source.is_empty() || content.has_image || content.ocr_pending {
             let block_start = y;
             let heading = if content.via_uia {
                 "【画面読み取り結果 (UIA取得)】".to_string()
@@ -515,14 +529,20 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             );
             y += hh + 4;
 
-            let (sw, sh) = measure(hdc, &content.source, FONT_BODY, false, MAXW);
+            // 再認識中は古い原文の代わりに処理中メッセージを出す (SPECv0.5.4 §6)
+            let (ocr_body, ocr_color) = if content.ocr_pending {
+                ("読み取り中…".to_string(), thm.status)
+            } else {
+                (content.source.clone(), thm.text)
+            };
+            let (sw, sh) = measure(hdc, &ocr_body, FONT_BODY, false, MAXW);
             let text_h = sh.max(24);
             let rect = RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h };
             items.push(Item::Text {
                 rect,
-                text: content.source.clone(),
+                text: ocr_body,
                 size: FONT_BODY,
-                color: thm.text,
+                color: ocr_color,
                 bold: false,
                 mono: false,
             });
@@ -546,8 +566,14 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             y += 6;
         }
 
-        // 【翻訳結果】またはステータス: コピーは左端、言語反転は右端(後で配置)
-        if let Some(t) = &content.translation {
+        // 【翻訳結果】またはステータス: コピーは左端、言語反転は右端(後で配置)。
+        // 翻訳中もブロックを消さず「翻訳中…」を出す (SPECv0.5.4 §6)。
+        let translation_body: Option<String> = if content.tr_pending {
+            Some("翻訳中…".to_string())
+        } else {
+            content.translation.clone()
+        };
+        if let Some(t) = &translation_body {
             let block_start = y;
             if !content.source_lang.is_empty() {
                 let lab = format!("{}→{}", content.source_lang, content.target_lang);
@@ -581,7 +607,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 rect,
                 text: t.clone(),
                 size: FONT_BODY,
-                color: thm.text,
+                color: if content.tr_pending { thm.status } else { thm.text },
                 bold: false,
                 mono: false,
             });
@@ -704,6 +730,23 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                             text: b.text,
                             size: FONT_INFO,
                             color: thm.label,
+                            bold: false,
+                            mono: true,
+                        });
+                        y += text_h + 8;
+                        need_w = need_w.max(indent + tw + PAD + 4);
+                    }
+                    crate::markdown::BlockKind::Table => {
+                        // 桁揃え済みの簡易表を等幅フォントで描画する (SPECv0.5.4 §5)。
+                        let indent = PAD + 8;
+                        let table_maxw = MAXW - 8;
+                        let (tw, th) = measure_font(hdc, &b.text, FONT_INFO, false, true, table_maxw);
+                        let text_h = th.max(16);
+                        items.push(Item::Text {
+                            rect: RECT { left: indent, top: y, right: indent + table_maxw, bottom: y + text_h },
+                            text: b.text,
+                            size: FONT_INFO,
+                            color: thm.text,
                             bold: false,
                             mono: true,
                         });
@@ -837,12 +880,14 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         if let Some((set_w, log_w, ty)) = sys_msg_btns {
             let log_right = pin_left - 6;
             let log_left = log_right - log_w;
+            // [設定][ログを開く] は処理中でも常に押せる。別ウィンドウを開くだけで
+            // 進行中の応答待ちと衝突しないため (SPECv0.5.4 §4)。
             items.push(Item::Chip {
                 rect: RECT { left: log_left, top: ty, right: log_right, bottom: ty + CHIP_H },
                 label: "ログを開く".to_string(),
                 id: CHIP_OPEN_LOG,
                 active: false,
-                enabled: !content.busy,
+                enabled: true,
             });
             let set_right = log_left - 6;
             let set_left = set_right - set_w;
@@ -851,7 +896,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 label: "設定".to_string(),
                 id: CHIP_SETTINGS,
                 active: false,
-                enabled: !content.busy,
+                enabled: true,
             });
         }
 

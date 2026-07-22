@@ -217,8 +217,10 @@ const OLD_TRANSLATE_PROMPT_V52: &str =
 /// OCR+翻訳統合プロンプトの既定値
 pub const DEFAULT_GEMINI_OCR_PROMPT: &str =
     "Extract the text in this image and translate it from {{source_lang}} to {{target_lang}}. Respond with JSON only: {\"source\": \"<extracted text>\", \"translation\": \"<translation>\"}";
-/// 解説プロンプトの既定値 (SPECv0.5.3: 赤枠付き全体キャプチャ添付の説明を追加)
-pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n画像が添付されている場合、それは対象アプリ全体のスクリーンショットで、赤枠で囲んだ箇所が解説対象の表示位置です。画面全体の文脈も参考にしてください。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
+/// 解説プロンプトの既定値 (SPECv0.5.4: UIAパス → UIAノード詳細 {{uia_detail}} へ差し替え)
+pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n画像が添付されている場合、それは対象アプリ全体のスクリーンショットで、赤枠で囲んだ箇所が解説対象の表示位置です。画面全体の文脈も参考にしてください。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAノード詳細\n{{uia_detail}}";
+/// v0.5.3 の解説プロンプト既定値 (SPECv0.5.4でテンプレートを変更したため、移行判定用に保持する)
+const OLD_EXPLAIN_PROMPT_V53: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n画像が添付されている場合、それは対象アプリ全体のスクリーンショットで、赤枠で囲んだ箇所が解説対象の表示位置です。画面全体の文脈も参考にしてください。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
 /// v0.3 までの解説プロンプト既定値 (設定移行の判定用。当時の文言そのままで比較する)
 const OLD_EXPLAIN_PROMPT: &str =
     "Explain the grammar, nuances, and background of the following text in {{target_lang}}.\n{{glossary}}\n\n{{original_text}}";
@@ -274,6 +276,8 @@ pub struct PromptContext {
     pub app_exe: String,
     /// UIA取得時の要素のパス (画像OCR時は空文字)
     pub uia_path: String,
+    /// UIAノード詳細JSON (SPECv0.5.4 §10: 解説プロンプトの {{uia_detail}} 用。画像OCR時は空文字)
+    pub uia_detail: String,
     /// 実行されたOCRエンジン名 (UIA経路は空文字)
     pub ocr_engine: String,
     /// 実行された翻訳エンジン名 (翻訳前は空文字)
@@ -398,6 +402,7 @@ impl Config {
             if p.explain_prompt == OLD_EXPLAIN_PROMPT
                 || p.explain_prompt == OLD_EXPLAIN_PROMPT_V4
                 || p.explain_prompt == OLD_EXPLAIN_PROMPT_V52
+                || p.explain_prompt == OLD_EXPLAIN_PROMPT_V53
             {
                 p.explain_prompt = DEFAULT_GEMINI_EXPLAIN_PROMPT.into();
                 migrated = true;
@@ -467,6 +472,7 @@ impl Config {
             .replace("{{app_title}}", &ctx.app_title)
             .replace("{{app_exe}}", &ctx.app_exe)
             .replace("{{uia_path}}", &ctx.uia_path)
+            .replace("{{uia_detail}}", &ctx.uia_detail)
             .replace("{{ocr_engine}}", &ctx.ocr_engine)
             .replace("{{tr_engine}}", &ctx.tr_engine)
     }

@@ -22,7 +22,7 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_DELETE,
+    EnableWindow, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_DELETE,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -941,6 +941,10 @@ fn on_cap_selected(idx: usize) {
         && !ct.is_empty() {
             d.push_str(&format!("コントロール種類: {ct}\n"));
         }
+    if let Some(sel) = &cap.selected_text
+        && !sel.is_empty() {
+            d.push_str(&format!("選択中の文字列: {sel}\n"));
+        }
     if let (Some(w), Some(hh)) = (cap.image_w, cap.image_h) {
         d.push_str(&format!("画像: {w}x{hh}\n"));
     }
@@ -1032,6 +1036,12 @@ fn on_cap_selected(idx: usize) {
         lv_select(recog_lv, 0);
         on_recog_selected(0);
     }
+    // 画像プレビューを開いているなら、選択した入力の画像に連動更新する (SPECv0.5.4 §16)
+    let (ocr_img, full_img, box_rect) = STATE.with(|s| {
+        let st = s.borrow();
+        (st.image.clone(), st.full_image.clone(), st.crop_rect)
+    });
+    crate::image_preview::refresh_if_open(h, ocr_img, full_img, box_rect);
     unsafe {
         // bErase=false: 二度塗りによる画像パネルの点滅を防ぐ (reload と同じ理由)
         let _ = InvalidateRect(Some(h), None, false);
@@ -1319,6 +1329,32 @@ fn rgba_to_captured(iw: u32, ih: u32, rgba: &[u8]) -> crate::capture::Captured {
     crate::capture::Captured { width: iw, height: ih, bgra }
 }
 
+/// 再処理ボタンを「○○中…」表示にして無効化する (SPECv0.5.4 §14: 連打防止 + 進行中の明示)。
+fn set_reproc_busy(h: HWND, btn_id: i32, busy_label: &str) {
+    let btn = crate::ui_helpers::get_dlg_item(h, btn_id);
+    let wide = to_wide(busy_label);
+    unsafe {
+        let _ = SetWindowTextW(btn, PCWSTR(wide.as_ptr()));
+        let _ = EnableWindow(btn, false);
+    }
+}
+
+/// 再OCR/再翻訳/再解説ボタンを通常表示・有効へ戻す (WM_APP_RELOAD の完了通知時)。
+fn reset_reproc_buttons(h: HWND) {
+    for (id, label) in [
+        (IDC_BTN_REOCR, "再OCR"),
+        (IDC_BTN_RETRANS, "再翻訳"),
+        (IDC_BTN_REEXPLAIN, "再解説"),
+    ] {
+        let btn = crate::ui_helpers::get_dlg_item(h, id);
+        let wide = to_wide(label);
+        unsafe {
+            let _ = SetWindowTextW(btn, PCWSTR(wide.as_ptr()));
+            let _ = EnableWindow(btn, true);
+        }
+    }
+}
+
 /// 選択した入力の画像を、指定エンジンで再OCRして同じ capture に認識行を追記する(ワーカースレッド)。
 fn start_reocr(h: HWND) {
     let sel = STATE.with(|s| {
@@ -1336,6 +1372,7 @@ fn start_reocr(h: HWND) {
     let engine = OCR_ENGINES[crate::ui_helpers::combo_get_sel(crate::ui_helpers::get_dlg_item(h, IDC_OCR_COMBO)).min(OCR_ENGINES.len() - 1)].0.to_string();
     let hwnd_isize = h.0 as isize;
     RELOAD_FOCUS.with(|f| *f.borrow_mut() = ReloadFocus::NewestRecog);
+    set_reproc_busy(h, IDC_BTN_REOCR, "再OCR中…");
     std::thread::spawn(move || {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(
@@ -1379,6 +1416,7 @@ fn prompt_ctx_from_cap(c: &CaptureRow) -> crate::config::PromptContext {
         app_title: c.app_title.clone().unwrap_or_default(),
         app_exe: c.app_exe.clone().unwrap_or_default(),
         uia_path: c.uia_path.clone().unwrap_or_default(),
+        uia_detail: c.uia_json.clone().unwrap_or_default(),
         ..Default::default()
     }
 }
@@ -1401,6 +1439,7 @@ fn start_retranslate(h: HWND) {
     let engine = TR_ENGINES[crate::ui_helpers::combo_get_sel(crate::ui_helpers::get_dlg_item(h, IDC_TR_COMBO)).min(TR_ENGINES.len() - 1)].0.to_string();
     let hwnd_isize = h.0 as isize;
     RELOAD_FOCUS.with(|f| *f.borrow_mut() = ReloadFocus::NewestTrans(recog_id));
+    set_reproc_busy(h, IDC_BTN_RETRANS, "再翻訳中…");
     std::thread::spawn(move || {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(
@@ -1486,6 +1525,7 @@ fn start_reexplain(h: HWND) {
     pc.tr_engine = tr_engine;
     let recog_id = recog.id;
     let hwnd_isize = h.0 as isize;
+    set_reproc_busy(h, IDC_BTN_REEXPLAIN, "再解説中…");
     std::thread::spawn(move || {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(
@@ -1680,6 +1720,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             unsafe { DefWindowProcW(h, msg, wparam, lparam) }
         }
         WM_APP_RELOAD => {
+            // 再処理完了: ボタンを通常表示・有効へ戻す (SPECv0.5.4 §14)
+            reset_reproc_buttons(h);
             // 再OCR/再翻訳後のリロード: 前の選択アイテムを復元したうえで、新規追加された
             // アイテム(認識行/翻訳行)へフォーカスを当てる
             let sel_before = STATE.with(|s| s.borrow().sel_cap);
@@ -1857,7 +1899,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     } else {
                         // 取得元アプリ名は一律【FocusTranslator】として記録する
                         let cid = logdb::log_capture(
-                            "manual", Some(MANUAL_APP_NAME), Some(MANUAL_APP_NAME), None, None, None, None, false,
+                            "manual", Some(MANUAL_APP_NAME), Some(MANUAL_APP_NAME), None, None, None, None, None, false,
                             logdb::CaptureExtent::default(),
                         );
                         if let Some(cid) = cid {

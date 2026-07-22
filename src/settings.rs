@@ -100,6 +100,8 @@ const IDC_LLAMA_MMPROJ_PATH: i32 = 175;
 const IDC_LLAMA_MMPROJ_BROWSE: i32 = 176;
 /// プロファイル単位の最大応答トークン数 (SPECv0.5.3)
 const IDC_PROF_MAXTOK: i32 = 177;
+/// 「更新を確認」ボタン (releasesページを開く。SPECv0.5.4 §11)
+const IDC_CHECK_UPDATE: i32 = 178;
 
 /// エディットコントロールの通知コード (windows クレートに定義がないもの)
 const EN_KILLFOCUS: u32 = 0x0200;
@@ -120,10 +122,15 @@ const WM_LLAMA_BIN_PROGRESS: u32 = WM_APP + 18;
 /// 各APIキーの発行ページ(実際に確認済みの現行URL)
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
-/// 左下欄外のバージョン情報 (SPECv0.5.2追補)
-const APP_VERSION_LABEL: &str = "なにこれ - FocusTranslator";
-const APP_UPDATE_DATE: &str = "2026/7/20";
-const GITHUB_RELEASES_URL: &str = "https://github.com/KotorinChunChun/FocusTranslator";
+/// 左下欄外のバージョン情報 (SPECv0.5.2追補)。アプリ名は正式名に統一 (SPECv0.5.4 §17)。
+const APP_VERSION_LABEL: &str = crate::util::APP_DISPLAY_NAME;
+const APP_UPDATE_DATE: &str = "2026/7/22";
+/// 開発者名 (SPECv0.5.4 §17)
+const APP_DEVELOPER: &str = "Kotorichun";
+/// 「使い方」ボタンで開くリポジトリルート (README表示。SPECv0.5.4 §11)
+const GITHUB_REPO_URL: &str = "https://github.com/KotorinChunChun/FocusTranslator";
+/// 「更新を確認」ボタンで開くreleasesページ (SPECv0.5.4 §11)
+const GITHUB_RELEASES_PAGE_URL: &str = "https://github.com/KotorinChunChun/FocusTranslator/releases";
 
 const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
 const OCR_KEYS: [&str; 4] = ["oneocr", "win", "paddle", "llm"];
@@ -476,10 +483,14 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     let right = col_x[2] + COL_W;
     button(h, inst, "閉じる", right - 86, LAYOUT_BTN_Y, 80, IDC_CLOSE);
 
-    // ---- 左下欄外: バージョン情報 (SPECv0.5.2追補) ----
-    let version_text = format!("{APP_VERSION_LABEL}  v{}  (更新日: {APP_UPDATE_DATE})", env!("CARGO_PKG_VERSION"));
-    ctl(h, inst, w!("STATIC"), &version_text, WINDOW_STYLE(0), col_x[0], LAYOUT_BTN_Y + 4, 320, 20, IDC_VERSION_INFO);
-    button(h, inst, "GitHub", col_x[0] + 326, LAYOUT_BTN_Y, 80, IDC_GITHUB_LINK);
+    // ---- 左下欄外: バージョン情報 (SPECv0.5.2追補。開発者名を併記: SPECv0.5.4 §17) ----
+    let version_text = format!(
+        "{APP_VERSION_LABEL}  v{}  (更新日: {APP_UPDATE_DATE})  開発: {APP_DEVELOPER}",
+        env!("CARGO_PKG_VERSION")
+    );
+    ctl(h, inst, w!("STATIC"), &version_text, WINDOW_STYLE(0), col_x[0], LAYOUT_BTN_Y + 4, 480, 20, IDC_VERSION_INFO);
+    button(h, inst, "使い方", col_x[0] + 486, LAYOUT_BTN_Y, 80, IDC_GITHUB_LINK);
+    button(h, inst, "更新を確認", col_x[0] + 572, LAYOUT_BTN_Y, 90, IDC_CHECK_UPDATE);
 
     // フォント設定
     unsafe {
@@ -1430,7 +1441,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         start_mmproj_install(h);
                     }
                 },
-                IDC_GITHUB_LINK => open_url(h, GITHUB_RELEASES_URL),
+                IDC_GITHUB_LINK => open_url(h, GITHUB_REPO_URL),
+                IDC_CHECK_UPDATE => open_url(h, GITHUB_RELEASES_PAGE_URL),
                 IDC_DEEPL_URL => open_url(h, DEEPL_KEY_URL),
                 IDC_GOOGLE_URL => open_url(h, GOOGLE_KEY_URL),
                 IDC_PROMPT_TR_BTN => open_prompt_editor(h, crate::prompt_edit::PromptKind::Translate),

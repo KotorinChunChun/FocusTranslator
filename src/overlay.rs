@@ -47,6 +47,8 @@ pub const CHIP_SETTINGS: usize = 105;
 pub const CHIP_PIN: usize = 106;
 pub const CHIP_IMAGE: usize = 107;
 pub const CHIP_COPY_INFO: usize = 108;
+/// UIAノード詳細JSONをコピー (SPECv0.5.4 §7)
+pub const CHIP_COPY_UIA_JSON: usize = 109;
 /// 翻訳方向の反転 (source_lang ⇄ target_lang)
 pub const CHIP_SWAP_LANG: usize = 110;
 /// ログビューアを開く
@@ -199,8 +201,16 @@ pub struct OverlayContent {
     pub cur_tr_chip_key: String,
     pub explanation: Option<String>,
     pub explaining: bool,
+    /// OCR(再認識)の実行中。OCR結果ブロックへ処理中表示を出す (SPECv0.5.4 §6)
+    pub ocr_pending: bool,
+    /// 翻訳の実行中。翻訳結果ブロックへ処理中表示を出す (SPECv0.5.4 §6)
+    pub tr_pending: bool,
     pub error_only: bool,
     pub app_title: String,
+    /// 対象アプリの実行ファイル名 (【入力内容】でタイトルと併記する。SPECv0.5.4 §9)
+    pub app_exe: String,
+    /// UIAノード詳細JSON (「UIAノード詳細をコピー」ボタン用。SPECv0.5.4 §7)。空なら非表示。
+    pub uia_json: String,
     /// UIAパスの各ノード。クリックでOCRの代わりにそのノードのテキストを原文として採用する
     pub uia_nodes: Vec<crate::uia::UiaPathNode>,
     pub scroll_y: i32,

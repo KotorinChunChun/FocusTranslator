@@ -39,6 +39,7 @@ fn prompt_ctx_from_app(original: &str) -> crate::config::PromptContext {
         app_title: app.app_title.clone(),
         app_exe: app.app_exe.clone(),
         uia_path: app.uia_path.clone(),
+        uia_detail: app.uia_json.clone(),
         ocr_engine: if app.via_uia { String::new() } else { app.cur_ocr.clone() },
         tr_engine: if app.translation.is_some() { app.cur_tr.clone() } else { String::new() },
     })
@@ -53,6 +54,8 @@ fn adopt_text_and_retranslate(text: String, cur_tr: String, recog_id: Option<i64
         app.mode = Mode::Pinned;
         app.source = text.clone();
         app.via_uia = true;
+        // 翻訳ブロックを消さず「翻訳中」を出すためのフラグ (SPECv0.5.4 §6)
+        app.tr_pending = true;
         app.translation = None;
         let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
         app.status = Some(format!("{} で翻訳中…", engine_name));
@@ -78,6 +81,9 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>, final_
             app.last_crop_rect = final_rect;
             app.generation += 1;
             app.mode = Mode::Pinned;
+            // 再認識→再翻訳のため両ブロックを処理中表示にする (SPECv0.5.4 §6)
+            app.ocr_pending = true;
+            app.tr_pending = true;
             app.status = Some("再認識中…".into());
             app.busy = true;
             sync_overlay(app);
@@ -236,6 +242,23 @@ pub fn handle_chip(id: usize) {
                 util::set_clipboard_text(main_hwnd(), &text);
                 with_app(|app| {
                     app.badge = Some("対象情報をコピーしました".into());
+                    sync_overlay(app);
+                });
+            }
+        }
+        overlay::CHIP_COPY_UIA_JSON => {
+            // UIAノード詳細JSON全体をコピーする (SPECv0.5.4 §7)。
+            // コピー時は読みやすいよう改行・インデントで整形する (SPECv0.5.4 §7b)。
+            // DB保存・LLM送信の {{uia_detail}} はコンパクトのまま (整形はコピー経路のみ)。
+            let json = with_app(|app| app.uia_json.clone()).unwrap_or_default();
+            if !json.is_empty() {
+                let pretty = serde_json::from_str::<serde_json::Value>(&json)
+                    .ok()
+                    .and_then(|v| serde_json::to_string_pretty(&v).ok())
+                    .unwrap_or(json);
+                util::set_clipboard_text(main_hwnd(), &pretty);
+                with_app(|app| {
+                    app.badge = Some("UIAノード詳細をコピーしました".into());
                     sync_overlay(app);
                 });
             }
@@ -417,6 +440,7 @@ fn chip_edit_source(c: ChipCtx) {
         }
         let new_gen = with_app(|app| {
             app.source = new_text.clone();
+            app.tr_pending = true;
             app.translation = None;
             // 読み取り結果(原文)が変わったので解説も破棄する (再度開けば同一なら復元される)
             app.explanation = None;
@@ -482,6 +506,7 @@ fn chip_swap_lang(c: ChipCtx) {
         app.cfg.save();
         app.generation += 1;
         app.mode = Mode::Pinned;
+        app.tr_pending = true;
         app.translation = None;
         let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
         app.status = Some(format!("{} で翻訳中…", engine_name));
@@ -506,18 +531,8 @@ fn chip_explain_with_profile(c: ChipCtx, profile: String) {
     if c.source.is_empty() {
         return;
     }
-    // 同一プロファイルのキャッシュ済み解説があれば即表示する
-    if let Some(expl) = crate::logdb::latest_explanation_for_profile(r_id, &profile) {
-        with_app(|app| {
-            app.mode = Mode::Pinned;
-            app.status = None;
-            app.error_only = false;
-            app.explanation = Some(expl);
-            app.explain_profile = profile.clone();
-            sync_overlay(app);
-        });
-        return;
-    }
+    // 解説ボタンの手動クリックは常にLLMへ問い合わせ直す (SPECv0.5.4 §3)。
+    // キャッシュ済み解説の即時表示は §2 の自動表示が担い、ここでは行わない。
     // 外部プロファイルへの解説依頼は同意を確認する (SPECv0.5.3)。
     // 全体キャプチャがあれば赤枠付きで画像も送るため、画像送信の同意も対象。
     let with_image = c.last_full_img.is_some();
@@ -549,7 +564,8 @@ fn chip_explain_with_profile(c: ChipCtx, profile: String) {
         full,
         rect: c.last_crop_rect,
     });
-    crate::worker::explain(new_gen, r_id, cfg2, prompt, profile, c.main, image);
+    // 手動クリックのため常にLLMへ問い合わせる (SPECv0.5.4 §3)
+    crate::worker::explain(new_gen, r_id, cfg2, prompt, profile, c.main, image, true);
 }
 
 /// 解説 (CHIP_EXPLAIN): プロンプト編集ウィンドウ (モードB) を表示してから送信 (SPECv0.4.7 §2)
@@ -636,7 +652,8 @@ fn chip_explain(c: ChipCtx) {
                     full,
                     rect: crop_rect,
                 });
-                crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val, image);
+                // プロンプト編集からの送信も手動操作のため常に問い合わせる (SPECv0.5.4 §3)
+                crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val, image, true);
             })),
         );
     }
@@ -710,6 +727,9 @@ fn switch_ocr_engine(id: usize, c: ChipCtx) {
             app.cfg.active_api_profile = selected_key.clone();
         }
         app.cfg.save();
+        // 再認識→再翻訳のため両ブロックを処理中表示にする (SPECv0.5.4 §6)
+        app.ocr_pending = true;
+        app.tr_pending = true;
         app.status = Some("再認識中…".into());
         app.busy = true;
         sync_overlay(app);
@@ -760,6 +780,7 @@ fn switch_tr_engine(id: usize, c: ChipCtx) {
         app.cfg.save();
         let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
         app.status = Some(format!("{} で翻訳中…", engine_name));
+        app.tr_pending = true;
         app.translation = None;
         app.busy = true;
         sync_overlay(app);

@@ -4,7 +4,7 @@
 // インライン強調は「ブロック全体が強調で覆われている場合のみ」bold=trueとして表現する
 // (文中の部分強調はマーカーを外した地の文として表示する簡易実装)。
 // コピーチップは常にMarkdown原文(パース前の文字列)を扱うため、この変換結果を使わない。
-use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// ブロックの種別
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -15,6 +15,8 @@ pub enum BlockKind {
     ListItem { depth: u8 },
     CodeBlock,
     Rule,
+    /// 表 (GFMテーブル)。text には等幅フォント向けに桁揃えした複数行文字列が入る (SPECv0.5.4 §5)
+    Table,
 }
 
 /// 描画用の1ブロック (見出し/段落/リスト項目/コードブロック/水平線)
@@ -37,6 +39,12 @@ pub fn parse(md: &str) -> Vec<Block> {
     let mut all_bold = true;
     let mut has_text = false;
 
+    // 表 (GFMテーブル) の収集状態。in_table 中は Text をセルへ溜める (SPECv0.5.4 §5)。
+    let mut in_table = false;
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    let mut table_cur_row: Vec<String> = Vec::new();
+    let mut table_cur_cell = String::new();
+
     let flush = |blocks: &mut Vec<Block>, cur: &mut String, kind: BlockKind, all_bold: &mut bool, has_text: &mut bool| {
         let text = cur.trim_end().to_string();
         if !text.is_empty() {
@@ -47,7 +55,8 @@ pub fn parse(md: &str) -> Vec<Block> {
         *has_text = false;
     };
 
-    for ev in Parser::new(md) {
+    // テーブル記法 (`| A | B |`) を解析対象にする (SPECv0.5.4 §5)
+    for ev in Parser::new_ext(md, Options::ENABLE_TABLES) {
         match ev {
             Event::Start(Tag::Heading { level, .. }) => {
                 flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
@@ -106,19 +115,116 @@ pub fn parse(md: &str) -> Vec<Block> {
                 flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
                 blocks.push(Block { kind: BlockKind::Rule, text: String::new(), bold: false });
             }
+            Event::Start(Tag::Table(_)) => {
+                flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
+                in_table = true;
+                table_rows.clear();
+                table_cur_row.clear();
+                table_cur_cell.clear();
+            }
+            Event::End(TagEnd::Table) => {
+                let text = format_table(&table_rows);
+                if !text.is_empty() {
+                    blocks.push(Block { kind: BlockKind::Table, text, bold: false });
+                }
+                in_table = false;
+                table_rows.clear();
+                cur_kind = BlockKind::Paragraph;
+            }
+            // TableHead(ヘッダー行) と TableRow(本文行) はどちらも1行として扱う。
+            Event::Start(Tag::TableHead) | Event::Start(Tag::TableRow) => table_cur_row.clear(),
+            Event::End(TagEnd::TableHead) | Event::End(TagEnd::TableRow) => {
+                table_rows.push(std::mem::take(&mut table_cur_row));
+            }
+            Event::Start(Tag::TableCell) => table_cur_cell.clear(),
+            Event::End(TagEnd::TableCell) => {
+                table_cur_row.push(table_cur_cell.trim().to_string());
+                table_cur_cell.clear();
+            }
             Event::Text(t) | Event::Code(t) => {
-                cur.push_str(&t);
-                has_text = true;
-                if strong_depth == 0 {
-                    all_bold = false;
+                if in_table {
+                    table_cur_cell.push_str(&t);
+                } else {
+                    cur.push_str(&t);
+                    has_text = true;
+                    if strong_depth == 0 {
+                        all_bold = false;
+                    }
                 }
             }
-            Event::SoftBreak | Event::HardBreak => cur.push('\n'),
+            Event::SoftBreak | Event::HardBreak => {
+                if in_table {
+                    table_cur_cell.push(' ');
+                } else {
+                    cur.push('\n');
+                }
+            }
             _ => {}
         }
     }
     flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
     blocks
+}
+
+/// 文字列の表示幅を求める (全角=2, 半角=1)。等幅フォントでの桁揃えに使う (SPECv0.5.4 §5)。
+fn display_width(s: &str) -> usize {
+    s.chars().map(char_width).sum()
+}
+
+/// 1文字の表示幅。CJK全角・かな・全角記号などは2、それ以外は1とする簡易判定。
+fn char_width(c: char) -> usize {
+    match c as u32 {
+        // 全角スペース
+        0x3000
+        // CJK記号・かな・CJK統合漢字(拡張Aを含む)・全角英数記号・ハングル
+        | 0x1100..=0x115F
+        | 0x2E80..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6 => 2,
+        _ => 1,
+    }
+}
+
+/// 収集した行 (先頭がヘッダー) を等幅フォント向けの桁揃え文字列へ整形する。
+/// 罫線は引かず `|` 区切り + スペースパディングの簡易表とし、ヘッダー下に区切り行を入れる。
+fn format_table(rows: &[Vec<String>]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if cols == 0 {
+        return String::new();
+    }
+    // 列ごとの最大表示幅を求める
+    let mut widths = vec![0usize; cols];
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(display_width(cell));
+        }
+    }
+    let pad_cell = |cell: &str, w: usize| -> String {
+        let pad = w.saturating_sub(display_width(cell));
+        format!("{cell}{}", " ".repeat(pad))
+    };
+    let mut lines = Vec::new();
+    for (ri, row) in rows.iter().enumerate() {
+        let cells: Vec<String> = (0..cols)
+            .map(|ci| {
+                let cell = row.get(ci).map(String::as_str).unwrap_or("");
+                pad_cell(cell, widths[ci])
+            })
+            .collect();
+        lines.push(format!("| {} |", cells.join(" | ")));
+        // ヘッダー行(先頭)の直後に区切り行を入れる
+        if ri == 0 {
+            let seps: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+            lines.push(format!("| {} |", seps.join(" | ")));
+        }
+    }
+    lines.join("\n")
 }
 
 fn heading_level_num(level: HeadingLevel) -> u8 {
@@ -192,5 +298,48 @@ mod tests {
     fn empty_input_yields_no_blocks() {
         assert!(parse("").is_empty());
         assert!(parse("   \n  ").is_empty());
+    }
+
+    #[test]
+    fn parses_table_with_header_separator() {
+        let md = "| Name | Age |\n|---|---|\n| Bob | 30 |\n| Alice | 5 |";
+        let blocks = parse(md);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, BlockKind::Table);
+        let lines: Vec<&str> = blocks[0].text.lines().collect();
+        // ヘッダー + 区切り + 本文2行 = 4行
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "| Name  | Age |");
+        assert_eq!(lines[1], "| ----- | --- |");
+        assert_eq!(lines[2], "| Bob   | 30  |");
+        assert_eq!(lines[3], "| Alice | 5   |");
+    }
+
+    #[test]
+    fn table_aligns_by_display_width_for_japanese() {
+        // 全角は幅2で数える。「氏名」(幅4) と「太郎」(幅4) が揃う。
+        let md = "| 氏名 | 値 |\n|---|---|\n| 太郎 | 3 |";
+        let blocks = parse(md);
+        assert_eq!(blocks[0].kind, BlockKind::Table);
+        let lines: Vec<&str> = blocks[0].text.lines().collect();
+        assert_eq!(lines[0], "| 氏名 | 値 |");
+        assert_eq!(lines[2], "| 太郎 | 3  |");
+    }
+
+    #[test]
+    fn table_handles_ragged_rows() {
+        // 列数が不揃いでも欠けたセルは空文字で埋める
+        let md = "| A | B | C |\n|---|---|---|\n| 1 | 2 |";
+        let blocks = parse(md);
+        assert_eq!(blocks[0].kind, BlockKind::Table);
+        let lines: Vec<&str> = blocks[0].text.lines().collect();
+        assert_eq!(lines[2], "| 1 | 2 |   |");
+    }
+
+    #[test]
+    fn display_width_counts_fullwidth_as_two() {
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("あいう"), 6);
+        assert_eq!(display_width("A漢"), 3);
     }
 }

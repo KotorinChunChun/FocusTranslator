@@ -21,7 +21,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_RIGHT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetScrollInfo, GetWindowRect,
+    AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetScrollInfo, GetWindowRect,
     IDC_ARROW, IsWindow, LoadCursorW, RegisterClassW, SB_HORZ, SB_LINEDOWN, SB_LINEUP,
     SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO,
     SIF_ALL, SIF_TRACKPOS, SW_SHOW, SWP_NOACTIVATE, SetForegroundWindow, SetWindowPos,
@@ -52,6 +52,8 @@ thread_local! {
     static ZOOM: RefCell<f64> = const { RefCell::new(1.0) };
     static REGISTERED: RefCell<bool> = const { RefCell::new(false) };
     static PREVIEW_HWND: RefCell<Option<isize>> = const { RefCell::new(None) };
+    /// 現在プレビュー表示中の画像種別 (SPECv0.5.4 §16: 入力選択の連動更新で同じ種別を保つ)。
+    static CUR_KIND: RefCell<Option<ImgKind>> = const { RefCell::new(None) };
     /// 全体画像表示時、OCR抽出範囲を示す赤枠 (x, y, w, h / 画像内の物理ピクセル座標)。
     /// OCR対象画像の表示時は None (SPECv0.5.2追補)。
     static BOX_RECT: RefCell<Option<(i32, i32, i32, i32)>> = const { RefCell::new(None) };
@@ -102,6 +104,26 @@ fn place_beside_parent(parent: HWND, cw: i32, ch: i32) -> (i32, i32) {
 
 /// 画像をプレビューウィンドウで開く(既存があれば再利用し1つまでに制限)。
 /// box_rect を渡すと OCR抽出範囲を赤枠で重ねて表示する (SPECv0.5.2追補)。
+/// 画像がクライアント領域にちょうど収まるウィンドウ外寸を求める (SPECv0.5.4 §13)。
+/// タイトルバー・枠の高さは環境依存のため、固定の目算 (+20/+40) ではなく
+/// AdjustWindowRectEx で逆算する。画面に収まらない場合はクランプ (スクロールで送る)。
+fn window_outer_size(iw: i32, ih: i32) -> (i32, i32) {
+    // クライアント希望サイズ = 画像サイズ (概ね画面に収まる範囲へクランプ)
+    let client_w = iw.clamp(1, 1380);
+    let client_h = ih.clamp(1, 860);
+    let mut rect = RECT { left: 0, top: 0, right: client_w, bottom: client_h };
+    unsafe {
+        // スタイルは CreateWindowExW に渡すものと合わせる。AdjustWindowRectEx は
+        // スクロールバー分を加味しないが、画像がクライアントに収まればバーは出ない。
+        let _ = AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, false, WS_EX_TOPMOST);
+    }
+    // 環境依存の非クライアント高さの計算誤差で下端にスクロールバーが残ることがあるため、
+    // 高さに固定マージンを足して確実に画像が収まるようにする (SPECv0.5.4 §13b)。
+    // 過剰分は下端の余白になるだけでバーは出ない。
+    const HEIGHT_MARGIN: i32 = 20;
+    (rect.right - rect.left, rect.bottom - rect.top + HEIGHT_MARGIN)
+}
+
 pub(crate) fn open_preview(
     parent: HWND,
     which: ImgKind,
@@ -110,6 +132,7 @@ pub(crate) fn open_preview(
 ) {
     let Some((iw, ih, _)) = image.as_ref().map(|(a, b, _)| (*a, *b, ())) else { return };
     IMG.with(|c| *c.borrow_mut() = image);
+    CUR_KIND.with(|c| *c.borrow_mut() = Some(which));
     BOX_RECT.with(|c| *c.borrow_mut() = box_rect);
     SCROLL.with(|c| *c.borrow_mut() = (0, 0));
     ZOOM.with(|c| *c.borrow_mut() = 1.0);
@@ -123,8 +146,7 @@ pub(crate) fn open_preview(
     if let Some(raw) = existing {
         let h = HWND(raw as *mut _);
         if unsafe { IsWindow(Some(h)) }.as_bool() {
-            let cw = (iw as i32 + 20).min(1400);
-            let ch = (ih as i32 + 40).min(900);
+            let (cw, ch) = window_outer_size(iw as i32, ih as i32);
             let (x, y) = place_beside_parent(parent, cw, ch);
             unsafe {
                 let _ = SetWindowTextW(h, title);
@@ -163,8 +185,7 @@ pub(crate) fn open_preview(
             }
         });
         // 画像サイズに合わせる(画面サイズにクランプ、スクロールバー付き)
-        let cw = (iw as i32 + 20).min(1400);
-        let ch = (ih as i32 + 40).min(900);
+        let (cw, ch) = window_outer_size(iw as i32, ih as i32);
         let (x, y) = place_beside_parent(parent, cw, ch);
         if let Ok(pwnd) = CreateWindowExW(
             WS_EX_TOPMOST,
@@ -184,6 +205,33 @@ pub(crate) fn open_preview(
             update_scrollbars(pwnd);
             let _ = ShowWindow(pwnd, SW_SHOW);
         }
+    }
+}
+
+/// プレビューウィンドウが開いていれば、現在表示中の種別 (OCR対象画像 / 全体画像) の
+/// 新しい画像で更新する (SPECv0.5.4 §16: ログビューアで入力選択を変えたら連動させる)。
+/// 閉じているとき、または現在種別の画像が無いときは何もしない (プレビューは据え置き)。
+pub(crate) fn refresh_if_open(
+    parent: HWND,
+    ocr_image: Option<(u32, u32, Vec<u8>)>,
+    full_image: Option<(u32, u32, Vec<u8>)>,
+    box_rect: Option<(i32, i32, i32, i32)>,
+) {
+    let open = PREVIEW_HWND
+        .with(|c| *c.borrow())
+        .map(|raw| unsafe { IsWindow(Some(HWND(raw as *mut _))) }.as_bool())
+        .unwrap_or(false);
+    if !open {
+        return;
+    }
+    match CUR_KIND.with(|c| *c.borrow()) {
+        Some(ImgKind::Ocr) if ocr_image.is_some() => {
+            open_preview(parent, ImgKind::Ocr, ocr_image, None);
+        }
+        Some(ImgKind::Full) if full_image.is_some() => {
+            open_preview(parent, ImgKind::Full, full_image, box_rect);
+        }
+        _ => {}
     }
 }
 

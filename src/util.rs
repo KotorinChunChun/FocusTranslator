@@ -11,7 +11,7 @@ use windows::Win32::System::DataExchange::{
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
-use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId};
+use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindow, GW_OWNER, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId};
 use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
 
 pub fn to_wide(s: &str) -> Vec<u16> {
@@ -229,5 +229,66 @@ pub fn get_window_context(hwnd: HWND) -> (Option<String>, Option<String>) {
         }
 
         (exe, title)
+    }
+}
+
+/// キャプチャ対象ウィンドウからアプリの実行ファイル名・タイトルを取得する (SPECv0.5.4 §9b)。
+/// メニューポップアップ (クラス #32768) 等はそれ自体がトップレベルウィンドウだがタイトルを
+/// 持たないため、GW_OWNER でオーナーウィンドウ (メニューを開いた親アプリ) を辿って
+/// タイトルを補完する。実行ファイル名は同一プロセスなのでメニュー側からでも取れる。
+pub fn get_app_context(hwnd: HWND) -> (Option<String>, Option<String>) {
+    let (exe, title) = get_window_context(hwnd);
+    if title.is_some() {
+        return (exe, title);
+    }
+    // タイトルが取れない (メニュー等)。オーナーウィンドウを辿って親アプリ情報を補完する。
+    let owner = unsafe { GetWindow(hwnd, GW_OWNER).unwrap_or_default() };
+    if !owner.is_invalid() {
+        let (owner_exe, owner_title) = get_window_context(owner);
+        if owner_title.is_some() {
+            return (exe.or(owner_exe), owner_title);
+        }
+    }
+    (exe, title)
+}
+
+/// 診断用: ウィンドウのクラス名を取得する (SPECv0.5.4 §9b: メニュー等で親アプリを
+/// 見失う問題の切り分け用)。取得できなければ空文字。
+pub fn get_window_class(hwnd: HWND) -> String {
+    unsafe {
+        let mut buf = [0u16; 256];
+        let n = GetClassNameW(hwnd, &mut buf);
+        if n > 0 {
+            String::from_utf16_lossy(&buf[..n as usize])
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// 診断用: 対象ウィンドウの class/exe/title に加え、GW_OWNER で辿ったオーナーウィンドウと
+/// 現在のフォアグラウンドウィンドウの情報を1行にまとめる (SPECv0.5.4 §9b)。
+/// メニューポップアップ (#32768) 上でキャプチャしたときに、どこから親アプリを辿れるかを調べる。
+pub fn window_diag(hwnd: HWND) -> String {
+    unsafe {
+        let class = get_window_class(hwnd);
+        let (exe, title) = get_window_context(hwnd);
+        let owner = GetWindow(hwnd, GW_OWNER).unwrap_or_default();
+        let (owner_exe, owner_title, owner_class) = if owner.is_invalid() {
+            (None, None, String::new())
+        } else {
+            let (e, t) = get_window_context(owner);
+            (e, t, get_window_class(owner))
+        };
+        let fg = GetForegroundWindow();
+        let (fg_exe, fg_title, fg_class) = if fg.is_invalid() {
+            (None, None, String::new())
+        } else {
+            let (e, t) = get_window_context(fg);
+            (e, t, get_window_class(fg))
+        };
+        format!(
+            "target[class={class:?} exe={exe:?} title={title:?}] owner[class={owner_class:?} exe={owner_exe:?} title={owner_title:?}] fg[class={fg_class:?} exe={fg_exe:?} title={fg_title:?}]"
+        )
     }
 }

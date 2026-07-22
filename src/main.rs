@@ -62,6 +62,13 @@ use windows::core::w;
 
 
 fn main() {
+    // アンインストール時のクリーンアップ (SPECv0.5.4 §19)。インストーラの [UninstallRun] から
+    // 呼ばれ、実行中の本体を終了し LLMサーバーを停止してから即終了する (多重起動判定より前)。
+    if std::env::args().any(|a| a == "--uninstall-cleanup") {
+        run_uninstall_cleanup();
+        return;
+    }
+
     // 多重起動防止
     // 設定リセットによる自己再起動 (--restart-wait) は、旧プロセスがミューテックスを
     // 解放し終える前に起動してしまう可能性があるため、既存プロセスありと判定されても
@@ -202,4 +209,31 @@ fn main() {
             DispatchMessageW(&msg);
         }
     }
+}
+
+/// アンインストール時のクリーンアップ (SPECv0.5.4 §19)。
+/// 実行中の本体プロセス(自分以外)を終了し、LLMサーバー(llama-server)を停止する。
+/// %APPDATA%\FocusTranslator 配下のデータ削除はインストーラ側 (installer.iss の Pascal) が
+/// 利用者への確認のうえ行うため、ここではプロセス/サーバーの停止のみ担当する。
+fn run_uninstall_cleanup() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    // 実行中の本体プロセス(このクリーンアップ自身のPIDは除く)を終了する
+    let self_pid = std::process::id();
+    let _ = std::process::Command::new("taskkill")
+        .args([
+            "/F",
+            "/IM",
+            "focus-translator.exe",
+            "/FI",
+            &format!("PID ne {self_pid}"),
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    // 本体終了が反映されるのを少し待ってから、LLMサーバーを停止する
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    let cfg = Config::load();
+    let _ = llama_server::stop(cfg.llama_port);
 }

@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
@@ -109,7 +109,8 @@ fn init_db() -> Result<Connection, String> {
             crop_w INTEGER,
             crop_h INTEGER,
             focus_kind TEXT,
-            focus_y REAL
+            focus_y REAL,
+            selected_text TEXT
          );
          CREATE TABLE IF NOT EXISTS recognitions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -257,15 +258,16 @@ pub fn log_capture(
     uia_path: Option<&str>,
     uia_json: Option<&str>,
     control_type: Option<&str>,
+    selected_text: Option<&str>,
     image: Option<&crate::capture::Captured>,
     debug: bool,
     extent: CaptureExtent,
 ) -> Option<i64> {
     with_conn_opt(|guard| {
         if let Err(e) = guard.execute(
-            "INSERT INTO captures (ts_ms, mode, app_exe, app_title, uia_path, uia_json, control_type, image_path, image_w, image_h)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, NULL)",
-            rusqlite::params![now_ms(), mode, app_exe, app_title, uia_path, uia_json, control_type],
+            "INSERT INTO captures (ts_ms, mode, app_exe, app_title, uia_path, uia_json, control_type, selected_text, image_path, image_w, image_h)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, NULL)",
+            rusqlite::params![now_ms(), mode, app_exe, app_title, uia_path, uia_json, control_type, selected_text],
         ) {
             util::app_log(&format!("log_capture failed: {e}"));
             return None;
@@ -376,20 +378,23 @@ pub fn find_cached_explanation_for_profile(profile: &str, input_text: &str) -> O
     })
 }
 
-/// 指定 recognition の指定プロファイルでの最新の成功済み解説文を取得する
-/// (SPECv0.5.2追補: 解説チップのプロファイル別「現在の解説」表示・キャッシュ即時表示用)。
-pub fn latest_explanation_for_profile(recognition_id: i64, profile: &str) -> Option<String> {
+/// プロンプト本文の前方一致で成功済み解説を探す (SPECv0.5.4 §2: 翻訳結果表示時の自動表示用)。
+/// 画像添付時は input_text 末尾に "\n[添付画像hash: ...]" が付くため、完全一致ではなく
+/// 本文を接頭辞とする前方一致 (substr) で照合し、画素差でヒットしなくなるのを防ぐ。
+pub fn find_explanation_by_prompt_prefix(profile: &str, prompt_body: &str) -> Option<String> {
     with_conn_opt(|guard| {
         guard
             .query_row(
                 "SELECT explanation_text FROM explanations
-                 WHERE recognition_id=?1 AND llm_profile=?2 AND success=1 AND explanation_text IS NOT NULL
+                 WHERE substr(input_text, 1, length(?1)) = ?1 AND llm_profile = ?2
+                   AND success = 1 AND explanation_text IS NOT NULL
                  ORDER BY ts_ms DESC LIMIT 1",
-                rusqlite::params![recognition_id, profile],
+                rusqlite::params![prompt_body, profile],
                 |r| r.get(0),
             )
             .ok()
-    }).flatten()
+    })
+    .flatten()
 }
 
 /// 翻訳ログを記録する。
@@ -512,6 +517,8 @@ pub struct CaptureRow {
     /// 行選択モード ("line" / "paragraph" / "all") と基準Y座標 (full_image 内での座標)
     pub focus_kind: Option<String>,
     pub focus_y: Option<f64>,
+    /// キャプチャ時にカーソル位置要素で選択されていたテキスト (SPECv0.5.4 §8)
+    pub selected_text: Option<String>,
 }
 
 #[derive(Clone)]
@@ -589,6 +596,7 @@ fn map_capture_row(r: &rusqlite::Row) -> rusqlite::Result<CaptureRow> {
         crop_h: r.get(17)?,
         focus_kind: r.get(18)?,
         focus_y: r.get(19)?,
+        selected_text: r.get(20)?,
     })
 }
 
@@ -651,7 +659,7 @@ impl ExplainRow {
 }
 
 const CAPTURE_COLS: &str = "id, ts_ms, mode, app_exe, app_title, uia_path, uia_json, control_type, image_path, image_w, image_h,
-    full_image_path, full_image_w, full_image_h, crop_x, crop_y, crop_w, crop_h, focus_kind, focus_y";
+    full_image_path, full_image_w, full_image_h, crop_x, crop_y, crop_w, crop_h, focus_kind, focus_y, selected_text";
 
 /// 入力履歴を新しい順に検索取得。query は配下の原文/訳文の部分一致、app_exe は完全一致。
 /// 両方空文字なら全件 (最大 limit 件)。
@@ -905,7 +913,7 @@ mod tests {
 
         // 4工程ツリー: capture → recognition → translation / explanation
         let cid = log_capture(
-            "hold", Some("game.exe"), Some("Game Window"), Some("Root > Panel"), Some("[]"), Some("Edit"), None, false,
+            "hold", Some("game.exe"), Some("Game Window"), Some("Root > Panel"), Some("[]"), Some("Edit"), Some("選択テキスト"), None, false,
             CaptureExtent::default(),
         )
         .expect("capture id");
@@ -984,7 +992,7 @@ mod tests {
         // ローテーション: captures 件数で絞り、配下はCASCADE
         let mut last_rid = 0;
         for i in 0..4 {
-            let c = log_capture("hold", None, None, None, None, None, None, false, CaptureExtent::default()).unwrap();
+            let c = log_capture("hold", None, None, None, None, None, None, None, false, CaptureExtent::default()).unwrap();
             last_rid = log_recognition(c, "ocr", "win", 100, Some(&format!("line{i}")), None, None).unwrap();
         }
         rotate(2);

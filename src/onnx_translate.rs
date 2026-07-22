@@ -5,7 +5,7 @@
 use ort::session::Session;
 use ort::value::{Tensor, TensorRef};
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokenizers::Tokenizer;
@@ -207,19 +207,48 @@ fn run(eng: &Engine, cfg: &DirCfg, text: &str) -> Result<String, String> {
         let last_pos = (shape[1] as usize - 1) * vocab;
         let row = &logits[last_pos..last_pos + vocab];
 
-        let mut best_id = 0usize;
-        let mut best_val = f32::MIN;
-        for (i, &v) in row.iter().enumerate() {
-            // 開始/パディングトークン自身の生成は禁止 (HF generation_config の bad_words_ids 相当)。
-            // ただしNLLBのように開始トークンとeosトークンが同一の場合はこの禁止を適用しない
-            // (適用すると正しい終端判定ができなくなるため)。
-            if cfg.decoder_start_id != cfg.eos_id && i as i64 == cfg.decoder_start_id {
-                continue;
+        // no-repeat-ngram (n=3): 直近2トークンに続けて出すと既出の3-gramを再現する候補を
+        // 禁止する (SPECv0.5.4 §15)。FuguMTのgreedyデコードが固有名詞などで自己ループに陥り
+        // 同一語を延々と繰り返す暴走を防ぐ。
+        const NGRAM: usize = 3;
+        let banned: HashSet<i64> = {
+            let mut set = HashSet::new();
+            if decoder_ids.len() >= NGRAM - 1 {
+                let prefix = &decoder_ids[decoder_ids.len() - (NGRAM - 1)..];
+                for w in decoder_ids.windows(NGRAM) {
+                    if &w[..NGRAM - 1] == prefix {
+                        set.insert(w[NGRAM - 1]);
+                    }
+                }
             }
-            if v > best_val {
-                best_val = v;
-                best_id = i;
+            set
+        };
+
+        let pick = |banned: &HashSet<i64>| -> (usize, f32) {
+            let mut best_id = 0usize;
+            let mut best_val = f32::MIN;
+            for (i, &v) in row.iter().enumerate() {
+                // 開始/パディングトークン自身の生成は禁止 (HF generation_config の bad_words_ids 相当)。
+                // ただしNLLBのように開始トークンとeosトークンが同一の場合はこの禁止を適用しない
+                // (適用すると正しい終端判定ができなくなるため)。
+                if cfg.decoder_start_id != cfg.eos_id && i as i64 == cfg.decoder_start_id {
+                    continue;
+                }
+                if banned.contains(&(i as i64)) {
+                    continue;
+                }
+                if v > best_val {
+                    best_val = v;
+                    best_id = i;
+                }
             }
+            (best_id, best_val)
+        };
+
+        let (mut best_id, best_val) = pick(&banned);
+        // 全候補が禁止された場合は禁止を無視して選び直す (デコードが止まらないためのフォールバック)
+        if best_val == f32::MIN {
+            best_id = pick(&HashSet::new()).0;
         }
         if best_id as i64 == cfg.eos_id {
             break;
@@ -262,6 +291,22 @@ mod tests {
         println!("{}", translate(ja_text, false).unwrap_or_else(|e| format!("ERR: {e}")));
         println!("--- 英語入力を en→ja モデルへ (本来の用途) ---");
         println!("{}", translate(en_text, true).unwrap_or_else(|e| format!("ERR: {e}")));
+    }
+
+    #[test]
+    #[ignore] // モデル導入環境で手動確認: 繰り返しループ暴走の抑制を検証する (SPECv0.5.4 §15)
+    fn fugu_mt_no_repeat_ngram_probe() {
+        let _guard = env_lock();
+        if !crate::onnx_translate_install::installed() {
+            eprintln!("モデル未導入のためスキップ");
+            return;
+        }
+        // ユーザー報告: 固有名詞で自己ループし「月刊 月刊 …」を繰り返していた文字列
+        let text = "weekly.ascii.jp Steam Controller再入荷 7月23日10時から - 週刊アスキー";
+        let out = translate(text, true).unwrap_or_else(|e| format!("ERR: {e}"));
+        println!("no-repeat probe: {out}");
+        // 3-gram以上の同一並びが繰り返されないこと (no-repeat-ngram=3 の効果)
+        assert!(!out.contains("月刊 月刊 月刊"), "繰り返しループが残っている: {out}");
     }
 
     #[test]

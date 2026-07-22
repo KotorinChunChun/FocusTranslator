@@ -91,6 +91,10 @@ pub struct App {
     pub explain_profile: String,
     /// 解説をLLMへ問い合わせ中
     pub explaining: bool,
+    /// OCR(再認識)の実行中。OCR結果ブロックに処理中表示を出す (SPECv0.5.4 §6)
+    pub ocr_pending: bool,
+    /// 翻訳の実行中。翻訳結果ブロックに処理中表示を出す (SPECv0.5.4 §6)
+    pub tr_pending: bool,
     /// 時間のかかる処理の実行中。オーバーレイの操作をロックする。
     pub busy: bool,
     pub app_title: String,
@@ -187,6 +191,8 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             explanation: None,
             explain_profile: String::new(),
             explaining: false,
+            ocr_pending: false,
+            tr_pending: false,
             busy: false,
             app_title: String::new(),
             app_exe: String::new(),
@@ -480,10 +486,47 @@ pub fn close_overlay(app: &mut App) {
     app.explanation = None;
     app.explain_profile = String::new();
     app.explaining = false;
+    app.ocr_pending = false;
+    app.tr_pending = false;
     app.busy = false;
     app.via_uia = false;
     app.control_type = None;
     app.selected_text = None;
+}
+
+/// キャッシュ済み解説の自動表示 (SPECv0.5.4 §2)。翻訳結果を表示した直後に呼ぶ。
+/// 直近使用した解説プロファイル (未使用ならアクティブプロファイル) のテンプレートで
+/// プロンプト本文を組み立て、本文前方一致でDBを照合する。ヒットすれば app.explanation へ
+/// 設定する (APIは呼ばない)。ログ機能OFF・既に解説表示済み・原文空なら何もしない。
+fn autoload_cached_explanation(app: &mut App) {
+    if !app.cfg.log_enabled || app.explanation.is_some() || app.source.is_empty() {
+        return;
+    }
+    let profile = if app.explain_profile.is_empty() {
+        app.cfg.active_api_profile.clone()
+    } else {
+        app.explain_profile.clone()
+    };
+    if profile.is_empty() {
+        return;
+    }
+    let pc = crate::config::PromptContext {
+        original_text: app.source.clone(),
+        translated_text: app.translation.clone().unwrap_or_default(),
+        app_title: app.app_title.clone(),
+        app_exe: app.app_exe.clone(),
+        uia_path: app.uia_path.clone(),
+        uia_detail: app.uia_json.clone(),
+        ocr_engine: if app.via_uia { String::new() } else { app.cur_ocr.clone() },
+        tr_engine: if app.translation.is_some() { app.cur_tr.clone() } else { String::new() },
+    };
+    let Some(prompt) = crate::worker::build_explain_prompt_for(&app.cfg, &profile, &pc) else {
+        return;
+    };
+    if let Some(expl) = crate::logdb::find_explanation_by_prompt_prefix(&profile, &prompt) {
+        app.explanation = Some(expl);
+        app.explain_profile = profile;
+    }
 }
 
 /// ワーカー結果の受信 (世代番号が古いものは破棄; SPEC §6.4)
@@ -500,6 +543,8 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                     text, method, engine, img, pin, anchor, focus, ms, capture_id, recog_id, ctx,
                     full_img, crop_rect,
                 } = *src;
+                // OCR結果が届いたので読み取り中表示を解除する (SPECv0.5.4 §6)
+                app.ocr_pending = false;
                 if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
                     return;
                 }
@@ -549,21 +594,27 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 sync_overlay(app);
             }
             worker::WorkerMsg::Translation { text, badge, ms, recog_id } => {
+                app.tr_pending = false;
                 app.translation = Some(text);
                 app.status = None;
                 app.error_only = false;
                 app.badge = badge;
                 app.recog_id = recog_id;
+                // 同一アプリ・同一テキストの解説がDBにあれば、クリック不要で自動表示する
+                // (SPECv0.5.4 §2)。API呼び出しは行わない。
+                autoload_cached_explanation(app);
                 util::perf_log(app.cfg.perf_log, &format!("show-translation total={ms}ms"));
                 sync_overlay(app);
             }
             worker::WorkerMsg::TranslationSkipped { msg } => {
+                app.tr_pending = false;
                 app.translation = None;
                 app.status = Some(msg);
                 app.error_only = false;
                 sync_overlay(app);
             }
             worker::WorkerMsg::TranslationFailed { msg } => {
+                app.tr_pending = false;
                 // 見出し・エンジン切替チップは残したいので translation を None にはしない。
                 // 本文だけ空にし、エラー内容はシステムメッセージ行 (status) へ出す。
                 app.translation = Some(String::new());
@@ -572,6 +623,8 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
             }
             worker::WorkerMsg::Error { msg, anchor, clear_source } => {
                 app.explaining = false;
+                app.ocr_pending = false;
+                app.tr_pending = false;
                 if clear_source {
                     // OCRエンジン切替・画像編集後の再認識失敗: 古い認識結果を残さず消す
                     app.source.clear();
@@ -653,7 +706,13 @@ pub fn reload_config(hwnd: HWND) {
                 );
             }
         }
-        sync_overlay(app);
+        // オーバーレイが非表示のときは同期しない。sync_overlay→overlay::update は
+        // 無条件に ShowWindow するため、設定変更のたびに非表示のオーバーレイが
+        // 画面へ出現してしまうのを防ぐ (SPECv0.5.4 §1)。表示中の設定 (テーマ等) は
+        // 次回表示時の sync_overlay で反映される。
+        if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(app.overlay) }.as_bool() {
+            sync_overlay(app);
+        }
     });
 }
 
@@ -725,8 +784,12 @@ pub fn sync_overlay(app: &mut App) {
         cur_tr_chip_key: if app.cur_tr == "llm" { app.cfg.active_api_profile.clone() } else { app.cur_tr.clone() },
         explanation: app.explanation.clone(),
         explaining: app.explaining,
+        ocr_pending: app.ocr_pending,
+        tr_pending: app.tr_pending,
         error_only: app.error_only,
         app_title: app.app_title.clone(),
+        app_exe: app.app_exe.clone(),
+        uia_json: app.uia_json.clone(),
         uia_nodes: app.uia_nodes.clone(),
         scroll_y: app.scroll_y,
         has_image: app.last_img.is_some(),

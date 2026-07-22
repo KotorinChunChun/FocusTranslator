@@ -103,7 +103,8 @@ pub struct AppContext {
 
 impl AppContext {
     fn capture(x: i32, y: i32, target: HWND) -> Self {
-        let (exe, title) = util::get_window_context(target);
+        // メニューポップアップ等はオーナーを辿って親アプリの情報を補完する (SPECv0.5.4 §9b)
+        let (exe, title) = util::get_app_context(target);
         let uia_nodes = uia::path_nodes_at_point(x, y);
         let control_type = uia::control_type_at_point(x, y);
         AppContext {
@@ -161,6 +162,7 @@ fn prompt_ctx(ctx: &AppContext, ocr_engine: &str) -> crate::config::PromptContex
         app_title: ctx.title.clone(),
         app_exe: ctx.exe.clone().unwrap_or_default(),
         uia_path: ctx.uia_path.clone(),
+        uia_detail: ctx.uia_json.clone(),
         ocr_engine: ocr_engine.to_string(),
         ..Default::default()
     }
@@ -211,6 +213,7 @@ fn log_cap(cfg: &Config, mode: &str, ctx: &AppContext, image: Option<&Captured>,
     let crop_rect = extent.rect.map(|r| (r.left, r.top, r.right - r.left, r.bottom - r.top));
     let id = crate::logdb::log_capture(
         mode, ctx.exe.as_deref(), Some(&ctx.title), Some(&ctx.uia_path), Some(&ctx.uia_json), ctx.control_type.as_deref(),
+        ctx.selected_text.as_deref(),
         image, cfg.debug_mode,
         crate::logdb::CaptureExtent {
             full_image: extent.full,
@@ -579,6 +582,20 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         let mut ctx = AppContext::capture(x, y, HWND(target as *mut _));
         let probe = uia::probe_at_point(x, y);
         ctx.selected_text = probe.selected_text.clone();
+
+        // 選択文字列検出・親アプリ取得の診断ログ (SPECv0.5.4 §12/§9b)。デバッグモード時のみ。
+        // uia_mock などで検出できない/親アプリを見失うケースの原因切り分けに使う。
+        if cfg.debug_mode {
+            crate::util::app_log(&format!(
+                "uia-probe: node={:?} selected={:?} uia_text_head={:?} | resolved_exe={:?} resolved_title={:?} | {}",
+                probe.node,
+                probe.selected_text.as_deref(),
+                probe.text.as_deref().map(|t| t.chars().take(30).collect::<String>()),
+                ctx.exe.as_deref(),
+                ctx.title,
+                crate::util::window_diag(HWND(target as *mut _)),
+            ));
+        }
 
         // 経路S: 選択中の文字列 (最優先。OCRはもちろん、カーソル位置のUIAテキストよりも優先)
         if let Some(sel) = probe.selected_text.clone() {
@@ -1020,6 +1037,9 @@ fn build_explain_image(img: &ExplainImage) -> (Vec<u8>, String) {
 /// 解説の取得 (SPEC v0.3 §2.2.2 / v0.4 §8.2.4): 成功・失敗ともログへ追記してオーバーレイへ通知する。
 /// profile はダイアログで選択されたAPIプロファイル名 (見つからなければアクティブを使用)。
 /// image が Some なら、赤枠でマークした全体キャプチャを添付して送信する (SPECv0.5.3)。
+/// force=true のとき、DBキャッシュを参照せず常にLLMへ問い合わせる (SPECv0.5.4 §3: 解説ボタンの
+/// 手動再クリックは毎回新しく取得する)。false は従来通りキャッシュがあれば再利用する。
+#[allow(clippy::too_many_arguments)]
 pub fn explain(
     generation: u64,
     recog_id: i64,
@@ -1028,6 +1048,7 @@ pub fn explain(
     profile: String,
     main: isize,
     image: Option<ExplainImage>,
+    force: bool,
 ) {
     std::thread::spawn(move || {
         init_com();
@@ -1041,7 +1062,9 @@ pub fn explain(
         // 同一プロファイル+同一送信プロンプト(input_text)の成功済み解説がDBにあれば、
         // APIを呼ばずそれを使う (SPECv0.5.2追補: プロファイル別チップのため、テンプレートが
         // 同一で input_text が一致していても別プロファイルのキャッシュは流用しない)。
-        if cfg.log_enabled
+        // force 指定時はこのキャッシュ参照を飛ばして常にLLMへ問い合わせる (SPECv0.5.4 §3)。
+        if !force
+            && cfg.log_enabled
             && let Some((cached_rid, cached_text)) = crate::logdb::find_cached_explanation_for_profile(&profile, &cache_text)
         {
             if cached_rid != recog_id {
