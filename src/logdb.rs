@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
@@ -123,7 +123,8 @@ fn init_db() -> Result<Connection, String> {
             success INTEGER NOT NULL,
             error TEXT,
             tags TEXT,
-            image_hash TEXT
+            image_hash TEXT,
+            llm_profile TEXT
          );
          CREATE TABLE IF NOT EXISTS translations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,7 +158,7 @@ fn init_db() -> Result<Connection, String> {
             tokens_out INTEGER
          );
          CREATE INDEX IF NOT EXISTS idx_recog_capture ON recognitions(capture_id);
-         CREATE INDEX IF NOT EXISTS idx_recog_hash ON recognitions(image_hash, engine);
+         CREATE INDEX IF NOT EXISTS idx_recog_hash ON recognitions(image_hash, engine, llm_profile);
          CREATE INDEX IF NOT EXISTS idx_tr_recog ON translations(recognition_id);
          CREATE INDEX IF NOT EXISTS idx_ex_recog ON explanations(recognition_id);
          CREATE INDEX IF NOT EXISTS idx_ex_input ON explanations(input_text);
@@ -300,6 +301,10 @@ pub fn replace_capture_image(
 
 /// 認識ログを記録し recognition_id を返す。image_hash は同一画像+同一エンジンでの
 /// 再OCR判定に使う (SPECv0.4追補)。ハッシュを算出できない/不要な場合は None。
+/// llm_profile は engine="llm" のときのみ使用中のLLMプロファイル名を渡す (SPECv0.5.5:
+/// これが無いとGeminiとLocalLLM等を切り替えても両方 engine="llm" のため、別プロファイルの
+/// キャッシュを誤って再利用してしまう)。
+#[allow(clippy::too_many_arguments)]
 pub fn log_recognition(
     capture_id: i64,
     method: &str,
@@ -308,16 +313,17 @@ pub fn log_recognition(
     source_text: Option<&str>,
     error: Option<&str>,
     image_hash: Option<&str>,
+    llm_profile: Option<&str>,
 ) -> Option<i64> {
     with_conn_opt(|guard| {
         let success = error.is_none();
         if let Err(e) = guard.execute(
             "INSERT INTO recognitions
-                (capture_id, ts_ms, method, engine, duration_ms, source_text, success, error, tags, image_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9)",
+                (capture_id, ts_ms, method, engine, duration_ms, source_text, success, error, tags, image_hash, llm_profile)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10)",
             rusqlite::params![
                 capture_id, now_ms(), method, engine, duration_ms as i64,
-                source_text, success as i64, error, image_hash
+                source_text, success as i64, error, image_hash, llm_profile
             ],
         ) {
             util::app_log(&format!("log_recognition failed: {e}"));
@@ -327,17 +333,20 @@ pub fn log_recognition(
     })
 }
 
-/// 同一画像(image_hash)+同一エンジンでの成功済み認識結果があれば、その
-/// (recognition_id, source_text) を返す (SPECv0.4追補: 再OCR/再ログを避けるためのキャッシュ)。
+/// 同一画像(image_hash)+同一エンジン+同一LLMプロファイル(engine="llm"のときのみ意味を持つ)
+/// での成功済み認識結果があれば、その (recognition_id, source_text) を返す
+/// (SPECv0.4追補: 再OCR/再ログを避けるためのキャッシュ。SPECv0.5.5でllm_profileを条件に追加)。
 /// 最新のものを優先する。
-pub fn find_cached_recognition(image_hash: &str, engine: &str) -> Option<(i64, String)> {
+pub fn find_cached_recognition(image_hash: &str, engine: &str, llm_profile: Option<&str>) -> Option<(i64, String)> {
     with_conn_opt(|guard| {
         guard
             .query_row(
                 "SELECT id, source_text FROM recognitions
-                 WHERE image_hash = ?1 AND engine = ?2 AND success = 1 AND source_text IS NOT NULL
+                 WHERE image_hash = ?1 AND engine = ?2
+                   AND (llm_profile = ?3 OR (?3 IS NULL AND llm_profile IS NULL))
+                   AND success = 1 AND source_text IS NOT NULL
                  ORDER BY ts_ms DESC LIMIT 1",
-                rusqlite::params![image_hash, engine],
+                rusqlite::params![image_hash, engine, llm_profile],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .ok()
@@ -395,6 +404,37 @@ pub fn find_explanation_by_prompt_prefix(profile: &str, prompt_body: &str) -> Op
             .ok()
     })
     .flatten()
+}
+
+/// 指定LLMプロファイルへの送信状況の集計 (直近 within_ms 以内。翻訳+解説の合算)。
+/// オーバーレイの使用状況確認ボタン用 (SPECv0.5.5)。
+#[derive(Default, Clone, Copy)]
+pub struct LlmUsageSummary {
+    pub count: i64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+}
+
+pub fn llm_usage_summary(profile: &str, within_ms: i64) -> LlmUsageSummary {
+    with_conn(LlmUsageSummary::default(), |guard| {
+        let since = now_ms() - within_ms;
+        let mut sum = LlmUsageSummary::default();
+        for sql in [
+            "SELECT COUNT(*), COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0)
+             FROM translations WHERE llm_profile = ?1 AND ts_ms >= ?2",
+            "SELECT COUNT(*), COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0)
+             FROM explanations WHERE llm_profile = ?1 AND ts_ms >= ?2",
+        ] {
+            if let Ok(row) = guard.query_row(sql, rusqlite::params![profile, since], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+            }) {
+                sum.count += row.0;
+                sum.tokens_in += row.1;
+                sum.tokens_out += row.2;
+            }
+        }
+        sum
+    })
 }
 
 /// 翻訳ログを記録する。
@@ -917,13 +957,21 @@ mod tests {
             CaptureExtent::default(),
         )
         .expect("capture id");
-        let rid = log_recognition(cid, "ocr", "win", 200, Some("hello"), None, Some("hash-a")).expect("recognition id");
+        let rid = log_recognition(cid, "ocr", "win", 200, Some("hello"), None, Some("hash-a"), None).expect("recognition id");
         log_translation(
             rid, "llm", Some("prof1"), "en", "ja", 300, false, Some("こんにちは"), None,
             Some("{\"req\":1}"), Some("{\"res\":2}"), Some(10), Some(5),
         );
         log_explanation(rid, "prof1", 400, "prompt text", Some("解説文"), None, Some(20), Some(15));
         log_explanation(rid, "prof1", 400, "prompt text", None, Some("timeout"), None, None);
+
+        // LLM使用状況の集計 (SPECv0.5.5): 翻訳1件(10/5) + 解説2件(20/15, NULL/NULL) を合算する
+        let usage = llm_usage_summary("prof1", 3_600_000);
+        assert_eq!(usage.count, 3, "翻訳1件+解説2件");
+        assert_eq!(usage.tokens_in, 30);
+        assert_eq!(usage.tokens_out, 20);
+        assert_eq!(llm_usage_summary("prof2", 3_600_000).count, 0, "プロファイルが違えば集計されない");
+        assert_eq!(llm_usage_summary("prof1", -1).count, 0, "集計対象期間の外なら0件");
 
         let caps = search_captures("", "", 10);
         assert_eq!(caps.len(), 1);
@@ -955,13 +1003,27 @@ mod tests {
         assert_eq!(recognitions_for(cid)[0].tags, "重要");
 
         // 再OCR相当: 同じ capture に認識行を追加
-        let rid2 = log_recognition(cid, "ocr", "paddle", 100, Some("hello2"), None, Some("hash-b")).unwrap();
+        let rid2 = log_recognition(cid, "ocr", "paddle", 100, Some("hello2"), None, Some("hash-b"), None).unwrap();
         assert_eq!(recognitions_for(cid).len(), 2);
 
         // 同一画像+同一エンジンの既存認識はキャッシュとして取得できる (再OCR回避, SPECv0.4追補)
-        assert_eq!(find_cached_recognition("hash-a", "win"), Some((rid, "hello".to_string())));
-        assert_eq!(find_cached_recognition("hash-a", "paddle"), None, "エンジンが違えばヒットしない");
-        assert_eq!(find_cached_recognition("hash-x", "win"), None, "ハッシュが違えばヒットしない");
+        assert_eq!(find_cached_recognition("hash-a", "win", None), Some((rid, "hello".to_string())));
+        assert_eq!(find_cached_recognition("hash-a", "paddle", None), None, "エンジンが違えばヒットしない");
+        assert_eq!(find_cached_recognition("hash-x", "win", None), None, "ハッシュが違えばヒットしない");
+
+        // 同一画像+engine="llm"でもプロファイルが違えばキャッシュを流用しない (SPECv0.5.5:
+        // GeminiとLocalLLM等を切り替えたときに別プロファイルの結果を誤って再利用するバグの修正)
+        let rid_llm_a = log_recognition(cid, "ocr", "llm", 150, Some("hello from Gemini"), None, Some("hash-c"), Some("Gemini")).unwrap();
+        assert_eq!(
+            find_cached_recognition("hash-c", "llm", Some("Gemini")),
+            Some((rid_llm_a, "hello from Gemini".to_string())),
+            "同一プロファイルならキャッシュがヒットする"
+        );
+        assert_eq!(
+            find_cached_recognition("hash-c", "llm", Some("LocalLLM")),
+            None,
+            "同一画像+同一engineでもプロファイルが違えばキャッシュを流用しない"
+        );
 
         // 翻訳・解説のDBキャッシュ検索 (SPECv0.4.8追補: API消費回避)
         assert_eq!(
@@ -982,7 +1044,8 @@ mod tests {
         delete_recognition(rid);
         assert_eq!(translations_for(rid).len(), 0);
         assert_eq!(explanations_for(rid).len(), 0);
-        assert_eq!(recognitions_for(cid).len(), 1);
+        // rid("win")を消した後も rid2("paddle") と rid_llm_a("llm"/Gemini) の2件が残る
+        assert_eq!(recognitions_for(cid).len(), 2);
 
         // CASCADE削除: capture を消すと配下の認識も消える
         delete_capture(cid);
@@ -993,7 +1056,7 @@ mod tests {
         let mut last_rid = 0;
         for i in 0..4 {
             let c = log_capture("hold", None, None, None, None, None, None, None, false, CaptureExtent::default()).unwrap();
-            last_rid = log_recognition(c, "ocr", "win", 100, Some(&format!("line{i}")), None, None).unwrap();
+            last_rid = log_recognition(c, "ocr", "win", 100, Some(&format!("line{i}")), None, None, None).unwrap();
         }
         rotate(2);
         assert_eq!(search_captures("", "", 100).len(), 2, "rotate should cap captures");

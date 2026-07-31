@@ -1,4 +1,4 @@
-// 範囲指定モード (SPEC §3.2): Ctrl+Alt+T で半透明オーバーレイを表示し、
+// 範囲指定モード (SPEC §3.2): Ctrl+Alt+Shift+T で半透明オーバーレイを表示し、
 // ドラッグ選択した矩形を main へ WM_APP_REGION で通知する。
 use std::cell::RefCell;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};

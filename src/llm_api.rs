@@ -5,6 +5,18 @@ use crate::config::{ApiProfile, ApiType};
 pub const DEFAULT_OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
 pub const DEFAULT_CLAUDE_URL: &str = "https://api.anthropic.com/v1/messages";
 pub const GEMINI_URL_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+/// Hugging Face Inference Providers の統一(OpenAI互換)ルーター (SPECv0.5.5)
+pub const DEFAULT_HUGGINGFACE_URL: &str = "https://router.huggingface.co/v1/chat/completions";
+/// OpenRouter のOpenAI互換API (SPECv0.5.5)
+pub const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+/// GitHub Models のOpenAI互換API (SPECv0.5.5)
+pub const DEFAULT_GITHUB_MODELS_URL: &str = "https://models.github.ai/inference/chat/completions";
+/// NVIDIA NIM (build.nvidia.com API カタログ) のOpenAI互換API (SPECv0.5.5)
+pub const DEFAULT_NVIDIA_NIM_URL: &str = "https://integrate.api.nvidia.com/v1/chat/completions";
+/// Ollamaのローカルサーバ (OpenAI互換API)。APIキー不要 (SPECv0.5.5)
+pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434/v1/chat/completions";
+/// LM Studioのローカルサーバ (OpenAI互換API)。APIキー不要 (SPECv0.5.5)
+pub const DEFAULT_LMSTUDIO_URL: &str = "http://localhost:1234/v1/chat/completions";
 
 /// LLMへの1リクエスト。画像はOCR統合モードのみ付与する。
 pub struct LlmRequest<'a> {
@@ -42,7 +54,14 @@ pub fn call(prof: &ApiProfile, req: &LlmRequest) -> Result<LlmResponse, String> 
     }
     match prof.api_type {
         ApiType::Gemini => call_gemini(prof, &key, req),
-        ApiType::OpenAI | ApiType::LlamaCpp => call_openai(prof, &key, req),
+        ApiType::OpenAI
+        | ApiType::LlamaCpp
+        | ApiType::HuggingFace
+        | ApiType::OpenRouter
+        | ApiType::GitHubModels
+        | ApiType::NvidiaNim
+        | ApiType::Ollama
+        | ApiType::LmStudio => call_openai(prof, &key, req),
         ApiType::Claude => call_claude(prof, &key, req),
     }
 }
@@ -52,7 +71,14 @@ pub fn call(prof: &ApiProfile, req: &LlmRequest) -> Result<LlmResponse, String> 
 pub fn build_request_json(prof: &ApiProfile, req: &LlmRequest) -> String {
     match prof.api_type {
         ApiType::Gemini => gemini_body(prof, req).to_string(),
-        ApiType::OpenAI | ApiType::LlamaCpp => openai_body(prof, req).to_string(),
+        ApiType::OpenAI
+        | ApiType::LlamaCpp
+        | ApiType::HuggingFace
+        | ApiType::OpenRouter
+        | ApiType::GitHubModels
+        | ApiType::NvidiaNim
+        | ApiType::Ollama
+        | ApiType::LmStudio => openai_body(prof, req).to_string(),
         ApiType::Claude => claude_body(prof, req).to_string(),
     }
 }
@@ -118,6 +144,44 @@ fn claude_body(prof: &ApiProfile, req: &LlmRequest) -> serde_json::Value {
         "max_tokens": max_tokens,
         "messages": [{ "role": "user", "content": content }]
     })
+}
+
+/// 疎通確認 (SPECv0.5.5)。OpenAI互換の `/v1/models` へGETし、一覧取得の成否と
+/// モデルid一覧を返す。ローカルサーバ(Ollama/LM Studio/llama.cpp)ではモデル名を
+/// ユーザーが確認する手段が無いため、設定画面の【接続確認】ボタンから使う。
+/// Gemini/Claudeはモデル一覧APIの形式・認証方式が異なるため未対応。
+pub struct ModelListResult {
+    pub model_ids: Vec<String>,
+}
+
+pub fn check_connection(prof: &ApiProfile) -> Result<ModelListResult, String> {
+    if matches!(prof.api_type, ApiType::Gemini | ApiType::Claude) {
+        return Err("このプロバイダの接続確認には対応していません".into());
+    }
+    let base = if prof.api_url.trim().is_empty() { prof.api_type.default_url() } else { prof.api_url.trim() };
+    let models_url = match base.strip_suffix("/chat/completions") {
+        Some(b) => format!("{b}/models"),
+        None => base.to_string(),
+    };
+    let key = prof.get_key();
+    let auth = format!("Bearer {key}");
+    let mut builder = ureq::get(&models_url);
+    if !key.is_empty() {
+        builder = builder.header("Authorization", auth.as_str());
+    }
+    let mut res = builder
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(6)))
+        .build()
+        .call()
+        .map_err(|e| format!("接続に失敗しました: {e}"))?;
+    let json: serde_json::Value =
+        res.body_mut().read_json().map_err(|e| format!("応答の解析に失敗しました: {e}"))?;
+    let model_ids: Vec<String> = json["data"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|m| m["id"].as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    Ok(ModelListResult { model_ids })
 }
 
 fn url_or<'a>(url: &'a str, default: &'a str) -> &'a str {

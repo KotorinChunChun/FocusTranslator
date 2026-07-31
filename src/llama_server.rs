@@ -16,10 +16,12 @@ static CHILD: Mutex<Option<Child>> = Mutex::new(None);
 
 /// 既定ポート (設定で変更可)。v0.5.2まではOllamaと同じ11434を使っていたが、Ollama稼働中の
 /// 環境で「起動済み」と誤判定してリクエストがOllamaへ流れる事故を避けるため、他ツールと
-/// 被りにくい値へ変更した (SPECv0.5.3)。既存ユーザーの保存済み設定は変更しない。
-pub const DEFAULT_PORT: u32 = 18434;
+/// 被りにくい値(18434)へ変更した (SPECv0.5.3)。v0.5.5でユーザー指定により11430へ変更
+/// (Ollamaの既定ポート11434とは異なる値のため引き続き衝突しない)。既存ユーザーの
+/// 保存済み設定は変更しない。
+pub const DEFAULT_PORT: u32 = 11430;
 /// llama.cpp種別プロファイルの既定URL (DEFAULT_PORTと値を合わせておくこと)
-pub const DEFAULT_URL: &str = "http://localhost:18434/v1/chat/completions";
+pub const DEFAULT_URL: &str = "http://localhost:11430/v1/chat/completions";
 /// コンソールウィンドウを作らずに子プロセスを起動するフラグ (Win32 CREATE_NO_WINDOW)
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 

@@ -1,12 +1,10 @@
 // 設定画面 (SPEC §12)
 use crate::config::Config;
-use crate::util::{self, to_wide};
 use crate::ui_helpers::*;
+use crate::util::{self, to_wide};
 use std::cell::RefCell;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, HFONT,
-};
+use windows::Win32::Graphics::Gdi::{COLOR_BTNFACE, HFONT};
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
 };
@@ -16,11 +14,11 @@ use windows::Win32::UI::Controls::Dialogs::{
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, GetSystemMetrics,
-    IDC_ARROW, IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK,
-    MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_DESTROY, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
+    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, IDC_ARROW,
+    IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO,
+    MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL,
+    SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
 };
 use windows::core::{PCWSTR, w};
 
@@ -44,12 +42,12 @@ const IDC_ONNX_STATUS: i32 = 123;
 const IDC_ONNX_INSTALL: i32 = 124;
 const IDC_DEEPL_URL: i32 = 125;
 const IDC_GOOGLE_URL: i32 = 126;
-const IDC_PROF_SAVE: i32 = 127;
 const IDC_SRCLANG: i32 = 128;
 const IDC_LOG_ENABLED: i32 = 129;
 const IDC_DEBUG_MODE: i32 = 130;
 const IDC_LOG_MAX: i32 = 131;
-const IDC_PROF_SAVEAS: i32 = 132;
+/// 選択中のプロファイルを複製するボタン (SPECv0.5.5: 別名保存の置き換え)
+const IDC_PROF_DUP: i32 = 132;
 const IDC_PROF_DEL: i32 = 133;
 const IDC_PROF_NAME: i32 = 134;
 const IDC_OPEN_LOG: i32 = 135;
@@ -102,6 +100,18 @@ const IDC_LLAMA_MMPROJ_BROWSE: i32 = 176;
 const IDC_PROF_MAXTOK: i32 = 177;
 /// 「更新を確認」ボタン (releasesページを開く。SPECv0.5.4 §11)
 const IDC_CHECK_UPDATE: i32 = 178;
+/// LLMプロファイルの【キーを入手】ボタン (種別に応じたAPIキー取得ページを開く。SPECv0.5.5)
+const IDC_PROF_KEY_URL: i32 = 179;
+/// 導入済みllama.cppビルド種別の表示 (SPECv0.5.5)
+const IDC_LLAMA_VARIANT_STATUS: i32 = 180;
+/// 導入済みllama.cppを停止して削除するボタン (SPECv0.5.5)
+const IDC_LLAMA_BIN_DELETE: i32 = 181;
+/// LLMプロファイルの疎通確認ボタン・結果表示 (SPECv0.5.5: Ollama/LM Studio等ローカルサーバの
+/// モデル名調査・接続状態確認用。OpenAI互換の `/v1/models` を使うためGemini/Claudeは対象外)
+const IDC_PROF_TEST_CONN: i32 = 182;
+const IDC_PROF_CONN_STATUS: i32 = 183;
+/// アプリ別の動作設定 (OCR優先/実行しない) ダイアログを開くボタン (SPECv0.5.5 §2)
+const IDC_OCR_PRIORITY_APPS: i32 = 184;
 
 /// エディットコントロールの通知コード (windows クレートに定義がないもの)
 const EN_KILLFOCUS: u32 = 0x0200;
@@ -122,18 +132,23 @@ const WM_LLAMA_BIN_PROGRESS: u32 = WM_APP + 18;
 /// 「更新を確認」の結果通知 (SPECv0.5.5)。wparam: 0=エラー(lparamにBox\<String\>) /
 /// 1=更新完了 / 2=既に最新版 / 3=ユーザーが更新をキャンセル。
 const WM_LLAMA_BIN_UPDATE_RESULT: u32 = WM_APP + 19;
+/// LLMプロファイル疎通確認の結果通知 (SPECv0.5.5)。wparam: 0=失敗 / 1=成功。
+/// lparamにBox\<String\>(表示用メッセージ)。
+const WM_PROF_CONN_RESULT: u32 = WM_APP + 20;
 /// 各APIキーの発行ページ(実際に確認済みの現行URL)
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
 /// 左下欄外のバージョン情報 (SPECv0.5.2追補)。アプリ名は正式名に統一 (SPECv0.5.4 §17)。
 const APP_VERSION_LABEL: &str = crate::util::APP_DISPLAY_NAME;
-const APP_UPDATE_DATE: &str = "2026/7/22";
+const APP_UPDATE_DATE: &str = "2026/7/31";
 /// 開発者名 (SPECv0.5.4 §17)
 const APP_DEVELOPER: &str = "Kotorichun";
 /// 「使い方」ボタンで開くリポジトリルート (README表示。SPECv0.5.4 §11)
-const GITHUB_REPO_URL: &str = "https://github.com/KotorinChunChun/FocusTranslator";
+const GITHUB_REPO_URL: &str =
+    "https://github.com/KotorinChunChun/FocusTranslator/blob/master/README.md";
 /// 「更新を確認」ボタンで開くreleasesページ (SPECv0.5.4 §11)
-const GITHUB_RELEASES_PAGE_URL: &str = "https://github.com/KotorinChunChun/FocusTranslator/releases";
+const GITHUB_RELEASES_PAGE_URL: &str =
+    "https://github.com/KotorinChunChun/FocusTranslator/releases";
 
 const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
 const OCR_KEYS: [&str; 4] = ["oneocr", "win", "paddle", "llm"];
@@ -156,9 +171,6 @@ thread_local! {
     static PROFILES: RefCell<Vec<crate::config::ApiProfile>> = const { RefCell::new(Vec::new()) };
     /// 既定LLMプロファイル名 (OCR/翻訳/解説共通)。【既定にする】ボタンでのみ変更する。
     static DEFAULT_PROFILE: RefCell<String> = const { RefCell::new(String::new()) };
-    /// 「新規」ボタン直後 (まだプロファイル保存していない) 状態。
-    /// プロンプト欄のUIが無くなったため、この状態での保存は既定プロンプトを使う (SPECv0.4.7 §6.1)。
-    static PENDING_NEW: RefCell<bool> = const { RefCell::new(false) };
     /// ウィンドウ破棄中フラグ: 子コントロール破棄過程の EN_KILLFOCUS で
     /// 不完全なUI状態が自動保存されるのを防ぐ。
     static CLOSING: RefCell<bool> = const { RefCell::new(false) };
@@ -252,9 +264,12 @@ const LAYOUT_COL_X: [i32; 3] = [PAD, PAD * 2 + COL_W, PAD * 3 + COL_W * 2];
 const GROUP_GAP: i32 = 8; // 同列内でグループを縦に並べる際の間隔
 
 const GROUP1_Y: i32 = 8;
-const GROUP1_H: i32 = 178; // 5行 (最終行はEDIT高22) + 下余白14
+// グループ3(OCR設定)がUIA優先度制御ボタンの分だけグループ1より1行多いため、
+// グループ1側もその高さ(実測196、5行+UIA分の空き)に合わせて下端を揃える
+// (SPECv0.5.5: 以前はここが178のままでグループ2・4の開始位置が列間で最大30pxずれていた)。
+const GROUP1_H: i32 = 196;
 const GROUP3_Y: i32 = GROUP1_Y;
-const GROUP3_H: i32 = GROUP1_H; // グループ1と下端を揃える (OCR設定は内容的にはやや短い)
+const GROUP3_H: i32 = GROUP1_H; // グループ1と下端を揃える
 
 const GROUP2_Y: i32 = GROUP1_Y + GROUP1_H + GROUP_GAP;
 const GROUP2_H: i32 = 242; // 7行 (最終行はボタン高26) + 下余白14
@@ -262,9 +277,9 @@ const GROUP4_Y: i32 = GROUP3_Y + GROUP3_H + GROUP_GAP;
 const GROUP4_H: i32 = GROUP2_H; // グループ2と下端を揃える (翻訳設定は内容的にはやや短い)
 
 const GROUP5_Y: i32 = 8;
-const GROUP5_H: i32 = 242; // 7行 (最終行はボタン高26) + 下余白14。偶然グループ2/4と同高
+const GROUP5_H: i32 = 272; // 8行 (最終行はボタン高26) + 下余白14 (SPECv0.5.5で接続確認行を追加)
 const GROUP6_Y: i32 = GROUP5_Y + GROUP5_H + GROUP_GAP;
-const GROUP6_H: i32 = 266; // 8行 (最終行はチェックボックス) + 下余白14
+const GROUP6_H: i32 = 296; // 9行 (最終行はチェックボックス) + 下余白14 (SPECv0.5.5で削除ボタン行を追加)
 
 /// 全列の下端のうち最も低い位置 (この直下に閉じるボタン行を置く)
 const LAYOUT_CONTENT_BOTTOM: i32 = {
@@ -282,7 +297,18 @@ const LAYOUT_CLIENT_H: i32 = LAYOUT_BTN_Y + LAYOUT_BTN_H + 14;
 /// BS_GROUPBOX でカテゴリ枠を作る (SPECv0.4 §5.1)
 fn group(h: HWND, inst: HINSTANCE, text: &str, x: i32, y: i32, w: i32, ht: i32) {
     const BS_GROUPBOX: u32 = 0x0000_0007;
-    ctl(h, inst, w!("BUTTON"), text, WINDOW_STYLE(BS_GROUPBOX), x, y, w, ht, 0);
+    ctl(
+        h,
+        inst,
+        w!("BUTTON"),
+        text,
+        WINDOW_STYLE(BS_GROUPBOX),
+        x,
+        y,
+        w,
+        ht,
+        0,
+    );
 }
 
 fn build_controls(h: HWND, inst: HINSTANCE) {
@@ -307,10 +333,18 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         y += STEP;
         label(h, inst, "プレビューキー", lx, y + 2, 130);
         combo(h, inst, cx, y, 90, IDC_DETECT_KEY);
-        checkbox(h, inst, "領域表示", cx + 98, y + 2, 88, IDC_PREVIEW_DETECT_MODE);
+        checkbox(
+            h,
+            inst,
+            "領域表示",
+            cx + 98,
+            y + 2,
+            88,
+            IDC_PREVIEW_DETECT_MODE,
+        );
         y += STEP;
         label(h, inst, "範囲指定ホットキー", lx, y + 2, 130);
-        edit(h, inst, cx, y, 120, IDC_HOTKEY);
+        edit(h, inst, cx, y, 160, IDC_HOTKEY);
         y += STEP;
         label(h, inst, "監視周期 (ms)", lx, y + 2, 130);
         edit(h, inst, cx, y, 60, IDC_POLL);
@@ -328,20 +362,60 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         checkbox(h, inst, "起動時に常駐する", lx, y, 170, IDC_AUTOSTART);
         checkbox(h, inst, "計測ログを有効化", lx + 180, y, 160, IDC_PERFLOG);
         y += STEP;
-        checkbox(h, inst, "実行ログを記録 (原文/訳文を平文保存)", lx, y, 300, IDC_LOG_ENABLED);
+        checkbox(
+            h,
+            inst,
+            "実行ログを記録 (原文/訳文を平文保存)",
+            lx,
+            y,
+            300,
+            IDC_LOG_ENABLED,
+        );
         y += STEP;
-        checkbox(h, inst, "デバッグモード (OCR画像をPNG保存)", lx, y, 280, IDC_DEBUG_MODE);
+        checkbox(
+            h,
+            inst,
+            "デバッグモード (OCR画像をPNG保存)",
+            lx,
+            y,
+            280,
+            IDC_DEBUG_MODE,
+        );
         y += STEP;
         label(h, inst, "保持上限", lx, y + 2, 60);
         edit(h, inst, lx + 66, y, 70, IDC_LOG_MAX);
-        button(h, inst, "ログビューアを開く", lx + 150, y - 2, 130, IDC_OPEN_LOG);
+        button(
+            h,
+            inst,
+            "ログビューアを開く",
+            lx + 150,
+            y - 2,
+            130,
+            IDC_OPEN_LOG,
+        );
         y += STEP;
         label(h, inst, "オーバーレイテーマ", lx, y + 2, 130);
         combo(h, inst, lx + 140, y, 130, IDC_OVERLAY_THEME);
         y += STEP;
-        button(h, inst, "外部送信の同意状態をリセット", lx, y, 220, IDC_CONSENT_RESET);
+        button(
+            h,
+            inst,
+            "外部送信の同意状態をリセット",
+            lx,
+            y,
+            220,
+            IDC_CONSENT_RESET,
+        );
         y += STEP;
-        button(h, inst, "設定をリセット (アプリ再起動)", lx, y, 220, IDC_RESET_SETTINGS);
+        button(
+            h,
+            inst,
+            "設定をリセット (アプリ再起動)",
+            lx,
+            y,
+            220,
+            IDC_RESET_SETTINGS,
+        );
     }
 
     // ---- 中列 グループ3: OCR設定 (旧 2. OCR設定) ----
@@ -354,14 +428,67 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         label(h, inst, "既定OCRエンジン", lx, y + 2, 130);
         combo(h, inst, cx, y, 170, IDC_OCR);
         y += STEP;
-        ctl(h, inst, w!("STATIC"), "", WINDOW_STYLE(0), lx, y, COL_W - 24, 40, IDC_OCR_EXP); // 解説表示
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "",
+            WINDOW_STYLE(0),
+            lx,
+            y,
+            COL_W - 24,
+            40,
+            IDC_OCR_EXP,
+        ); // 解説表示
         y += 44;
         label(h, inst, "OneOCR", lx, y + 2, 130);
-        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 140, 20, IDC_ONEOCR_STATUS);
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "確認中…",
+            WINDOW_STYLE(0),
+            cx,
+            y + 2,
+            140,
+            20,
+            IDC_ONEOCR_STATUS,
+        );
         y += STEP;
         label(h, inst, "PaddleOCR", lx, y + 2, 130);
-        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 100, 20, IDC_PADDLE_STATUS);
-        button(h, inst, "インストール", cx + 106, y - 2, 104, IDC_PADDLE_INSTALL);
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "確認中…",
+            WINDOW_STYLE(0),
+            cx,
+            y + 2,
+            100,
+            20,
+            IDC_PADDLE_STATUS,
+        );
+        button(
+            h,
+            inst,
+            "インストール",
+            cx + 106,
+            y - 2,
+            104,
+            IDC_PADDLE_INSTALL,
+        );
+        y += STEP;
+        // TeamViewer/RDP等でOCRを優先させたいアプリと、認識自体を行わないアプリの
+        // 2つの一覧を管理する (SPECv0.5.5 §2)
+        button(
+            h,
+            inst,
+            "アプリ別の動作設定...",
+            lx,
+            y,
+            220,
+            IDC_OCR_PRIORITY_APPS,
+        );
     }
 
     // ---- 中列 グループ4: 翻訳設定 (旧 3. 翻訳設定) ----
@@ -375,11 +502,41 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         combo(h, inst, cx, y, 170, IDC_TR);
         y += STEP;
         // 解説表示: OCR設定側と同じ高さ(40px)に揃える (旧60pxは1行分の余白が無駄だった)
-        ctl(h, inst, w!("STATIC"), "", WINDOW_STYLE(0), lx, y, COL_W - 24, 40, IDC_TR_EXP);
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "",
+            WINDOW_STYLE(0),
+            lx,
+            y,
+            COL_W - 24,
+            40,
+            IDC_TR_EXP,
+        );
         y += 44;
         label(h, inst, "ローカルONNX翻訳 (FuguMT)", lx, y + 2, 150);
-        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), cx, y + 2, 100, 20, IDC_ONNX_STATUS);
-        button(h, inst, "インストール", cx + 106, y - 2, 104, IDC_ONNX_INSTALL);
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "確認中…",
+            WINDOW_STYLE(0),
+            cx,
+            y + 2,
+            100,
+            20,
+            IDC_ONNX_STATUS,
+        );
+        button(
+            h,
+            inst,
+            "インストール",
+            cx + 106,
+            y - 2,
+            104,
+            IDC_ONNX_INSTALL,
+        );
         y += STEP;
         label(h, inst, "翻訳元言語 / 訳先言語", lx, y + 2, 140);
         combo(h, inst, cx, y, 70, IDC_SRCLANG);
@@ -388,11 +545,27 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         y += STEP;
         label(h, inst, "DeepL APIキー", lx, y + 2, 130);
         password_edit(h, inst, cx, y, key_w, IDC_DEEPL);
-        button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 76, IDC_DEEPL_URL);
+        button(
+            h,
+            inst,
+            "取得ページ",
+            cx + key_w + 6,
+            y - 2,
+            76,
+            IDC_DEEPL_URL,
+        );
         y += STEP;
         label(h, inst, "Google Trans APIキー", lx, y + 2, 140);
         password_edit(h, inst, cx, y, key_w, IDC_GOOGLE);
-        button(h, inst, "取得ページ", cx + key_w + 6, y - 2, 76, IDC_GOOGLE_URL);
+        button(
+            h,
+            inst,
+            "取得ページ",
+            cx + key_w + 6,
+            y - 2,
+            76,
+            IDC_GOOGLE_URL,
+        );
     }
 
     // ---- 右列 グループ5: LLMプロファイル設定 ----
@@ -400,27 +573,52 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let gx = col_x[2];
         let lx = inner(gx);
         let cx = gx + 100;
-        group(h, inst, "5. LLMプロファイル設定", gx, GROUP5_Y, COL_W, GROUP5_H);
+        group(
+            h,
+            inst,
+            "5. LLMプロファイル設定",
+            gx,
+            GROUP5_Y,
+            COL_W,
+            GROUP5_H,
+        );
         let mut y = GROUP5_Y + GTOP;
         label(h, inst, "プロファイル編集", lx, y + 2, 90);
         combo(h, inst, lx + 96, y, 150, IDC_PROF_LIST);
+        button(
+            h,
+            inst,
+            "既定にする",
+            lx + 96 + 150 + 6,
+            y,
+            90,
+            IDC_PROF_SET_DEFAULT,
+        );
         y += STEP;
         button(h, inst, "新規", lx, y, 46, IDC_PROF_NEW);
-        button(h, inst, "保存", lx + 50, y, 46, IDC_PROF_SAVE);
-        button(h, inst, "別名保存", lx + 100, y, 66, IDC_PROF_SAVEAS);
-        button(h, inst, "削除", lx + 170, y, 46, IDC_PROF_DEL);
-        button(h, inst, "既定にする", lx + 222, y, 90, IDC_PROF_SET_DEFAULT);
+        button(h, inst, "複製", lx + 50, y, 60, IDC_PROF_DUP);
+        button(h, inst, "削除", lx + 114, y, 46, IDC_PROF_DEL);
         y += STEP;
         label(h, inst, "API登録名", lx, y + 2, 84);
         edit(h, inst, cx, y, 140, IDC_PROF_NAME);
         label(h, inst, "種別", cx + 150, y + 2, 36);
-        combo(h, inst, cx + 188, y, 100, IDC_PROF_TYPE);
+        // 種別名(「GitHub Models」等)が閉じた表示幅より長いため、ドロップダウン一覧の幅だけ広げる
+        combo_set_dropped_width(combo(h, inst, cx + 188, y, 100, IDC_PROF_TYPE), 160);
         y += STEP;
         label(h, inst, "API URL", lx, y + 2, 84);
         edit(h, inst, cx, y, 288, IDC_PROF_URL);
         y += STEP;
         label(h, inst, "APIキー", lx, y + 2, 84);
         password_edit(h, inst, cx, y, key_w, IDC_PROF_KEY);
+        button(
+            h,
+            inst,
+            "キーを入手",
+            cx + key_w + 6,
+            y - 2,
+            84,
+            IDC_PROF_KEY_URL,
+        );
         y += STEP;
         label(h, inst, "モデル名", lx, y + 2, 84);
         edit(h, inst, cx, y, 174, IDC_PROF_MODEL);
@@ -428,11 +626,35 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         label(h, inst, "最大Token", cx + 180, y + 2, 60);
         edit(h, inst, cx + 240, y, 48, IDC_PROF_MAXTOK);
         y += STEP;
+        // 疎通確認 (SPECv0.5.5): Ollama/LM Studio等ローカルサーバでモデル名が分からない場合に
+        // 使う。成功時、モデル名欄が空欄ならAPIが返した先頭のモデルidを自動入力する。
+        button(h, inst, "接続確認", cx, y - 2, 90, IDC_PROF_TEST_CONN);
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "",
+            WINDOW_STYLE(0),
+            cx + 96,
+            y + 2,
+            200,
+            20,
+            IDC_PROF_CONN_STATUS,
+        );
+        y += STEP;
         // プロンプトは専用の編集ウィンドウで編集する (SPECv0.4.7 §1)
         label(h, inst, "プロンプト編集", lx, y + 4, 84);
         button(h, inst, "翻訳プロンプト", cx, y, 92, IDC_PROMPT_TR_BTN);
         button(h, inst, "OCRプロンプト", cx + 98, y, 92, IDC_PROMPT_OCR_BTN);
-        button(h, inst, "解説プロンプト", cx + 196, y, 92, IDC_PROMPT_EXP_BTN);
+        button(
+            h,
+            inst,
+            "解説プロンプト",
+            cx + 196,
+            y,
+            92,
+            IDC_PROMPT_EXP_BTN,
+        );
     }
 
     // ---- 右列 グループ6: ローカルLLM (llama.cpp) (SPECv0.5.2追補) ----
@@ -447,17 +669,79 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let bx = vx + VALUE_W + 8; // 操作ボタンの開始X (全行共通)
         const BTN_W: i32 = 96;
         let path_w = bx - lx - 8; // パス欄の幅 (参照ボタンがbxに揃うよう逆算)
-        group(h, inst, "6. ローカルLLMサーバー (llama.cpp)", gx, GROUP6_Y, COL_W, GROUP6_H);
+        group(
+            h,
+            inst,
+            "6. ローカルLLMサーバー (llama.cpp)",
+            gx,
+            GROUP6_Y,
+            COL_W,
+            GROUP6_H,
+        );
         let mut y = GROUP6_Y + GTOP;
         label(h, inst, "サーバープログラム本体", lx, y + 2, LABEL_W);
-        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), vx, y + 2, VALUE_W, 20, IDC_LLAMA_BIN_STATUS);
-        button(h, inst, "インストール", bx, y - 2, BTN_W, IDC_LLAMA_BIN_INSTALL);
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "確認中…",
+            WINDOW_STYLE(0),
+            vx,
+            y + 2,
+            VALUE_W,
+            20,
+            IDC_LLAMA_BIN_STATUS,
+        );
+        button(
+            h,
+            inst,
+            "インストール",
+            bx,
+            y - 2,
+            BTN_W,
+            IDC_LLAMA_BIN_INSTALL,
+        );
+        y += STEP;
+        // 導入済みのビルド種別(CPU/CUDA/Radeon)の表示と、停止して削除するボタン (SPECv0.5.5)
+        label(h, inst, "導入済みビルド", lx, y + 2, LABEL_W);
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "-",
+            WINDOW_STYLE(0),
+            vx,
+            y + 2,
+            VALUE_W,
+            20,
+            IDC_LLAMA_VARIANT_STATUS,
+        );
+        button(h, inst, "削除", bx, y - 2, BTN_W, IDC_LLAMA_BIN_DELETE);
         y += STEP;
         // モデルファイルは既定パス(自動ダウンロード)またはLM Studio等で導入済みのGGUFの
         // 明示パスのどちらかを使う。空欄なら既定パスを使う (llama_install::resolve_model_path)。
         label(h, inst, "言語モデル(Gemma4-E2B)", lx, y + 2, LABEL_W);
-        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), vx, y + 2, VALUE_W, 20, IDC_LLAMA_MODEL_STATUS);
-        button(h, inst, "ダウンロード", bx, y - 2, BTN_W, IDC_LLAMA_MODEL_INSTALL);
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "確認中…",
+            WINDOW_STYLE(0),
+            vx,
+            y + 2,
+            VALUE_W,
+            20,
+            IDC_LLAMA_MODEL_STATUS,
+        );
+        button(
+            h,
+            inst,
+            "ダウンロード",
+            bx,
+            y - 2,
+            BTN_W,
+            IDC_LLAMA_MODEL_INSTALL,
+        );
         y += STEP;
         edit(h, inst, lx, y, path_w, IDC_LLAMA_MODEL_PATH);
         button(h, inst, "参照…", bx, y - 2, BTN_W, IDC_LLAMA_MODEL_BROWSE);
@@ -465,8 +749,27 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         // mmproj(画像入力対応): 指定されていればサーバー起動時に --mmproj で渡され、
         // 同一ポートのまま画像入力(OCRのLLM経路)にも対応する。未指定ならテキスト専用。
         label(h, inst, "画像入力モデル(mmproj)", lx, y + 2, LABEL_W);
-        ctl(h, inst, w!("STATIC"), "確認中…", WINDOW_STYLE(0), vx, y + 2, VALUE_W, 20, IDC_LLAMA_MMPROJ_STATUS);
-        button(h, inst, "ダウンロード", bx, y - 2, BTN_W, IDC_LLAMA_MMPROJ_INSTALL);
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "確認中…",
+            WINDOW_STYLE(0),
+            vx,
+            y + 2,
+            VALUE_W,
+            20,
+            IDC_LLAMA_MMPROJ_STATUS,
+        );
+        button(
+            h,
+            inst,
+            "ダウンロード",
+            bx,
+            y - 2,
+            BTN_W,
+            IDC_LLAMA_MMPROJ_INSTALL,
+        );
         y += STEP;
         edit(h, inst, lx, y, path_w, IDC_LLAMA_MMPROJ_PATH);
         button(h, inst, "参照…", bx, y - 2, BTN_W, IDC_LLAMA_MMPROJ_BROWSE);
@@ -475,10 +778,29 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         edit(h, inst, vx, y, 70, IDC_LLAMA_PORT);
         y += STEP;
         label(h, inst, "サーバー状態", lx, y + 2, LABEL_W);
-        ctl(h, inst, w!("STATIC"), "停止中", WINDOW_STYLE(0), vx, y + 2, VALUE_W, 20, IDC_LLAMA_SERVER_STATUS);
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "停止中",
+            WINDOW_STYLE(0),
+            vx,
+            y + 2,
+            VALUE_W,
+            20,
+            IDC_LLAMA_SERVER_STATUS,
+        );
         button(h, inst, "起動", bx, y - 2, BTN_W, IDC_LLAMA_TOGGLE);
         y += STEP;
-        checkbox(h, inst, "起動時にサーバーを自動起動する", lx, y, 260, IDC_LLAMA_AUTOSTART);
+        checkbox(
+            h,
+            inst,
+            "起動時にサーバーを自動起動する",
+            lx,
+            y,
+            260,
+            IDC_LLAMA_AUTOSTART,
+        );
     }
 
     // ---- 下部ボタン領域 (右下; SPECv0.4 §5.2)
@@ -491,9 +813,36 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         "{APP_VERSION_LABEL}  v{}  (更新日: {APP_UPDATE_DATE})  開発: {APP_DEVELOPER}",
         env!("CARGO_PKG_VERSION")
     );
-    ctl(h, inst, w!("STATIC"), &version_text, WINDOW_STYLE(0), col_x[0], LAYOUT_BTN_Y + 4, 480, 20, IDC_VERSION_INFO);
-    button(h, inst, "使い方", col_x[0] + 486, LAYOUT_BTN_Y, 80, IDC_GITHUB_LINK);
-    button(h, inst, "更新を確認", col_x[0] + 572, LAYOUT_BTN_Y, 90, IDC_CHECK_UPDATE);
+    ctl(
+        h,
+        inst,
+        w!("STATIC"),
+        &version_text,
+        WINDOW_STYLE(0),
+        col_x[0],
+        LAYOUT_BTN_Y + 4,
+        480,
+        20,
+        IDC_VERSION_INFO,
+    );
+    button(
+        h,
+        inst,
+        "使い方",
+        col_x[0] + 486,
+        LAYOUT_BTN_Y,
+        80,
+        IDC_GITHUB_LINK,
+    );
+    button(
+        h,
+        inst,
+        "更新を確認",
+        col_x[0] + 572,
+        LAYOUT_BTN_Y,
+        90,
+        IDC_CHECK_UPDATE,
+    );
 
     // フォント設定
     unsafe {
@@ -513,7 +862,10 @@ fn populate(h: HWND) {
         h,
         IDC_HOLDKEY,
         &HOLD_KEYS,
-        HOLD_KEYS.iter().position(|k| *k == cfg.hold_key).unwrap_or(0),
+        HOLD_KEYS
+            .iter()
+            .position(|k| *k == cfg.hold_key)
+            .unwrap_or(0),
     );
     set_ctl_text(h, IDC_POLL, &cfg.poll_ms.to_string());
     set_ctl_text(h, IDC_PIN_HOLD, &cfg.pin_hold_seconds.to_string());
@@ -522,29 +874,62 @@ fn populate(h: HWND) {
         h,
         IDC_OCR,
         &OCR_DISP,
-        OCR_KEYS.iter().position(|k| *k == cfg.default_ocr).unwrap_or(0),
+        OCR_KEYS
+            .iter()
+            .position(|k| *k == cfg.default_ocr)
+            .unwrap_or(0),
     );
     combo_fill(
         h,
         IDC_TR,
         &TR_DISP,
-        TR_KEYS.iter().position(|k| *k == cfg.default_translator).unwrap_or(0),
+        TR_KEYS
+            .iter()
+            .position(|k| *k == cfg.default_translator)
+            .unwrap_or(0),
     );
-    combo_fill(h, IDC_SRCLANG, &LANGS, LANGS.iter().position(|k| *k == cfg.source_lang).unwrap_or(1));
-    combo_fill(h, IDC_LANG, &LANGS, LANGS.iter().position(|k| *k == cfg.target_lang).unwrap_or(0));
+    combo_fill(
+        h,
+        IDC_SRCLANG,
+        &LANGS,
+        LANGS
+            .iter()
+            .position(|k| *k == cfg.source_lang)
+            .unwrap_or(1),
+    );
+    combo_fill(
+        h,
+        IDC_LANG,
+        &LANGS,
+        LANGS
+            .iter()
+            .position(|k| *k == cfg.target_lang)
+            .unwrap_or(0),
+    );
     set_ctl_text(h, IDC_DEEPL, &cfg.deepl_key());
     set_ctl_text(h, IDC_GOOGLE, &cfg.google_key());
 
     PROFILES.with(|p| *p.borrow_mut() = cfg.api_profiles.clone());
     // 既定LLMプロファイル名を保持する (active とは独立)。コンボの「(既定)」表示に使うため
     // refill_profile_combo より先に確定させておく。
-    let default_name = if cfg.api_profiles.iter().any(|p| p.name == cfg.default_api_profile) {
+    let default_name = if cfg
+        .api_profiles
+        .iter()
+        .any(|p| p.name == cfg.default_api_profile)
+    {
         cfg.default_api_profile.clone()
     } else {
-        cfg.api_profiles.first().map(|p| p.name.clone()).unwrap_or_default()
+        cfg.api_profiles
+            .first()
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
     };
     DEFAULT_PROFILE.with(|d| *d.borrow_mut() = default_name);
-    let sel = cfg.api_profiles.iter().position(|p| p.name == cfg.active_api_profile).unwrap_or(0);
+    let sel = cfg
+        .api_profiles
+        .iter()
+        .position(|p| p.name == cfg.active_api_profile)
+        .unwrap_or(0);
     refill_profile_combo(h, sel);
 
     combo_reset(h, IDC_PROF_TYPE);
@@ -561,14 +946,20 @@ fn populate(h: HWND) {
         h,
         IDC_DETECT_KEY,
         &HOLD_KEYS,
-        HOLD_KEYS.iter().position(|k| *k == cfg.detect_key).unwrap_or(1), // 既定 LCtrl
+        HOLD_KEYS
+            .iter()
+            .position(|k| *k == cfg.detect_key)
+            .unwrap_or(1), // 既定 LCtrl
     );
     check_set(h, IDC_PREVIEW_DETECT_MODE, cfg.preview_detect_enabled);
     combo_fill(
         h,
         IDC_OVERLAY_THEME,
         &THEME_DISP,
-        THEME_KEYS.iter().position(|k| *k == cfg.overlay_theme).unwrap_or(0),
+        THEME_KEYS
+            .iter()
+            .position(|k| *k == cfg.overlay_theme)
+            .unwrap_or(0),
     );
     set_ctl_text(h, IDC_LOG_MAX, &cfg.log_max_records.to_string());
     set_ctl_text(h, IDC_LLAMA_PORT, &cfg.llama_port.to_string());
@@ -587,15 +978,35 @@ fn populate(h: HWND) {
 /// インストールボタンは設けず判定結果のみ示す。
 fn refresh_oneocr_status(h: HWND) {
     let available = crate::oneocr::available();
-    set_ctl_text(h, IDC_ONEOCR_STATUS, if available { "利用可能です" } else { "利用できません" });
+    set_ctl_text(
+        h,
+        IDC_ONEOCR_STATUS,
+        if available {
+            "利用可能です"
+        } else {
+            "利用できません"
+        },
+    );
 }
 
 /// PaddleOCRの導入状況をステータス欄・ボタンに反映する
 fn refresh_paddle_status(h: HWND) {
     let installed = crate::paddle_install::installed();
-    set_ctl_text(h, IDC_PADDLE_STATUS, if installed { "導入済み" } else { "未導入" });
+    set_ctl_text(
+        h,
+        IDC_PADDLE_STATUS,
+        if installed {
+            "導入済み"
+        } else {
+            "未導入"
+        },
+    );
     unsafe {
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_PADDLE_INSTALL).unwrap_or_default(), !installed);
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_PADDLE_INSTALL)
+                .unwrap_or_default(),
+            !installed,
+        );
     }
 }
 
@@ -603,9 +1014,21 @@ fn refresh_paddle_status(h: HWND) {
 /// ローカルONNX翻訳モデル(FuguMT)の導入状況をステータス欄・ボタンに反映する
 fn refresh_onnx_status(h: HWND) {
     let installed = crate::onnx_translate_install::installed();
-    set_ctl_text(h, IDC_ONNX_STATUS, if installed { "導入済み" } else { "未導入" });
+    set_ctl_text(
+        h,
+        IDC_ONNX_STATUS,
+        if installed {
+            "導入済み"
+        } else {
+            "未導入"
+        },
+    );
     unsafe {
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_ONNX_INSTALL).unwrap_or_default(), !installed);
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_ONNX_INSTALL)
+                .unwrap_or_default(),
+            !installed,
+        );
     }
 }
 
@@ -619,7 +1042,10 @@ fn ensure_local_llm_profile_if_ready(h: HWND) {
     if cfg.api_profiles.iter().any(|p| p.name == "LocalLLM") {
         return;
     }
-    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT).trim().parse().unwrap_or(crate::llama_server::DEFAULT_PORT);
+    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT)
+        .trim()
+        .parse()
+        .unwrap_or(crate::llama_server::DEFAULT_PORT);
     let profile = crate::config::ApiProfile {
         name: "LocalLLM".into(),
         api_type: crate::config::ApiType::LlamaCpp,
@@ -636,6 +1062,24 @@ fn ensure_local_llm_profile_if_ready(h: HWND) {
     PROFILES.with(|p| p.borrow_mut().push(profile));
     let sel = PROFILES.with(|p| p.borrow().len().saturating_sub(1));
     refill_profile_combo(h, sel);
+}
+
+/// llama.cppのサーバーポート変更を、既存プロファイルのURLへも反映する (SPECv0.5.5)。
+/// api_type が LlamaCpp で、かつURLが「旧ポートでの既定形式」のままのプロファイルだけを
+/// 更新する — ユーザーが手動で別サーバのURLへ書き換えている場合はその編集を尊重し触らない。
+fn update_llama_profile_urls_for_port(old_port: u32, new_port: u32) {
+    if old_port == new_port {
+        return;
+    }
+    let old_url = format!("http://localhost:{old_port}/v1/chat/completions");
+    let new_url = format!("http://localhost:{new_port}/v1/chat/completions");
+    PROFILES.with(|p| {
+        for prof in p.borrow_mut().iter_mut() {
+            if prof.api_type == crate::config::ApiType::LlamaCpp && prof.api_url == old_url {
+                prof.api_url = new_url.clone();
+            }
+        }
+    });
 }
 
 /// llama.cpp本体・モデルの導入状況とサーバー稼働状況をステータス欄・ボタンに反映する
@@ -656,70 +1100,161 @@ fn refresh_llama_status(h: HWND) {
         "未導入".to_string()
     };
     set_ctl_text(h, IDC_LLAMA_BIN_STATUS, &bin_status);
-    set_ctl_text(h, IDC_LLAMA_MODEL_STATUS, if model_ok { "選択済み" } else { "未選択" });
+    set_ctl_text(
+        h,
+        IDC_LLAMA_MODEL_STATUS,
+        if model_ok {
+            "選択済み"
+        } else {
+            "未選択"
+        },
+    );
     // 本体ボタンは導入済みでもグレーアウトせず、「更新を確認」に切り替えて常に押せる
     // ようにする (SPECv0.5.5: 新しいバージョンが出たときに更新できるようにするため)。
-    set_ctl_text(h, IDC_LLAMA_BIN_INSTALL, if bin_ok { "更新を確認" } else { "インストール" });
+    set_ctl_text(
+        h,
+        IDC_LLAMA_BIN_INSTALL,
+        if bin_ok {
+            "更新を確認"
+        } else {
+            "インストール"
+        },
+    );
+    // 導入済みビルド種別の表示と削除ボタンの有効/無効 (SPECv0.5.5)
+    let variant_label = if bin_ok {
+        crate::llama_install::installed_variant()
+            .map(|v| v.label())
+            .unwrap_or("不明(旧バージョン)")
+    } else {
+        "-"
+    };
+    set_ctl_text(h, IDC_LLAMA_VARIANT_STATUS, variant_label);
     // ダウンロードボタンは既定の管理下ディレクトリに既にモデルがあれば無効化する
     // (SPECv0.5.2追補: 参照ボタンで指定した外部パスの有無は問わない。あくまで
     // 「このボタンでダウンロードした結果」の有無で判定する)。
     let downloaded = crate::llama_install::model_installed();
     unsafe {
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_INSTALL).unwrap_or_default(), true);
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MODEL_INSTALL).unwrap_or_default(), !downloaded);
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_INSTALL)
+                .unwrap_or_default(),
+            true,
+        );
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_DELETE)
+                .unwrap_or_default(),
+            bin_ok,
+        );
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MODEL_INSTALL)
+                .unwrap_or_default(),
+            !downloaded,
+        );
     }
     // mmproj(画像入力対応)の状態: 任意項目のため、未選択でもサーバーはテキスト専用として起動できる
-    let mmproj_path = crate::llama_install::resolve_mmproj_path(&get_ctl_text(h, IDC_LLAMA_MMPROJ_PATH));
+    let mmproj_path =
+        crate::llama_install::resolve_mmproj_path(&get_ctl_text(h, IDC_LLAMA_MMPROJ_PATH));
     let mmproj_ok = mmproj_path.is_file();
-    set_ctl_text(h, IDC_LLAMA_MMPROJ_STATUS, if mmproj_ok { "選択済み" } else { "未選択(任意)" });
+    set_ctl_text(
+        h,
+        IDC_LLAMA_MMPROJ_STATUS,
+        if mmproj_ok {
+            "選択済み"
+        } else {
+            "未選択(任意)"
+        },
+    );
     let mmproj_downloaded = crate::llama_install::mmproj_installed();
     unsafe {
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MMPROJ_INSTALL).unwrap_or_default(), !mmproj_downloaded);
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MMPROJ_INSTALL)
+                .unwrap_or_default(),
+            !mmproj_downloaded,
+        );
     }
 
-    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT).trim().parse().unwrap_or(crate::llama_server::DEFAULT_PORT);
+    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT)
+        .trim()
+        .parse()
+        .unwrap_or(crate::llama_server::DEFAULT_PORT);
     let running = bin_ok && model_ok && crate::llama_server::is_running(port);
-    set_ctl_text(h, IDC_LLAMA_SERVER_STATUS, if running { "稼働中" } else { "停止中" });
+    set_ctl_text(
+        h,
+        IDC_LLAMA_SERVER_STATUS,
+        if running { "稼働中" } else { "停止中" },
+    );
     set_ctl_text(h, IDC_LLAMA_TOGGLE, if running { "停止" } else { "起動" });
     // 起動ボタンは常に押せる状態にしておく。本体/モデル未導入で起動できない場合は
     // llama_server::start() が理由付きのエラーメッセージを返すので、そちらで案内する
     // (SPECv0.5.2追補: 押せない理由が分からずグレーアウトだけ見える状態を避ける)。
     unsafe {
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_TOGGLE).unwrap_or_default(), true);
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_TOGGLE)
+                .unwrap_or_default(),
+            true,
+        );
     }
 }
 
 /// 選択されたOCRエンジンおよび翻訳エンジンに対する解説をStatic Textに反映する
 fn update_explanations(h: HWND) {
     let ocr_idx = combo_sel(h, IDC_OCR).min(OCR_KEYS.len().saturating_sub(1));
-    let ocr_desc = if OCR_KEYS.is_empty() { "" } else { match OCR_KEYS[ocr_idx] {
-        "oneocr" => "【OneOCR】Windows11標準モデルを使用する、軽量・高速で標準的なOCRエンジンです。",
-        "win" => "【Windows】内蔵OCR(MediaOCR)を使用します。Windows10対応ですが精度は劣ります。",
-        "paddle" => "【PaddleOCR】高精度なOCRです。インストールが必要です。",
-        "llm" => "【LLM】AIを使用して画像から直接テキストを抽出します。",
-        _ => "",
-    }};
+    let ocr_desc = if OCR_KEYS.is_empty() {
+        ""
+    } else {
+        match OCR_KEYS[ocr_idx] {
+            "oneocr" => {
+                "【OneOCR】Windows11標準モデルを使用する、軽量・高速で標準的なOCRエンジンです。"
+            }
+            "win" => {
+                "【Windows】内蔵OCR(MediaOCR)を使用します。Windows10対応ですが精度は劣ります。"
+            }
+            "paddle" => "【PaddleOCR】高精度なOCRです。インストールが必要です。",
+            "llm" => "【LLM】AIを使用して画像から直接テキストを抽出します。",
+            _ => "",
+        }
+    };
     set_ctl_text(h, IDC_OCR_EXP, ocr_desc);
 
     let tr_idx = combo_sel(h, IDC_TR).min(TR_KEYS.len().saturating_sub(1));
-    let tr_desc = if TR_KEYS.is_empty() { "" } else { match TR_KEYS[tr_idx] {
-        "local" => "【ローカルONNX】オフラインで高速・安全に翻訳します。",
-        "deepl" => "【DeepL】高精度な翻訳を行います。APIキーが必要です。",
-        "google" => "【Google】Google翻訳を使用します。APIキーが必要です。",
-        "llm" => "【LLM】AIプロファイルを使用して文脈に応じた翻訳を行います。",
-        _ => "",
-    }};
+    let tr_desc = if TR_KEYS.is_empty() {
+        ""
+    } else {
+        match TR_KEYS[tr_idx] {
+            "local" => "【ローカルONNX】オフラインで高速・安全に翻訳します。",
+            "deepl" => "【DeepL】高精度な翻訳を行います。APIキーが必要です。",
+            "google" => "【Google】Google翻訳を使用します。APIキーが必要です。",
+            "llm" => "【LLM】AIプロファイルを使用して文脈に応じた翻訳を行います。",
+            _ => "",
+        }
+    };
     set_ctl_text(h, IDC_TR_EXP, tr_desc);
 }
 
 /// APIプロファイル種別のコンボ表示順 (IDC_PROF_TYPE の選択indexと対応)
-const API_TYPE_ORDER: [crate::config::ApiType; 4] = [
+const API_TYPE_ORDER: [crate::config::ApiType; 10] = [
     crate::config::ApiType::Gemini,
     crate::config::ApiType::OpenAI,
     crate::config::ApiType::Claude,
     crate::config::ApiType::LlamaCpp,
+    crate::config::ApiType::HuggingFace,
+    crate::config::ApiType::OpenRouter,
+    crate::config::ApiType::GitHubModels,
+    crate::config::ApiType::NvidiaNim,
+    crate::config::ApiType::Ollama,
+    crate::config::ApiType::LmStudio,
 ];
-const API_TYPE_DISP: [&str; 4] = ["Gemini", "OpenAI", "Claude", "llama.cpp"];
+const API_TYPE_DISP: [&str; 10] = [
+    "Gemini",
+    "OpenAI",
+    "Claude",
+    "llama.cpp",
+    "Hugging Face",
+    "OpenRouter",
+    "GitHub Models",
+    "NVIDIA NIM",
+    "Ollama",
+    "LM Studio",
+];
 
 fn api_type_index(t: &crate::config::ApiType) -> usize {
     API_TYPE_ORDER.iter().position(|x| x == t).unwrap_or(0)
@@ -733,7 +1268,13 @@ fn refill_profile_combo(h: HWND, sel: usize) {
     let names: Vec<String> = PROFILES.with(|p| {
         p.borrow()
             .iter()
-            .map(|x| if x.name == default_name { format!("{} (既定)", x.name) } else { x.name.clone() })
+            .map(|x| {
+                if x.name == default_name {
+                    format!("{} (既定)", x.name)
+                } else {
+                    x.name.clone()
+                }
+            })
             .collect()
     });
     let strs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
@@ -742,25 +1283,26 @@ fn refill_profile_combo(h: HWND, sel: usize) {
     combo_fill(h, IDC_PROF_LIST, &strs, sel);
 }
 
-/// 【既定にする】ボタンの有効/無効を更新する。新規未保存中、または選択中が既に既定なら無効。
+/// 【既定にする】ボタンの有効/無効を更新する。選択中が既に既定なら無効。
 fn update_prof_default_btn(h: HWND) {
-    let is_pending = PENDING_NEW.with(|f| *f.borrow());
     let sel = combo_sel(h, IDC_PROF_LIST);
-    let is_current_default = !is_pending
-        && PROFILES.with(|p| {
-            let default_name = DEFAULT_PROFILE.with(|d| d.borrow().clone());
-            p.borrow().get(sel).map(|x| x.name == default_name).unwrap_or(false)
-        });
+    let is_current_default = PROFILES.with(|p| {
+        let default_name = DEFAULT_PROFILE.with(|d| d.borrow().clone());
+        p.borrow()
+            .get(sel)
+            .map(|x| x.name == default_name)
+            .unwrap_or(false)
+    });
     unsafe {
         let _ = EnableWindow(
-            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_PROF_SET_DEFAULT).unwrap_or_default(),
-            !is_pending && !is_current_default,
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_PROF_SET_DEFAULT)
+                .unwrap_or_default(),
+            !is_current_default,
         );
     }
 }
 
 fn load_profile_to_ui(h: HWND, idx: usize) {
-    PENDING_NEW.with(|f| *f.borrow_mut() = false);
     PROFILES.with(|p| {
         let profiles = p.borrow();
         if let Some(prof) = profiles.get(idx) {
@@ -813,7 +1355,11 @@ fn start_install(
     install_fn: impl FnOnce() -> Result<(), String> + Send + 'static,
 ) {
     unsafe {
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), button_id).unwrap_or_default(), false);
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), button_id)
+                .unwrap_or_default(),
+            false,
+        );
     }
     set_ctl_text(h, status_id, in_progress_label);
     let hwnd_isize = h.0 as isize;
@@ -824,16 +1370,26 @@ fn start_install(
             Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
         };
         unsafe {
-            let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), done_msg, WPARAM(w), LPARAM(l));
+            let _ = PostMessageW(
+                Some(HWND(hwnd_isize as *mut _)),
+                done_msg,
+                WPARAM(w),
+                LPARAM(l),
+            );
         }
     });
 }
 
 /// llama.cpp本体ダウンロードボタン押下時の処理 (SPECv0.5.3)。
 /// モデル導入と同様、10秒おきの進捗をWM_LLAMA_BIN_PROGRESSで反映する。
-fn start_bin_install(h: HWND) {
+/// variant はビルド種別選択ダイアログでユーザーが選んだもの (SPECv0.5.5)。
+fn start_bin_install(h: HWND, variant: crate::llama_install::LlamaVariant) {
     unsafe {
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_INSTALL).unwrap_or_default(), false);
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_INSTALL)
+                .unwrap_or_default(),
+            false,
+        );
     }
     set_ctl_text(h, IDC_LLAMA_BIN_STATUS, "ダウンロード中…");
     let hwnd_isize = h.0 as isize;
@@ -845,16 +1401,26 @@ fn start_bin_install(h: HWND) {
             };
             let ptr = Box::into_raw(Box::new(label)) as isize;
             unsafe {
-                let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_BIN_PROGRESS, WPARAM(0), LPARAM(ptr));
+                let _ = PostMessageW(
+                    Some(HWND(hwnd_isize as *mut _)),
+                    WM_LLAMA_BIN_PROGRESS,
+                    WPARAM(0),
+                    LPARAM(ptr),
+                );
             }
         };
-        let result = crate::llama_install::install_binary(progress);
+        let result = crate::llama_install::install_binary(variant, progress);
         let (w, l) = match result {
             Ok(()) => (1usize, 0isize),
             Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
         };
         unsafe {
-            let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_BIN_DONE, WPARAM(w), LPARAM(l));
+            let _ = PostMessageW(
+                Some(HWND(hwnd_isize as *mut _)),
+                WM_LLAMA_BIN_DONE,
+                WPARAM(w),
+                LPARAM(l),
+            );
         }
     });
 }
@@ -862,7 +1428,11 @@ fn start_bin_install(h: HWND) {
 /// ISO8601形式の公開日時 ("2026-06-01T12:00:00Z") を "2026/06/01" 形式に整形する
 /// (確認ダイアログ表示用)。日付部分の抽出に失敗したら元の文字列をそのまま返す。
 fn format_release_date(published_at: &str) -> String {
-    published_at.split('T').next().unwrap_or(published_at).replace('-', "/")
+    published_at
+        .split('T')
+        .next()
+        .unwrap_or(published_at)
+        .replace('-', "/")
 }
 
 /// 「更新を確認」ボタン押下時の処理 (SPECv0.5.5)。導入済みのバイナリがある状態でのみ
@@ -871,10 +1441,17 @@ fn format_release_date(published_at: &str) -> String {
 /// 更新する(実行中のexeは上書きできないため)。
 fn start_bin_check_update(h: HWND) {
     unsafe {
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_INSTALL).unwrap_or_default(), false);
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_BIN_INSTALL)
+                .unwrap_or_default(),
+            false,
+        );
     }
     set_ctl_text(h, IDC_LLAMA_BIN_STATUS, "更新を確認中…");
-    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT).trim().parse().unwrap_or(crate::llama_server::DEFAULT_PORT);
+    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT)
+        .trim()
+        .parse()
+        .unwrap_or(crate::llama_server::DEFAULT_PORT);
     let hwnd_isize = h.0 as isize;
     std::thread::spawn(move || {
         let hwnd = HWND(hwnd_isize as *mut _);
@@ -903,8 +1480,12 @@ fn start_bin_check_update(h: HWND) {
         );
         let wide = to_wide(&msg);
         let confirmed = unsafe {
-            MessageBoxW(Some(hwnd), PCWSTR(wide.as_ptr()), w!("llama.cppの更新"), MB_YESNO | MB_ICONQUESTION)
-                == windows::Win32::UI::WindowsAndMessaging::IDYES
+            MessageBoxW(
+                Some(hwnd),
+                PCWSTR(wide.as_ptr()),
+                w!("llama.cppの更新"),
+                MB_YESNO | MB_ICONQUESTION,
+            ) == windows::Win32::UI::WindowsAndMessaging::IDYES
         };
         if !confirmed {
             post_result(3, 0);
@@ -915,6 +1496,8 @@ fn start_bin_check_update(h: HWND) {
             let _ = crate::llama_server::stop(port);
         }
 
+        let variant = crate::llama_install::installed_variant()
+            .unwrap_or(crate::llama_install::LlamaVariant::Cpu);
         let hwnd_isize2 = hwnd_isize;
         let progress = move |downloaded: u64, total: Option<u64>| {
             let label = match total {
@@ -923,10 +1506,15 @@ fn start_bin_check_update(h: HWND) {
             };
             let ptr = Box::into_raw(Box::new(label)) as isize;
             unsafe {
-                let _ = PostMessageW(Some(HWND(hwnd_isize2 as *mut _)), WM_LLAMA_BIN_PROGRESS, WPARAM(0), LPARAM(ptr));
+                let _ = PostMessageW(
+                    Some(HWND(hwnd_isize2 as *mut _)),
+                    WM_LLAMA_BIN_PROGRESS,
+                    WPARAM(0),
+                    LPARAM(ptr),
+                );
             }
         };
-        let result = crate::llama_install::update_binary(&latest, progress);
+        let result = crate::llama_install::update_binary(&latest, variant, progress);
         let (w, l) = match result {
             Ok(()) => (1usize, 0isize),
             Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
@@ -939,7 +1527,11 @@ fn start_bin_check_update(h: HWND) {
 /// 10秒おきの進捗(%または受信済みMB)をWM_LLAMA_MODEL_PROGRESSで反映する。
 fn start_model_install(h: HWND) {
     unsafe {
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MODEL_INSTALL).unwrap_or_default(), false);
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MODEL_INSTALL)
+                .unwrap_or_default(),
+            false,
+        );
     }
     set_ctl_text(h, IDC_LLAMA_MODEL_STATUS, "取得中…");
     let hwnd_isize = h.0 as isize;
@@ -951,7 +1543,12 @@ fn start_model_install(h: HWND) {
             };
             let ptr = Box::into_raw(Box::new(label)) as isize;
             unsafe {
-                let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_MODEL_PROGRESS, WPARAM(0), LPARAM(ptr));
+                let _ = PostMessageW(
+                    Some(HWND(hwnd_isize as *mut _)),
+                    WM_LLAMA_MODEL_PROGRESS,
+                    WPARAM(0),
+                    LPARAM(ptr),
+                );
             }
         };
         let result = crate::llama_install::install_model(progress);
@@ -960,7 +1557,12 @@ fn start_model_install(h: HWND) {
             Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
         };
         unsafe {
-            let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_MODEL_DONE, WPARAM(w), LPARAM(l));
+            let _ = PostMessageW(
+                Some(HWND(hwnd_isize as *mut _)),
+                WM_LLAMA_MODEL_DONE,
+                WPARAM(w),
+                LPARAM(l),
+            );
         }
     });
 }
@@ -969,7 +1571,11 @@ fn start_model_install(h: HWND) {
 /// 進捗を10秒おきに反映する。
 fn start_mmproj_install(h: HWND) {
     unsafe {
-        let _ = EnableWindow(windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MMPROJ_INSTALL).unwrap_or_default(), false);
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_LLAMA_MMPROJ_INSTALL)
+                .unwrap_or_default(),
+            false,
+        );
     }
     set_ctl_text(h, IDC_LLAMA_MMPROJ_STATUS, "取得中…");
     let hwnd_isize = h.0 as isize;
@@ -981,7 +1587,12 @@ fn start_mmproj_install(h: HWND) {
             };
             let ptr = Box::into_raw(Box::new(label)) as isize;
             unsafe {
-                let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_MMPROJ_PROGRESS, WPARAM(0), LPARAM(ptr));
+                let _ = PostMessageW(
+                    Some(HWND(hwnd_isize as *mut _)),
+                    WM_LLAMA_MMPROJ_PROGRESS,
+                    WPARAM(0),
+                    LPARAM(ptr),
+                );
             }
         };
         let result = crate::llama_install::install_mmproj(progress);
@@ -990,13 +1601,66 @@ fn start_mmproj_install(h: HWND) {
             Err(e) => (0usize, Box::into_raw(Box::new(e)) as isize),
         };
         unsafe {
-            let _ = PostMessageW(Some(HWND(hwnd_isize as *mut _)), WM_LLAMA_MMPROJ_DONE, WPARAM(w), LPARAM(l));
+            let _ = PostMessageW(
+                Some(HWND(hwnd_isize as *mut _)),
+                WM_LLAMA_MMPROJ_DONE,
+                WPARAM(w),
+                LPARAM(l),
+            );
+        }
+    });
+}
+
+/// プロファイルの疎通確認ボタン押下時の処理 (SPECv0.5.5)。結果はWM_PROF_CONN_RESULTで
+/// 通知する。成功時、モデル名欄が空欄なら応答の先頭モデルidを自動入力する目印として
+/// (メッセージ, 埋め込むモデル名) のタプルをlparamに載せる。
+fn start_profile_test_connection(h: HWND) {
+    let sel = combo_sel(h, IDC_PROF_LIST);
+    let Some(prof) = PROFILES.with(|p| p.borrow().get(sel).cloned()) else {
+        return;
+    };
+    unsafe {
+        let _ = EnableWindow(
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_PROF_TEST_CONN)
+                .unwrap_or_default(),
+            false,
+        );
+    }
+    set_ctl_text(h, IDC_PROF_CONN_STATUS, "確認中…");
+    let hwnd_isize = h.0 as isize;
+    std::thread::spawn(move || {
+        let result = crate::llm_api::check_connection(&prof);
+        let (w, msg, fill): (usize, String, Option<String>) = match result {
+            Ok(r) if r.model_ids.is_empty() => {
+                (1, "接続成功 (モデル一覧は空でした)".to_string(), None)
+            }
+            Ok(r) => (
+                1,
+                format!("接続成功 ({}個のモデル)", r.model_ids.len()),
+                Some(r.model_ids[0].clone()),
+            ),
+            Err(e) => (0, e, None),
+        };
+        let l = Box::into_raw(Box::new((msg, fill))) as isize;
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(hwnd_isize as *mut _)),
+                WM_PROF_CONN_RESULT,
+                WPARAM(w),
+                LPARAM(l),
+            );
         }
     });
 }
 
 /// インストール完了通知 (WM_PADDLE_DONE / WM_ONNX_DONE) の共通処理
-fn handle_install_done(h: HWND, wparam: WPARAM, lparam: LPARAM, refresh: fn(HWND), success_msg: &str) {
+fn handle_install_done(
+    h: HWND,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    refresh: fn(HWND),
+    success_msg: &str,
+) {
     if wparam.0 == 1 {
         refresh(h);
         unsafe {
@@ -1013,7 +1677,12 @@ fn handle_install_done(h: HWND, wparam: WPARAM, lparam: LPARAM, refresh: fn(HWND
         refresh(h);
         unsafe {
             let wide = to_wide(&msg);
-            MessageBoxW(Some(h), PCWSTR(wide.as_ptr()), w!("インストールエラー"), MB_OK);
+            MessageBoxW(
+                Some(h),
+                PCWSTR(wide.as_ptr()),
+                w!("インストールエラー"),
+                MB_OK,
+            );
         }
     }
 }
@@ -1028,7 +1697,9 @@ pub fn update_prompt_in_memory(name: &str, kind: crate::prompt_edit::PromptKind,
     PROFILES.with(|p| {
         if let Some(prof) = p.borrow_mut().iter_mut().find(|x| x.name == name) {
             match kind {
-                crate::prompt_edit::PromptKind::Translate => prof.translate_prompt = text.to_string(),
+                crate::prompt_edit::PromptKind::Translate => {
+                    prof.translate_prompt = text.to_string()
+                }
                 crate::prompt_edit::PromptKind::Ocr => prof.ocr_prompt = text.to_string(),
                 crate::prompt_edit::PromptKind::Explain => prof.explain_prompt = text.to_string(),
             }
@@ -1062,115 +1733,145 @@ fn parse_max_tokens(h: HWND) -> u32 {
         .min(1_000_000)
 }
 
-/// プロファイル編集UI (名前/種別/URL/キー/モデル) が PROFILES の保存済み内容と異なるか
-fn profile_ui_dirty(h: HWND) -> bool {
-    if PENDING_NEW.with(|f| *f.borrow()) {
-        return true;
+/// 既存名と衝突しないプロファイル名を生成する ("base のコピー" → "base のコピー2" ...)
+fn unique_copy_name(profiles: &[crate::config::ApiProfile], base: &str) -> String {
+    let first = format!("{base} のコピー");
+    if !profiles.iter().any(|x| x.name == first) {
+        return first;
     }
-    let name = get_ctl_text(h, IDC_PROF_NAME).trim().to_string();
-    PROFILES.with(|p| {
-        let profiles = p.borrow();
-        let Some(prof) = profiles.iter().find(|x| x.name == name) else {
-            return true;
-        };
-        prof.api_type != API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)]
-            || prof.model_name != get_ctl_text(h, IDC_PROF_MODEL).trim()
-            || prof.api_url != get_ctl_text(h, IDC_PROF_URL).trim()
-            || prof.get_key() != get_ctl_text(h, IDC_PROF_KEY).trim()
-            || prof.max_tokens != parse_max_tokens(h)
-    })
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base} のコピー{n}");
+        if !profiles.iter().any(|x| x.name == candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
-/// プロファイル編集UIの内容で PROFILES を更新する (保存/別名保存の共通処理)。
-/// プロンプトはUIに無いため、新規なら既定値、既存なら保存済みの値を引き継ぐ (SPECv0.4.7 §6.1)。
-/// 成功時は該当プロファイルのindexを返し、コンボを再構築して設定も即保存する。
-fn save_profile_from_ui(h: HWND, save_as: bool) -> Option<usize> {
-    let name = get_ctl_text(h, IDC_PROF_NAME).trim().to_string();
-    if name.is_empty() {
-        unsafe {
-            MessageBoxW(Some(h), w!("API登録名を入力してください"), w!("エラー"), MB_OK);
-        }
-        return None;
+/// 「新規」用のプレースホルダ名を生成する ("新規プロファイル" → "新規プロファイル2" ...)
+fn unique_new_name(profiles: &[crate::config::ApiProfile]) -> String {
+    const BASE: &str = "新規プロファイル";
+    if !profiles.iter().any(|x| x.name == BASE) {
+        return BASE.to_string();
     }
-    // プロンプトの引き継ぎ元: 新規=既定値 / 同名の既存=その値 / 別名複製=選択中プロファイルの値
-    let (ocr_p, tr_p, exp_p) = PROFILES.with(|p| {
-        let profiles = p.borrow();
-        let src = if PENDING_NEW.with(|f| *f.borrow()) {
-            None
-        } else {
-            profiles
-                .iter()
-                .find(|x| x.name == name)
-                .or_else(|| profiles.get(combo_sel(h, IDC_PROF_LIST)))
-        };
-        match src {
-            Some(s) => (s.ocr_prompt.clone(), s.translate_prompt.clone(), s.explain_prompt.clone()),
-            None => (
-                crate::config::DEFAULT_GEMINI_OCR_PROMPT.to_string(),
-                crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT.to_string(),
-                crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT.to_string(),
-            ),
+    let mut n = 2;
+    loop {
+        let candidate = format!("{BASE}{n}");
+        if !profiles.iter().any(|x| x.name == candidate) {
+            return candidate;
         }
-    });
-    let mut prof = crate::config::ApiProfile {
-        name: name.clone(),
-        api_type: API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)].clone(),
-        model_name: get_ctl_text(h, IDC_PROF_MODEL).trim().to_string(),
-        api_url: get_ctl_text(h, IDC_PROF_URL).trim().to_string(),
-        api_key_enc: String::new(),
-        ocr_prompt: ocr_p,
-        translate_prompt: tr_p,
-        explain_prompt: exp_p,
-        max_tokens: parse_max_tokens(h),
-    };
-    prof.set_key(get_ctl_text(h, IDC_PROF_KEY).trim());
+        n += 1;
+    }
+}
 
-    let saved = PROFILES.with(|p| {
+/// 【新規】ボタン (SPECv0.5.5): 既定値のプロファイルを直ちにリストへ確定・保存する。
+/// 「未保存の新規」状態を作らないことで保存忘れを防ぐ。名前欄の編集は
+/// [commit_profile_edit] が選択中の行へその場で反映する。
+fn create_new_profile(h: HWND) {
+    let idx = PROFILES.with(|p| {
         let mut profiles = p.borrow_mut();
-        if !save_as {
-            if let Some(existing) = profiles.iter_mut().find(|x| x.name == name) {
-                *existing = prof.clone();
-            } else {
-                profiles.push(prof.clone());
-            }
-        } else {
-            // 別名保存: 名前重複は拒否
-            if profiles.iter().any(|x| x.name == name) {
-                unsafe {
-                    MessageBoxW(Some(h), w!("その名前は既に存在します"), w!("エラー"), MB_OK);
-                }
-                return None;
-            }
-            profiles.push(prof.clone());
-        }
-        profiles.iter().position(|p| p.name == name)
-    })?;
-    PENDING_NEW.with(|f| *f.borrow_mut() = false);
-    refill_profile_combo(h, saved);
+        let name = unique_new_name(&profiles);
+        let api_type = API_TYPE_ORDER[0].clone();
+        let prof = crate::config::ApiProfile {
+            model_name: api_type.default_model().to_string(),
+            api_url: api_type.default_url().to_string(),
+            name,
+            api_type,
+            api_key_enc: String::new(),
+            ocr_prompt: crate::config::DEFAULT_GEMINI_OCR_PROMPT.to_string(),
+            translate_prompt: crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT.to_string(),
+            explain_prompt: crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT.to_string(),
+            max_tokens: crate::config::DEFAULT_MAX_TOKENS,
+        };
+        profiles.push(prof);
+        profiles.len() - 1
+    });
+    refill_profile_combo(h, idx);
+    load_profile_to_ui(h, idx);
+    update_prof_default_btn(h);
     auto_save(h, false);
-    Some(saved)
 }
 
-/// プロンプト編集ボタン (SPECv0.4.7 §6.1): プロファイルが未保存なら保存確認→保存後に
-/// プロンプト編集ウィンドウ (モードA) を開く。
-fn open_prompt_editor(h: HWND, kind: crate::prompt_edit::PromptKind) {
-    if profile_ui_dirty(h) {
-        let r = unsafe {
+/// 【複製】ボタン (SPECv0.5.5: 別名保存の置き換え)。選択中のプロファイルを新しい名前で
+/// 直ちに複製・保存し、保存先を確定させる。以降の編集は [commit_profile_edit] が
+/// その複製先へ自動保存するため、別途「保存」を押す必要が無い。
+fn duplicate_profile(h: HWND) {
+    let sel = combo_sel(h, IDC_PROF_LIST);
+    let idx = PROFILES.with(|p| {
+        let mut profiles = p.borrow_mut();
+        let src = profiles.get(sel)?.clone();
+        let new_name = unique_copy_name(&profiles, &src.name);
+        let mut dup = src;
+        dup.name = new_name;
+        profiles.push(dup);
+        Some(profiles.len() - 1)
+    });
+    let Some(idx) = idx else { return };
+    refill_profile_combo(h, idx);
+    load_profile_to_ui(h, idx);
+    update_prof_default_btn(h);
+    auto_save(h, false);
+}
+
+/// プロファイル編集欄 (名前/種別/URL/キー/モデル/最大Token) の変更を、選択中の行へ
+/// その場で反映して即保存する (SPECv0.5.5: 保存ボタン押し忘れ対策)。
+/// 名前欄が空欄、または他の行と重複する場合は変更前の名前へ戻す。
+fn commit_profile_edit(h: HWND) {
+    let sel = combo_sel(h, IDC_PROF_LIST);
+    // 0: 変更なし, 1: 改名成功, 2: 改名拒否 (空欄/重複)
+    let result = PROFILES.with(|p| {
+        let mut profiles = p.borrow_mut();
+        profiles.get(sel)?;
+        let old_name = profiles[sel].name.clone();
+        let typed_name = get_ctl_text(h, IDC_PROF_NAME).trim().to_string();
+        let (outcome, final_name) = if typed_name == old_name {
+            (0u8, old_name.clone())
+        } else if typed_name.is_empty()
+            || profiles
+                .iter()
+                .enumerate()
+                .any(|(i, x)| i != sel && x.name == typed_name)
+        {
+            (2u8, old_name.clone())
+        } else {
+            (1u8, typed_name)
+        };
+        let prof = &mut profiles[sel];
+        prof.name = final_name.clone();
+        prof.api_type =
+            API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)].clone();
+        prof.model_name = get_ctl_text(h, IDC_PROF_MODEL).trim().to_string();
+        prof.api_url = get_ctl_text(h, IDC_PROF_URL).trim().to_string();
+        prof.set_key(get_ctl_text(h, IDC_PROF_KEY).trim());
+        prof.max_tokens = parse_max_tokens(h);
+        Some((outcome, old_name, final_name))
+    });
+    let Some((outcome, old_name, final_name)) = result else {
+        return;
+    };
+    if outcome == 2 {
+        set_ctl_text(h, IDC_PROF_NAME, &final_name);
+        unsafe {
             MessageBoxW(
                 Some(h),
-                w!("プロファイルが保存されていません。保存してからプロンプト編集を開きますか?"),
-                crate::util::display_name_pcwstr(),
-                MB_YESNO,
-            )
-        };
-        if r.0 != 6 {
-            // IDYES 以外は開かない
-            return;
+                w!("プロファイル名を空欄・重複にはできません"),
+                w!("エラー"),
+                MB_OK,
+            );
         }
-        if save_profile_from_ui(h, false).is_none() {
-            return;
-        }
+    } else if outcome == 1 && DEFAULT_PROFILE.with(|d| *d.borrow() == old_name) {
+        DEFAULT_PROFILE.with(|d| *d.borrow_mut() = final_name);
     }
+    refill_profile_combo(h, sel);
+    update_prof_default_btn(h);
+    auto_save(h, false);
+}
+
+/// プロンプト編集ボタン (SPECv0.4.7 §6.1): プロンプト編集ウィンドウ (モードA) を開く。
+/// プロファイル編集欄は各コントロールのフォーカス喪失時に既に自動保存されているため
+/// (SPECv0.5.5)、事前の保存確認は不要。
+fn open_prompt_editor(h: HWND, kind: crate::prompt_edit::PromptKind) {
     let name = get_ctl_text(h, IDC_PROF_NAME).trim().to_string();
     let (profiles, active_idx) = PROFILES.with(|p| {
         let profiles = p.borrow();
@@ -1236,7 +1937,11 @@ fn open_url(h: HWND, url: &str) {
 fn save(h: HWND, ask_consent: bool) {
     let mut cfg = Config::load();
     cfg.hold_key = HOLD_KEYS[combo_sel(h, IDC_HOLDKEY).min(HOLD_KEYS.len() - 1)].to_string();
-    cfg.poll_ms = get_ctl_text(h, IDC_POLL).trim().parse().unwrap_or(100).clamp(20, 1000);
+    cfg.poll_ms = get_ctl_text(h, IDC_POLL)
+        .trim()
+        .parse()
+        .unwrap_or(100)
+        .clamp(20, 1000);
     cfg.pin_hold_seconds = get_ctl_text(h, IDC_PIN_HOLD).trim().parse().unwrap_or(3);
     let hk = get_ctl_text(h, IDC_HOTKEY);
     if crate::config::parse_hotkey(&hk).is_some() {
@@ -1248,7 +1953,7 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.target_lang = LANGS[combo_sel(h, IDC_LANG).min(LANGS.len() - 1)].to_string();
     cfg.deepl_key_enc = util::dpapi_encrypt(get_ctl_text(h, IDC_DEEPL).trim());
     cfg.google_key_enc = util::dpapi_encrypt(get_ctl_text(h, IDC_GOOGLE).trim());
-    
+
     PROFILES.with(|p| {
         cfg.api_profiles = p.borrow().clone();
     });
@@ -1259,7 +1964,7 @@ fn save(h: HWND, ask_consent: bool) {
     if cfg.api_profiles.iter().any(|p| p.name == default_name) {
         cfg.default_api_profile = default_name;
     }
-    
+
     cfg.autostart = check_get(h, IDC_AUTOSTART);
     cfg.perf_log = check_get(h, IDC_PERFLOG);
     cfg.log_enabled = check_get(h, IDC_LOG_ENABLED);
@@ -1267,10 +1972,19 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.detect_enabled = check_get(h, IDC_DETECT_MODE);
     cfg.detect_key = HOLD_KEYS[combo_sel(h, IDC_DETECT_KEY).min(HOLD_KEYS.len() - 1)].to_string();
     cfg.preview_detect_enabled = check_get(h, IDC_PREVIEW_DETECT_MODE);
-    cfg.overlay_theme = THEME_KEYS[combo_sel(h, IDC_OVERLAY_THEME).min(THEME_KEYS.len() - 1)].to_string();
-    cfg.log_max_records = get_ctl_text(h, IDC_LOG_MAX).trim().parse().unwrap_or(5000).clamp(100, 100000);
+    cfg.overlay_theme =
+        THEME_KEYS[combo_sel(h, IDC_OVERLAY_THEME).min(THEME_KEYS.len() - 1)].to_string();
+    cfg.log_max_records = get_ctl_text(h, IDC_LOG_MAX)
+        .trim()
+        .parse()
+        .unwrap_or(5000)
+        .clamp(100, 100000);
     cfg.llama_auto_start = check_get(h, IDC_LLAMA_AUTOSTART);
-    cfg.llama_port = get_ctl_text(h, IDC_LLAMA_PORT).trim().parse().unwrap_or(crate::llama_server::DEFAULT_PORT).clamp(1024, 65535);
+    cfg.llama_port = get_ctl_text(h, IDC_LLAMA_PORT)
+        .trim()
+        .parse()
+        .unwrap_or(crate::llama_server::DEFAULT_PORT)
+        .clamp(1024, 65535);
     cfg.llama_model_path = get_ctl_text(h, IDC_LLAMA_MODEL_PATH).trim().to_string();
     cfg.llama_mmproj_path = get_ctl_text(h, IDC_LLAMA_MMPROJ_PATH).trim().to_string();
 
@@ -1349,7 +2063,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             let notif = ((wparam.0 >> 16) & 0xFFFF) as u32;
             // 設定の即時保存 (SPECv0.4.7 改): コンボは選択変更時、チェックボックスは
             // クリック時、エディットはフォーカス喪失時に自動保存する。
-            // プロファイル編集欄 (名前/種別/URL/キー/モデル) は【保存】ボタンで確定するため対象外。
+            // プロファイル編集欄 (名前/種別/URL/キー/モデル) も選択中の行へ同様に自動保存する
+            // (SPECv0.5.5: [commit_profile_edit] 参照。保存ボタン押し忘れ対策)。
             match id {
                 IDC_HOLDKEY | IDC_DETECT_KEY
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE =>
@@ -1366,8 +2081,22 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             );
                         }
                         let cfg = Config::load();
-                        combo_select(h, IDC_HOLDKEY, HOLD_KEYS.iter().position(|k| *k == cfg.hold_key).unwrap_or(0));
-                        combo_select(h, IDC_DETECT_KEY, HOLD_KEYS.iter().position(|k| *k == cfg.detect_key).unwrap_or(1));
+                        combo_select(
+                            h,
+                            IDC_HOLDKEY,
+                            HOLD_KEYS
+                                .iter()
+                                .position(|k| *k == cfg.hold_key)
+                                .unwrap_or(0),
+                        );
+                        combo_select(
+                            h,
+                            IDC_DETECT_KEY,
+                            HOLD_KEYS
+                                .iter()
+                                .position(|k| *k == cfg.detect_key)
+                                .unwrap_or(1),
+                        );
                     } else {
                         auto_save(h, false);
                     }
@@ -1384,8 +2113,13 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     auto_save(h, true);
                     update_explanations(h);
                 }
-                IDC_AUTOSTART | IDC_PERFLOG | IDC_LOG_ENABLED | IDC_DEBUG_MODE | IDC_DETECT_MODE
-                | IDC_PREVIEW_DETECT_MODE | IDC_LLAMA_AUTOSTART
+                IDC_AUTOSTART
+                | IDC_PERFLOG
+                | IDC_LOG_ENABLED
+                | IDC_DEBUG_MODE
+                | IDC_DETECT_MODE
+                | IDC_PREVIEW_DETECT_MODE
+                | IDC_LLAMA_AUTOSTART
                     if notif == BN_CLICKED =>
                 {
                     auto_save(h, false);
@@ -1395,10 +2129,22 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 {
                     auto_save(h, false);
                 }
-                IDC_LLAMA_PORT | IDC_LLAMA_MODEL_PATH | IDC_LLAMA_MMPROJ_PATH
-                    if notif == EN_KILLFOCUS =>
-                {
+                IDC_LLAMA_MODEL_PATH | IDC_LLAMA_MMPROJ_PATH if notif == EN_KILLFOCUS => {
                     auto_save(h, false);
+                    refresh_llama_status(h);
+                }
+                IDC_LLAMA_PORT if notif == EN_KILLFOCUS => {
+                    // ポート変更をllama.cpp種別プロファイルのURLへも反映する (SPECv0.5.5)。
+                    // ユーザーが手動でURLを別サーバへ向けている場合は上書きしない。
+                    let old_port = Config::load().llama_port;
+                    let new_port: u32 = get_ctl_text(h, IDC_LLAMA_PORT)
+                        .trim()
+                        .parse()
+                        .unwrap_or(crate::llama_server::DEFAULT_PORT)
+                        .clamp(1024, 65535);
+                    update_llama_profile_urls_for_port(old_port, new_port);
+                    auto_save(h, false);
+                    load_profile_to_ui(h, combo_sel(h, IDC_PROF_LIST));
                     refresh_llama_status(h);
                 }
                 _ => {}
@@ -1431,7 +2177,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 IDC_RESET_SETTINGS => unsafe {
                     let r = MessageBoxW(
                         Some(h),
-                        w!("設定を初期状態にリセットします。この操作は元に戻せません。\nリセット後、アプリを自動的に再起動します。よろしいですか?"),
+                        w!(
+                            "設定を初期状態にリセットします。この操作は元に戻せません。\nリセット後、アプリを自動的に再起動します。よろしいですか?"
+                        ),
                         w!("設定のリセット"),
                         MB_YESNO | MB_ICONWARNING,
                     );
@@ -1441,7 +2189,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         if let Ok(exe) = std::env::current_exe() {
                             // 旧プロセスがミューテックスを解放し終える前に新プロセスが起動する
                             // 可能性があるため、新プロセス側で再試行させる (main.rs 参照)。
-                            let _ = std::process::Command::new(exe).arg("--restart-wait").spawn();
+                            let _ = std::process::Command::new(exe)
+                                .arg("--restart-wait")
+                                .spawn();
                         }
                         CLOSING.with(|f| *f.borrow_mut() = true);
                         let _ = DestroyWindow(h);
@@ -1472,14 +2222,52 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     if crate::llama_install::installed() {
                         start_bin_check_update(h);
                     } else {
-                        start_bin_install(h);
+                        // 未導入時はビルド種別(CPU/CUDA/Radeon)を選ばせる (SPECv0.5.5)。
+                        // 検出したGPUベンダーに応じて推奨マークを付ける。
+                        let gpu = crate::gpu_detect::detect();
+                        if let Some(variant) = crate::llama_variant_dialog::show(h, gpu) {
+                            start_bin_install(h, variant);
+                        }
+                    }
+                }
+                IDC_LLAMA_BIN_DELETE => {
+                    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT)
+                        .trim()
+                        .parse()
+                        .unwrap_or(crate::llama_server::DEFAULT_PORT);
+                    let msg = "導入済みのllama.cppサーバー本体を停止して削除しますか?\n(言語モデル・mmprojファイルは削除されません)";
+                    let confirmed = unsafe {
+                        MessageBoxW(
+                            Some(h),
+                            PCWSTR(to_wide(msg).as_ptr()),
+                            w!("llama.cppの削除"),
+                            MB_YESNO | MB_ICONWARNING,
+                        ) == windows::Win32::UI::WindowsAndMessaging::IDYES
+                    };
+                    if confirmed {
+                        if crate::llama_server::is_running(port) {
+                            let _ = crate::llama_server::stop(port);
+                        }
+                        if let Err(e) = crate::llama_install::uninstall_binary() {
+                            unsafe {
+                                MessageBoxW(
+                                    Some(h),
+                                    PCWSTR(to_wide(&e).as_ptr()),
+                                    w!("削除エラー"),
+                                    MB_OK,
+                                );
+                            }
+                        }
+                        refresh_llama_status(h);
                     }
                 }
                 IDC_LLAMA_MODEL_INSTALL => unsafe {
                     // 初回ダウンロード前に容量(約3GB)を警告し、同意を得てから開始する (SPECv0.5.2追補)。
                     let r = MessageBoxW(
                         Some(h),
-                        w!("Gemma 4 E2Bモデルをダウンロードします。ファイルサイズは約3GBあり、回線速度によっては数分〜数十分かかります。\nダウンロードを開始しますか?"),
+                        w!(
+                            "Gemma 4 E2Bモデルをダウンロードします。ファイルサイズは約3GBあり、回線速度によっては数分〜数十分かかります。\nダウンロードを開始しますか?"
+                        ),
                         w!("モデルのダウンロード確認"),
                         MB_YESNO | MB_ICONWARNING,
                     );
@@ -1488,20 +2276,33 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     }
                 },
                 IDC_LLAMA_TOGGLE => {
-                    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT).trim().parse().unwrap_or(crate::llama_server::DEFAULT_PORT);
+                    let port: u32 = get_ctl_text(h, IDC_LLAMA_PORT)
+                        .trim()
+                        .parse()
+                        .unwrap_or(crate::llama_server::DEFAULT_PORT);
                     if crate::llama_server::is_running(port) {
                         if let Err(e) = crate::llama_server::stop(port) {
                             unsafe {
                                 let wide = to_wide(&e);
-                                MessageBoxW(Some(h), PCWSTR(wide.as_ptr()), w!("サーバー停止エラー"), MB_OK);
+                                MessageBoxW(
+                                    Some(h),
+                                    PCWSTR(wide.as_ptr()),
+                                    w!("サーバー停止エラー"),
+                                    MB_OK,
+                                );
                             }
                         }
                         refresh_llama_status(h);
                     } else {
-                        let model = crate::llama_install::resolve_model_path(&get_ctl_text(h, IDC_LLAMA_MODEL_PATH));
+                        let model = crate::llama_install::resolve_model_path(&get_ctl_text(
+                            h,
+                            IDC_LLAMA_MODEL_PATH,
+                        ));
                         // mmprojが存在すれば画像入力対応込みで起動する。無ければテキスト専用。
-                        let mmproj = Some(crate::llama_install::resolve_mmproj_path(&get_ctl_text(h, IDC_LLAMA_MMPROJ_PATH)))
-                            .filter(|p| p.is_file());
+                        let mmproj = Some(crate::llama_install::resolve_mmproj_path(
+                            &get_ctl_text(h, IDC_LLAMA_MMPROJ_PATH),
+                        ))
+                        .filter(|p| p.is_file());
                         start_install(
                             h,
                             IDC_LLAMA_SERVER_STATUS,
@@ -1529,7 +2330,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 IDC_LLAMA_MMPROJ_INSTALL => unsafe {
                     let r = MessageBoxW(
                         Some(h),
-                        w!("mmproj(画像入力対応)ファイルをダウンロードします。ファイルサイズは約550MBあります。\nダウンロードを開始しますか?"),
+                        w!(
+                            "mmproj(画像入力対応)ファイルをダウンロードします。ファイルサイズは約550MBあります。\nダウンロードを開始しますか?"
+                        ),
                         w!("mmprojのダウンロード確認"),
                         MB_YESNO | MB_ICONWARNING,
                     );
@@ -1541,9 +2344,22 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 IDC_CHECK_UPDATE => open_url(h, GITHUB_RELEASES_PAGE_URL),
                 IDC_DEEPL_URL => open_url(h, DEEPL_KEY_URL),
                 IDC_GOOGLE_URL => open_url(h, GOOGLE_KEY_URL),
-                IDC_PROMPT_TR_BTN => open_prompt_editor(h, crate::prompt_edit::PromptKind::Translate),
+                IDC_PROF_KEY_URL => {
+                    let t =
+                        &API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)];
+                    let url = t.key_url();
+                    if !url.is_empty() {
+                        open_url(h, url);
+                    }
+                }
+                IDC_PROF_TEST_CONN => start_profile_test_connection(h),
+                IDC_PROMPT_TR_BTN => {
+                    open_prompt_editor(h, crate::prompt_edit::PromptKind::Translate)
+                }
                 IDC_PROMPT_OCR_BTN => open_prompt_editor(h, crate::prompt_edit::PromptKind::Ocr),
-                IDC_PROMPT_EXP_BTN => open_prompt_editor(h, crate::prompt_edit::PromptKind::Explain),
+                IDC_PROMPT_EXP_BTN => {
+                    open_prompt_editor(h, crate::prompt_edit::PromptKind::Explain)
+                }
                 IDC_PROF_LIST | IDC_PROF_TYPE => {
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE {
                         if id == IDC_PROF_LIST {
@@ -1552,40 +2368,47 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             // アクティブプロファイルの変更を即保存する
                             auto_save(h, false);
                         } else {
-                            // 種別切替: モデル名・URLをその種別の既定値に置き換える
-                            let t = &API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)];
+                            // 種別切替: モデル名・URLをその種別の既定値に置き換え、選択中の行へ自動保存する
+                            let t = &API_TYPE_ORDER
+                                [combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)];
                             set_ctl_text(h, IDC_PROF_MODEL, t.default_model());
                             set_ctl_text(h, IDC_PROF_URL, t.default_url());
+                            commit_profile_edit(h);
                         }
                     }
                 }
-                IDC_PROF_NEW => {
-                    set_ctl_text(h, IDC_PROF_NAME, "");
-                    set_ctl_text(h, IDC_PROF_URL, "");
-                    set_ctl_text(h, IDC_PROF_KEY, "");
-                    set_ctl_text(h, IDC_PROF_MODEL, "");
-                    set_ctl_text(h, IDC_PROF_MAXTOK, &crate::config::DEFAULT_MAX_TOKENS.to_string());
-                    combo_select(h, IDC_PROF_TYPE, 0);
-                    // プロンプトはUI欄が無いため、保存時に既定値 (DEFAULT_GEMINI_*) を使う
-                    PENDING_NEW.with(|f| *f.borrow_mut() = true);
-                    update_prof_default_btn(h);
+                IDC_PROF_NAME | IDC_PROF_URL | IDC_PROF_KEY | IDC_PROF_MODEL | IDC_PROF_MAXTOK
+                    if notif == EN_KILLFOCUS =>
+                {
+                    commit_profile_edit(h);
                 }
-                IDC_PROF_SAVE | IDC_PROF_SAVEAS => {
-                    let _ = save_profile_from_ui(h, id == IDC_PROF_SAVEAS);
-                    update_prof_default_btn(h);
-                }
+                IDC_PROF_NEW => create_new_profile(h),
+                IDC_PROF_DUP => duplicate_profile(h),
                 IDC_PROF_DEL => {
                     let deleted = PROFILES.with(|p| {
                         let mut profiles = p.borrow_mut();
                         if profiles.len() <= 1 {
-                            unsafe { MessageBoxW(Some(h), w!("最低1つは残す必要があります"), w!("エラー"), MB_OK); }
+                            unsafe {
+                                MessageBoxW(
+                                    Some(h),
+                                    w!("最低1つは残す必要があります"),
+                                    w!("エラー"),
+                                    MB_OK,
+                                );
+                            }
                             return false;
                         }
                         let sel = combo_sel(h, IDC_PROF_LIST);
                         if let Some(target) = profiles.get(sel) {
-                            let msg = to_wide(&format!("プロファイル「{}」を削除しますか?", target.name));
+                            let msg =
+                                to_wide(&format!("プロファイル「{}」を削除しますか?", target.name));
                             let r = unsafe {
-                                MessageBoxW(Some(h), PCWSTR(msg.as_ptr()), w!("プロファイルの削除"), MB_YESNO | MB_ICONWARNING)
+                                MessageBoxW(
+                                    Some(h),
+                                    PCWSTR(msg.as_ptr()),
+                                    w!("プロファイルの削除"),
+                                    MB_YESNO | MB_ICONWARNING,
+                                )
                             };
                             if r.0 != 6 {
                                 // IDYES 以外は削除しない
@@ -1634,6 +2457,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     };
                     crate::logviewer::open(inst);
                 }
+                IDC_OCR_PRIORITY_APPS => {
+                    crate::ocr_priority_dialog::open(h);
+                }
                 _ => {}
             }
             LRESULT(0)
@@ -1664,20 +2490,37 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             LRESULT(0)
         }
         WM_LLAMA_BIN_DONE => {
-            handle_install_done(h, wparam, lparam, refresh_llama_status, "llama.cppをインストールしました。");
+            handle_install_done(
+                h,
+                wparam,
+                lparam,
+                refresh_llama_status,
+                "llama.cppをインストールしました。",
+            );
             ensure_local_llm_profile_if_ready(h);
             LRESULT(0)
         }
         WM_LLAMA_BIN_UPDATE_RESULT => {
             match wparam.0 {
-                1 => handle_install_done(h, wparam, lparam, refresh_llama_status, "llama.cppを更新しました。"),
+                1 => handle_install_done(
+                    h,
+                    wparam,
+                    lparam,
+                    refresh_llama_status,
+                    "llama.cppを更新しました。",
+                ),
                 0 => handle_install_done(h, wparam, lparam, refresh_llama_status, ""),
                 // 2=既に最新版 / 3=ユーザーが更新をキャンセル。どちらもエラーではないので
                 // ボタン・ステータス表示を元に戻すだけ (SPECv0.5.5)。
                 2 => {
                     refresh_llama_status(h);
                     unsafe {
-                        MessageBoxW(Some(h), w!("既に最新版です。"), crate::util::display_name_pcwstr(), MB_OK | MB_ICONINFORMATION);
+                        MessageBoxW(
+                            Some(h),
+                            w!("既に最新版です。"),
+                            crate::util::display_name_pcwstr(),
+                            MB_OK | MB_ICONINFORMATION,
+                        );
                     }
                 }
                 _ => refresh_llama_status(h),
@@ -1697,12 +2540,24 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 set_ctl_text(h, IDC_LLAMA_MODEL_PATH, &path.to_string_lossy());
                 auto_save(h, false);
             }
-            handle_install_done(h, wparam, lparam, refresh_llama_status, "Gemma 4 E2Bモデルを導入しました。");
+            handle_install_done(
+                h,
+                wparam,
+                lparam,
+                refresh_llama_status,
+                "Gemma 4 E2Bモデルを導入しました。",
+            );
             ensure_local_llm_profile_if_ready(h);
             LRESULT(0)
         }
         WM_LLAMA_SERVER_DONE => {
-            handle_install_done(h, wparam, lparam, refresh_llama_status, "サーバーを起動しました。");
+            handle_install_done(
+                h,
+                wparam,
+                lparam,
+                refresh_llama_status,
+                "サーバーを起動しました。",
+            );
             LRESULT(0)
         }
         WM_LLAMA_MMPROJ_PROGRESS => {
@@ -1714,10 +2569,43 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             if wparam.0 == 1 {
                 // ダウンロード先(既定の管理下ディレクトリ)のパスをテキストボックスへ明示反映する
                 // (SPECv0.5.2追補: 起動時にもこのパスがそのまま使われる)。
-                set_ctl_text(h, IDC_LLAMA_MMPROJ_PATH, &crate::llama_install::mmproj_path().to_string_lossy());
+                set_ctl_text(
+                    h,
+                    IDC_LLAMA_MMPROJ_PATH,
+                    &crate::llama_install::mmproj_path().to_string_lossy(),
+                );
                 auto_save(h, false);
             }
-            handle_install_done(h, wparam, lparam, refresh_llama_status, "mmproj(画像入力対応)ファイルを導入しました。");
+            handle_install_done(
+                h,
+                wparam,
+                lparam,
+                refresh_llama_status,
+                "mmproj(画像入力対応)ファイルを導入しました。",
+            );
+            LRESULT(0)
+        }
+        WM_PROF_CONN_RESULT => {
+            let (msg, fill_model) =
+                unsafe { *Box::from_raw(lparam.0 as *mut (String, Option<String>)) };
+            unsafe {
+                let _ = EnableWindow(
+                    windows::Win32::UI::WindowsAndMessaging::GetDlgItem(
+                        Some(h),
+                        IDC_PROF_TEST_CONN,
+                    )
+                    .unwrap_or_default(),
+                    true,
+                );
+            }
+            if wparam.0 == 1
+                && let Some(model) = fill_model
+                && get_ctl_text(h, IDC_PROF_MODEL).trim().is_empty()
+            {
+                set_ctl_text(h, IDC_PROF_MODEL, &model);
+                commit_profile_edit(h);
+            }
+            set_ctl_text(h, IDC_PROF_CONN_STATUS, &msg);
             LRESULT(0)
         }
         WM_CLOSE => {

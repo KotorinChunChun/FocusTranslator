@@ -13,6 +13,23 @@ pub enum ApiType {
     /// 設定画面の種別選択でURL/モデル名をllama.cpp向けの既定値に自動入力するため独立させる
     /// (SPECv0.5.2追補)。
     LlamaCpp,
+    /// Hugging Face Inference Providers (OpenAI互換ルーター, `router.huggingface.co`)。
+    /// 呼び出し自体はOpenAIと同じ経路を使う (SPECv0.5.5)。
+    HuggingFace,
+    /// OpenRouter (OpenAI互換API, `openrouter.ai`)。呼び出し自体はOpenAIと同じ経路を使う (SPECv0.5.5)。
+    OpenRouter,
+    /// GitHub Models (OpenAI互換API, `models.github.ai`)。認証はGitHubのPersonal Access Token。
+    /// 呼び出し自体はOpenAIと同じ経路を使う (SPECv0.5.5)。
+    GitHubModels,
+    /// NVIDIA NIM (build.nvidia.com のAPIカタログ, OpenAI互換API)。
+    /// 呼び出し自体はOpenAIと同じ経路を使う (SPECv0.5.5)。
+    NvidiaNim,
+    /// Ollama (ローカルサーバ, OpenAI互換API `/v1/chat/completions`)。APIキー不要。
+    /// モデル名はユーザーが `ollama pull` 済みのタグに依存するため既定値は空欄 (SPECv0.5.5)。
+    Ollama,
+    /// LM Studio (ローカルサーバ, OpenAI互換API `/v1/chat/completions`)。APIキー不要。
+    /// モデル名は読み込み済みモデルのidに依存するため既定値は空欄 (SPECv0.5.5)。
+    LmStudio,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -41,12 +58,16 @@ fn default_max_tokens() -> u32 {
     DEFAULT_MAX_TOKENS
 }
 
-/// Gemini/Claude/ChatGPTの公式APIエンドポイント。これらのURLで呼び出す場合はAPIキーが必須。
+/// 認証必須のクラウドAPIの公式エンドポイント。これらのURLで呼び出す場合はAPIキーが必須。
 /// (ローカルサーバ等、既定と異なるURLを指すプロファイルはAPIキー空欄でも呼び出しを許容する)
-const MAJOR_API_URLS: [&str; 3] = [
+const MAJOR_API_URLS: [&str; 7] = [
     crate::llm_api::GEMINI_URL_BASE,
     crate::llm_api::DEFAULT_OPENAI_URL,
     crate::llm_api::DEFAULT_CLAUDE_URL,
+    crate::llm_api::DEFAULT_HUGGINGFACE_URL,
+    crate::llm_api::DEFAULT_OPENROUTER_URL,
+    crate::llm_api::DEFAULT_GITHUB_MODELS_URL,
+    crate::llm_api::DEFAULT_NVIDIA_NIM_URL,
 ];
 
 impl ApiProfile {
@@ -107,6 +128,13 @@ impl ApiType {
             ApiType::OpenAI => "gpt-4o-mini",
             ApiType::Claude => "claude-haiku-4-5-20251001",
             ApiType::LlamaCpp => "gemma-4-e2b",
+            ApiType::HuggingFace => "mistralai/Mistral-7B-Instruct-v0.3",
+            ApiType::OpenRouter => "openai/gpt-4o-mini",
+            ApiType::GitHubModels => "openai/gpt-4o-mini",
+            ApiType::NvidiaNim => "meta/llama-3.1-8b-instruct",
+            // ローカルサーバは導入済みモデルに依存するため既定値を決め打てない。空欄のまま
+            // 「接続確認」ボタンで実際に導入されているモデルを調べてから入力してもらう。
+            ApiType::Ollama | ApiType::LmStudio => "",
         }
     }
     pub fn default_url(&self) -> &'static str {
@@ -115,9 +143,30 @@ impl ApiType {
             ApiType::OpenAI => crate::llm_api::DEFAULT_OPENAI_URL,
             ApiType::Claude => crate::llm_api::DEFAULT_CLAUDE_URL,
             ApiType::LlamaCpp => crate::llama_server::DEFAULT_URL,
+            ApiType::HuggingFace => crate::llm_api::DEFAULT_HUGGINGFACE_URL,
+            ApiType::OpenRouter => crate::llm_api::DEFAULT_OPENROUTER_URL,
+            ApiType::GitHubModels => crate::llm_api::DEFAULT_GITHUB_MODELS_URL,
+            ApiType::NvidiaNim => crate::llm_api::DEFAULT_NVIDIA_NIM_URL,
+            ApiType::Ollama => crate::llm_api::DEFAULT_OLLAMA_URL,
+            ApiType::LmStudio => crate::llm_api::DEFAULT_LMSTUDIO_URL,
         }
     }
 
+    /// APIキー取得ページのURL (設定画面の【キーを入手】ボタン用。SPECv0.5.5)。
+    /// ローカルサーバ(LlamaCpp)はAPIキー自体が不要なため空文字を返す。
+    pub fn key_url(&self) -> &'static str {
+        match self {
+            ApiType::Gemini => "https://aistudio.google.com/apikey",
+            ApiType::OpenAI => "https://platform.openai.com/api-keys",
+            ApiType::Claude => "https://console.anthropic.com/settings/keys",
+            ApiType::LlamaCpp => "",
+            ApiType::HuggingFace => "https://huggingface.co/settings/tokens",
+            ApiType::OpenRouter => "https://openrouter.ai/settings/keys",
+            ApiType::GitHubModels => "https://github.com/settings/tokens",
+            ApiType::NvidiaNim => "https://build.nvidia.com",
+            ApiType::Ollama | ApiType::LmStudio => "",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -129,7 +178,7 @@ pub struct Config {
     pub poll_ms: u32,
     /// ホールドピン留めまでの秒数 (既定: 3秒)
     pub pin_hold_seconds: u32,
-    /// 範囲指定ホットキー (例: "Ctrl+Alt+T")
+    /// 範囲指定ホットキー (例: "Ctrl+Alt+Shift+T")
     pub region_hotkey: String,
     /// 既定OCRエンジン: "oneocr" | "win" | "paddle" | "llm"
     pub default_ocr: String,
@@ -206,6 +255,22 @@ pub struct Config {
     /// 管理下ディレクトリを使う。ファイルが存在すればサーバー起動時に --mmproj で渡され、
     /// 同一ポートのまま画像入力にも対応する (SPECv0.5.2追補)。
     pub llama_mmproj_path: String,
+    /// UIAよりもOCRを優先させる対象アプリのexeファイル名一覧 (SPECv0.5.5)。
+    /// TeamViewer/RDP/VMware等、リモート画面や仮想環境を表示するアプリでは、UIAで
+    /// 取得できるのは自アプリ(操作ウィンドウ)の要素であって実際に画面に映っている
+    /// リモート/仮想環境側の内容ではないため、これらのアプリでは選択文字列・UIAテキストの
+    /// 経路を飛ばし常にOCR(画面キャプチャの文字認識)で読み取る。大文字小文字は区別しない。
+    #[serde(default = "default_ocr_priority_apps")]
+    pub ocr_priority_apps: Vec<String>,
+    /// FocusTranslatorの認識自体を行わない対象アプリのexeファイル名一覧 (SPECv0.5.5)。
+    /// ここに登録したアプリ上でホットキーを押しても、一切認識・オーバーレイ表示を行わない。
+    /// 大文字小文字は区別しない。既定は空(誰も除外しない)。
+    #[serde(default)]
+    pub disabled_apps: Vec<String>,
+}
+
+fn default_ocr_priority_apps() -> Vec<String> {
+    vec!["TeamViewer.exe".to_string()]
 }
 
 /// 翻訳プロンプトの既定値 (SPECv0.5.3: 既に訳先言語ならそのまま返す指示を追加)
@@ -290,7 +355,7 @@ impl Default for Config {
             hold_key: "RCtrl".into(),
             poll_ms: 100,
             pin_hold_seconds: 3,
-            region_hotkey: "Ctrl+Alt+T".into(),
+            region_hotkey: "Ctrl+Alt+Shift+T".into(),
             default_ocr: "oneocr".into(),
             default_translator: "local".into(),
             target_lang: "ja".into(),
@@ -324,6 +389,8 @@ impl Default for Config {
             llama_port: crate::llama_server::DEFAULT_PORT,
             llama_model_path: String::new(),
             llama_mmproj_path: String::new(),
+            ocr_priority_apps: default_ocr_priority_apps(),
+            disabled_apps: Vec::new(),
         }
     }
 }
@@ -487,9 +554,9 @@ impl Config {
         key_vk(&self.detect_key)
     }
 
-    /// 範囲指定ホットキーの (修飾キー, 仮想キー)。解析失敗時は Ctrl+Alt+T。
+    /// 範囲指定ホットキーの (修飾キー, 仮想キー)。解析失敗時は Ctrl+Alt+Shift+T。
     pub fn region_hotkey_parsed(&self) -> (u32, u32) {
-        parse_hotkey(&self.region_hotkey).unwrap_or((0x0002 | 0x0001, b'T' as u32))
+        parse_hotkey(&self.region_hotkey).unwrap_or((0x0002 | 0x0001 | 0x0004, b'T' as u32))
     }
 
     /// エンジンが利用可能か(キー・URL設定の有無)
@@ -505,6 +572,16 @@ impl Config {
             _ => false,
         }
     }
+
+    /// 指定exeがUIA優先度制御(常にOCRを優先)の対象アプリか (SPECv0.5.5)。大文字小文字を区別しない。
+    pub fn is_ocr_priority_app(&self, exe: &str) -> bool {
+        self.ocr_priority_apps.iter().any(|e| e.eq_ignore_ascii_case(exe))
+    }
+
+    /// 指定exeが「実行しないアプリ」(認識自体を行わない対象)か (SPECv0.5.5)。大文字小文字を区別しない。
+    pub fn is_disabled_app(&self, exe: &str) -> bool {
+        self.disabled_apps.iter().any(|e| e.eq_ignore_ascii_case(exe))
+    }
 }
 
 /// キー名(ホールドキー/検出キー共通の表記) → 仮想キーコード
@@ -518,7 +595,7 @@ fn key_vk(name: &str) -> i32 {
     }
 }
 
-/// "Ctrl+Alt+T" のような表記を (MOD_*, VK) に変換
+/// "Ctrl+Alt+Shift+T" のような表記を (MOD_*, VK) に変換
 pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
     const MOD_ALT: u32 = 0x0001;
     const MOD_CONTROL: u32 = 0x0002;

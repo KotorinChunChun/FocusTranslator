@@ -1396,8 +1396,11 @@ fn start_reocr(h: HWND) {
                     Err(e) => (None, Some(e)),
                 };
             let ms = t0.elapsed().as_millis();
+            // engine="llm"のときはプロファイル名も記録する (SPECv0.5.5: プロファイル別の
+            // キャッシュ判定に使うため。worker.rsのllm_profile_of()と同じ規則)
+            let llm_profile = (engine == "llm").then(|| cfg.active_api_profile.clone());
             // 再OCR結果を同じ capture の認識行として追記 (SPECv0.4 §8.2.1)
-            logdb::log_recognition(capture_id, "ocr", &engine, ms, text.as_deref(), err.as_deref(), Some(&hash));
+            logdb::log_recognition(capture_id, "ocr", &engine, ms, text.as_deref(), err.as_deref(), Some(&hash), llm_profile.as_deref());
         }
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
@@ -1903,7 +1906,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             logdb::CaptureExtent::default(),
                         );
                         if let Some(cid) = cid {
-                            logdb::log_recognition(cid, "manual", "manual", 0, Some(&text), None, None);
+                            logdb::log_recognition(cid, "manual", "manual", 0, Some(&text), None, None, None);
                         }
                         unsafe {
                             let _ = SetWindowTextW(crate::ui_helpers::get_dlg_item(h, IDC_ADD_TEXT_EDIT), w!(""));

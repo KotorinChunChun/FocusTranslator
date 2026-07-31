@@ -10,6 +10,46 @@ use std::time::{Duration, Instant};
 const GITHUB_LATEST_RELEASE_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
 /// Windows CPU版バイナリのzipファイル名に含まれる目印
 const WIN_CPU_ASSET_MARKER: &str = "bin-win-cpu-x64.zip";
+/// Windows Radeon(HIP/ROCm)版バイナリのzipファイル名に含まれる目印
+const WIN_RADEON_ASSET_MARKER: &str = "bin-win-hip-radeon-x64.zip";
+
+/// llama.cppのビルド種別 (SPECv0.5.5: インストール時にユーザーが選択する)。
+/// 実行ファイル自体(llama-server.exe)はどの種別でも同名・同じ呼び出し方をするため、
+/// 起動・停止・API呼び出し側(llama_server.rs)は種別を意識しない。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum LlamaVariant {
+    /// 全環境で動作する既定版
+    Cpu,
+    /// NVIDIA GPU向け (要CUDA対応GPU)
+    Cuda,
+    /// AMD GPU向け (HIP/ROCm)
+    Radeon,
+}
+
+impl LlamaVariant {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlamaVariant::Cpu => "cpu",
+            LlamaVariant::Cuda => "cuda",
+            LlamaVariant::Radeon => "radeon",
+        }
+    }
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "cpu" => Some(LlamaVariant::Cpu),
+            "cuda" => Some(LlamaVariant::Cuda),
+            "radeon" => Some(LlamaVariant::Radeon),
+            _ => None,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            LlamaVariant::Cpu => "CPU版",
+            LlamaVariant::Cuda => "CUDA版 (NVIDIA GPU)",
+            LlamaVariant::Radeon => "Radeon版 (AMD GPU / HIP)",
+        }
+    }
+}
 
 /// 配布元: ggml-org/gemma-4-E2B-it-GGUF (Q4_0量子化, 約2.84GB)
 const MODEL_URL: &str =
@@ -65,9 +105,16 @@ pub fn installed_version() -> Option<(String, String)> {
     if tag.is_empty() { None } else { Some((tag, published)) }
 }
 
-/// バージョンマーカーファイルを書き出す
-fn write_version_marker(tag_name: &str, published_at: &str) {
-    let _ = std::fs::write(version_marker_path(), format!("{tag_name}\n{published_at}\n"));
+/// 導入済みバイナリのビルド種別。マーカーの3行目 (SPECv0.5.5で追加)。
+/// v0.5.4以前に導入した場合や旧マーカーには記録が無いため None (=不明。CPU版とみなして扱う)。
+pub fn installed_variant() -> Option<LlamaVariant> {
+    let text = std::fs::read_to_string(version_marker_path()).ok()?;
+    LlamaVariant::from_str_opt(text.lines().nth(2)?.trim())
+}
+
+/// バージョンマーカーファイルを書き出す (3行目にビルド種別を記録。SPECv0.5.5)
+fn write_version_marker(tag_name: &str, published_at: &str, variant: LlamaVariant) {
+    let _ = std::fs::write(version_marker_path(), format!("{tag_name}\n{published_at}\n{}\n", variant.as_str()));
 }
 
 /// モデルファイルが導入済みか (既定の管理下ディレクトリのみ判定。手動選択パスは
@@ -106,12 +153,59 @@ pub struct LatestRelease {
     pub tag_name: String,
     /// ISO8601形式の公開日時 (例: "2026-06-01T12:00:00Z")
     pub published_at: String,
-    /// Windows CPU版zipのダウンロードURL
-    pub zip_url: String,
+    /// ダウンロードすべきzipのURL一覧。CPU/Radeonは1つ、CUDAは本体+cudart(ランタイム
+    /// 再頒布パッケージ)の2つ (SPECv0.5.5: llama.cppのCUDA版はランタイムDLLが別配布のため)。
+    pub zip_urls: Vec<String>,
 }
 
-/// GitHub Releasesの最新版情報(タグ名・公開日・Windows CPU版zipのURL)を取得する
-fn fetch_latest_release() -> Result<LatestRelease, String> {
+/// アセット一覧から条件に合う最初のダウンロードURLを探す
+fn find_asset_url(assets: &[serde_json::Value], pred: impl Fn(&str) -> bool) -> Option<String> {
+    assets.iter().find_map(|a| {
+        let name = a["name"].as_str()?;
+        if pred(name) { a["browser_download_url"].as_str().map(|s| s.to_string()) } else { None }
+    })
+}
+
+/// ビルド種別に応じて、ダウンロードすべきzip URL一覧(CUDAのみ2件)を解決する。
+/// CUDA版は必要ドライバのバージョンが低いほうが互換性が広いため、公開されている
+/// CUDAツールキットバージョンのうち最小のものを既定候補にする。
+fn resolve_zip_urls(variant: LlamaVariant, assets: &[serde_json::Value]) -> Result<Vec<String>, String> {
+    match variant {
+        LlamaVariant::Cpu => find_asset_url(assets, |n| n.ends_with(WIN_CPU_ASSET_MARKER))
+            .map(|u| vec![u])
+            .ok_or_else(|| "Windows CPU版のバイナリが見つかりませんでした".to_string()),
+        LlamaVariant::Radeon => find_asset_url(assets, |n| n.ends_with(WIN_RADEON_ASSET_MARKER))
+            .map(|u| vec![u])
+            .ok_or_else(|| "Windows Radeon(HIP)版のバイナリが見つかりませんでした".to_string()),
+        LlamaVariant::Cuda => {
+            let mut candidates: Vec<(f64, String)> = Vec::new();
+            for a in assets {
+                let Some(name) = a["name"].as_str() else { continue };
+                if !name.starts_with("llama-") || !name.contains("-bin-win-cuda-") {
+                    continue;
+                }
+                let Some(ver_str) = name.split("-bin-win-cuda-").nth(1).and_then(|s| s.strip_suffix("-x64.zip")) else {
+                    continue;
+                };
+                let Ok(ver) = ver_str.parse::<f64>() else { continue };
+                candidates.push((ver, ver_str.to_string()));
+            }
+            let (_, ver_str) = candidates
+                .into_iter()
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .ok_or_else(|| "Windows CUDA版のバイナリが見つかりませんでした".to_string())?;
+            let main_url = find_asset_url(assets, |n| n.contains(&format!("-bin-win-cuda-{ver_str}-x64.zip")) && n.starts_with("llama-"))
+                .ok_or_else(|| "Windows CUDA版のバイナリが見つかりませんでした".to_string())?;
+            let cudart_marker = format!("cudart-llama-bin-win-cuda-{ver_str}-x64.zip");
+            let cudart_url = find_asset_url(assets, |n| n == cudart_marker)
+                .ok_or_else(|| "CUDAランタイム(cudart)パッケージが見つかりませんでした".to_string())?;
+            Ok(vec![main_url, cudart_url])
+        }
+    }
+}
+
+/// GitHub Releasesの最新版情報(タグ名・公開日・指定ビルド種別のzip URL一覧)を取得する
+fn fetch_latest_release(variant: LlamaVariant) -> Result<LatestRelease, String> {
     let mut res = ureq::get(GITHUB_LATEST_RELEASE_API)
         .header("User-Agent", "FocusTranslator")
         .header("Accept", "application/vnd.github+json")
@@ -127,24 +221,16 @@ fn fetch_latest_release() -> Result<LatestRelease, String> {
     let tag_name = json["tag_name"].as_str().unwrap_or("").to_string();
     let published_at = json["published_at"].as_str().unwrap_or("").to_string();
     let assets = json["assets"].as_array().ok_or("リリース情報にアセットがありません")?;
-    let zip_url = assets
-        .iter()
-        .find_map(|a| {
-            let name = a["name"].as_str()?;
-            if name.ends_with(WIN_CPU_ASSET_MARKER) {
-                a["browser_download_url"].as_str().map(|s| s.to_string())
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| "Windows CPU版のバイナリが見つかりませんでした".to_string())?;
-    Ok(LatestRelease { tag_name, published_at, zip_url })
+    let zip_urls = resolve_zip_urls(variant, assets)?;
+    Ok(LatestRelease { tag_name, published_at, zip_urls })
 }
 
 /// 導入済みバージョンと最新リリースを比較する (SPECv0.5.5)。タグ名が異なる(または導入済み
 /// バージョン情報が無い=v0.5.4以前の導入)場合は更新ありとして Some を返す。
+/// 比較に使うビルド種別は現在導入済みのもの(不明なら CPU版とみなす)。
 pub fn check_for_update() -> Result<Option<LatestRelease>, String> {
-    let latest = fetch_latest_release()?;
+    let variant = installed_variant().unwrap_or(LlamaVariant::Cpu);
+    let latest = fetch_latest_release(variant)?;
     match installed_version() {
         Some((tag, _)) if tag == latest.tag_name => Ok(None),
         _ => Ok(Some(latest)),
@@ -225,45 +311,79 @@ fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<(), String> {
 }
 
 /// zipをダウンロードして bin_dir へ展開し、成功したらバージョンマーカーを書く共通処理
-/// (SPECv0.5.5: 新規導入・更新の両方で使う)。
+/// (SPECv0.5.5: 新規導入・更新の両方で使う)。CUDA版は release.zip_urls に2件
+/// (本体+cudartランタイム)入っているため、順に全て展開する。
 fn download_and_extract_binary(
     release: &LatestRelease,
-    on_progress: impl FnMut(u64, Option<u64>),
+    variant: LlamaVariant,
+    mut on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<(), String> {
     let dir = bin_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("フォルダ作成に失敗しました: {e}"))?;
-    let zip_path = dir.join("llama.part.zip");
-    download_to_file(&release.zip_url, &zip_path, 300, on_progress)?;
-    let result = extract_zip(&zip_path, &dir);
-    let _ = std::fs::remove_file(&zip_path);
-    result?;
+    for (i, url) in release.zip_urls.iter().enumerate() {
+        let zip_path = dir.join(format!("llama.part{i}.zip"));
+        download_to_file(url, &zip_path, 300, &mut on_progress)?;
+        let result = extract_zip(&zip_path, &dir);
+        let _ = std::fs::remove_file(&zip_path);
+        result?;
+    }
     if !installed() {
         return Err("展開後にllama-server.exeが見つかりませんでした".into());
     }
-    write_version_marker(&release.tag_name, &release.published_at);
+    write_version_marker(&release.tag_name, &release.published_at, variant);
     Ok(())
 }
 
-/// llama.cpp本体(CPU版)を導入する。既に導入済みなら何もしない。
+/// llama.cpp本体を指定ビルド種別で導入する。既に導入済みなら何もしない。
 /// on_progress は10秒おきに (受信済みバイト数, 合計バイト数) を通知する (SPECv0.5.3:
 /// モデル/mmprojの導入と同様に設定画面へ進捗を反映するため)。
-pub fn install_binary(on_progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
+pub fn install_binary(variant: LlamaVariant, on_progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
     if installed() {
         return Ok(());
     }
-    let release = fetch_latest_release()?;
-    download_and_extract_binary(&release, on_progress)
+    let release = fetch_latest_release(variant)?;
+    download_and_extract_binary(&release, variant, on_progress)
 }
 
 /// 導入済みのllama.cpp本体を、指定リリース(通常は check_for_update() で見つかった最新版)へ
 /// 更新する。install_binary() と異なり導入済みかどうかのガードは持たない — 呼び出し元
 /// (設定画面)が「更新する」と決めた後に呼ぶための経路 (SPECv0.5.5)。
 /// 呼び出し前に、サーバーが稼働中なら停止しておくこと(実行中のexeは上書きできない)。
+/// variant は現在導入済みのビルド種別をそのまま引き継ぐ(更新時に種別を変えることはできない
+/// — 変更したい場合は削除してから新しい種別で再導入する)。
 pub fn update_binary(
     release: &LatestRelease,
+    variant: LlamaVariant,
     on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<(), String> {
-    download_and_extract_binary(release, on_progress)
+    download_and_extract_binary(release, variant, on_progress)
+}
+
+/// 導入済みのllama.cpp本体一式を削除する (SPECv0.5.5)。呼び出し前にサーバーが稼働中なら
+/// 停止しておくこと(実行中のexeは削除できないため)。言語モデル/mmprojファイルは対象外
+/// (別行で個別に管理しているため削除しない)。
+///
+/// `std::fs::remove_dir_all` は使わない: %APPDATA% が OneDrive 同期下にある環境で、
+/// クラウド代替ファイル(Files On-Demandのプレースホルダ)特有の再解析ポイントを
+/// 辿ろうとして失敗する既知の問題がある(実機で "OS error 4395" を確認)。
+/// このディレクトリはextract_zip()が常にサブディレクトリ無しでフラットに展開する
+/// 構成のため、直下のファイルを1つずつ削除してから空のディレクトリを消す方式にすれば
+/// この問題を回避できる(想定外にサブディレクトリが存在した場合のみ再帰削除を試みる)。
+pub fn uninstall_binary() -> Result<(), String> {
+    let dir = bin_dir();
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&dir).map_err(|e| format!("削除に失敗しました: {e}"))? {
+        let path = entry.map_err(|e| format!("削除に失敗しました: {e}"))?.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|e| format!("削除に失敗しました: {e}"))?;
+        } else {
+            std::fs::remove_file(&path).map_err(|e| format!("削除に失敗しました: {e}"))?;
+        }
+    }
+    std::fs::remove_dir(&dir).map_err(|e| format!("削除に失敗しました: {e}"))?;
+    Ok(())
 }
 
 /// Gemma 4 E2B (Q4_0 GGUF) モデルを導入する。既に導入済みなら何もしない。
@@ -298,15 +418,6 @@ pub fn install_mmproj(on_progress: impl FnMut(u64, Option<u64>)) -> Result<(), S
         let _ = std::fs::remove_file(&target);
         return Err("ダウンロードしたmmprojファイルが小さすぎます(配布元の変更の可能性があります)".into());
     }
-    Ok(())
-}
-
-/// バイナリ・モデルの両方を導入する(設定画面の1ボタン導入用ではなく、ボタンを分けて
-/// 導入する現行UIでは個別に呼ばれる。将来の一括導入用に残す)。
-#[allow(dead_code)]
-pub fn install_all() -> Result<(), String> {
-    install_binary(|_, _| {})?;
-    install_model(|_, _| {})?;
     Ok(())
 }
 

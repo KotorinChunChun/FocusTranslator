@@ -228,6 +228,8 @@ fn log_cap(cfg: &Config, mode: &str, ctx: &AppContext, image: Option<&Captured>,
 
 /// 認識ログを記録し recognition_id を返す(ログOFF時・capture未記録時は None)。
 /// image_hash は同一画像+同一エンジンでの再OCR判定に使う (SPECv0.4追補)。
+/// engine="llm" のときは llm_profile_of() でアクティブプロファイル名も併せて記録する
+/// (SPECv0.5.5: プロファイル別のキャッシュ判定に使うため)。
 #[allow(clippy::too_many_arguments)]
 fn log_recog(
     cfg: &Config,
@@ -242,7 +244,8 @@ fn log_recog(
     if !cfg.log_enabled {
         return None;
     }
-    crate::logdb::log_recognition(capture_id?, method, engine, ms, text, error, image_hash)
+    let llm_profile = llm_profile_of(cfg, engine);
+    crate::logdb::log_recognition(capture_id?, method, engine, ms, text, error, image_hash, llm_profile.as_deref())
 }
 
 /// engine=llm のときだけアクティブプロファイル名を返す (translations.llm_profile 用)
@@ -617,6 +620,11 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         init_com();
         let t0 = Instant::now();
         let mut ctx = AppContext::capture(x, y, HWND(target as *mut _));
+        // 実行しないアプリ (SPECv0.5.5): 登録された対象アプリ上では一切認識・表示を行わない。
+        // UIAプローブすら行わず即座に抜ける (無関係な処理コストも避ける)。
+        if ctx.exe.as_deref().is_some_and(|exe| cfg.is_disabled_app(exe)) {
+            return;
+        }
         let probe = uia::probe_at_point(x, y);
         ctx.selected_text = probe.selected_text.clone();
 
@@ -634,14 +642,19 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
             ));
         }
 
+        // UIA優先度制御 (SPECv0.5.5): TeamViewer/RDP等リモート画面・仮想環境を表示する
+        // アプリでは、UIAで取れる要素は自アプリ(操作ウィンドウ)のものであって実際に画面に
+        // 映っているリモート/仮想環境側の内容ではないため、経路S/Aを飛ばし常にOCR(経路B)へ進む。
+        let force_ocr = ctx.exe.as_deref().is_some_and(|exe| cfg.is_ocr_priority_app(exe));
+
         // 経路S: 選択中の文字列 (最優先。OCRはもちろん、カーソル位置のUIAテキストよりも優先)
-        if let Some(sel) = probe.selected_text.clone() {
+        if !force_ocr && let Some(sel) = probe.selected_text.clone() {
             adopt_uia_text(generation, cfg, sel, tr_engine, main, x, y, target, &ctx, &probe, &t0);
             return;
         }
 
         // 経路A: UIA
-        if let Some(text) = probe.text.clone() {
+        if !force_ocr && let Some(text) = probe.text.clone() {
             adopt_uia_text(generation, cfg, text, tr_engine, main, x, y, target, &ctx, &probe, &t0);
             return;
         }
@@ -876,9 +889,11 @@ pub fn reocr(job: ReocrJob) {
         // クリップボード取り込み等 (fresh_capture) は保持画像でも新規captureを作る (SPECv0.5.4 §20)
         let capture_with_img = || if held && !fresh_capture { capture_id } else { log_cap(&cfg, log_mode, &ctx, Some(&log_img), extent) };
 
-        // 同一画像+同一エンジンの既存認識結果があれば再OCRせず再利用する。
-        // 操作の記録としてrecognition行は追記する (SPECv0.4.9追補: 切替操作をログに残す)
-        if let Some((cached_rid, text)) = crate::logdb::find_cached_recognition(&hash, &ocr_engine) {
+        // 同一画像+同一エンジン(+engine=llmなら同一プロファイル。SPECv0.5.5)の既存認識結果が
+        // あれば再OCRせず再利用する。操作の記録としてrecognition行は追記する
+        // (SPECv0.4.9追補: 切替操作をログに残す)
+        let ocr_llm_profile = llm_profile_of(&cfg, &ocr_engine);
+        if let Some((cached_rid, text)) = crate::logdb::find_cached_recognition(&hash, &ocr_engine, ocr_llm_profile.as_deref()) {
             let ms = t0.elapsed().as_millis();
             util::perf_log(cfg.perf_log, &format!("{perf_label} {ocr_engine} {ms}ms (cached)"));
             let use_capture_id = capture_with_img();

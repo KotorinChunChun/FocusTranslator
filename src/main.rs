@@ -10,16 +10,19 @@ mod chip_handler;
 mod config;
 mod detect;
 mod engine;
+mod gpu_detect;
 mod image_edit;
 mod image_preview;
 mod input_dialog;
 mod llama_install;
 mod llama_server;
+mod llama_variant_dialog;
 mod llm_api;
 mod logdb;
 mod logviewer;
 mod markdown;
 mod ocr;
+mod ocr_priority_dialog;
 mod oneocr;
 mod onnx_translate;
 mod onnx_translate_install;
@@ -117,6 +120,25 @@ fn main() {
     };
     let mut cfg = Config::load();
     overlay_layout::apply_theme(&cfg.overlay_theme);
+
+    // ローカルLLMモデル/mmprojが、既定の管理下ディレクトリ(導入予定の置き場所)に
+    // 既にあるのに設定値が空欄のままなら、起動時に自動入力する (SPECv0.5.5)。
+    // (「ダウンロード」ボタンを押さずファイルを直接配置した場合や、旧バージョンで
+    // 導入した後にこのフィールドが未設定のまま残っているケースを拾うため)
+    {
+        let mut changed = false;
+        if cfg.llama_model_path.trim().is_empty() && llama_install::model_installed() {
+            cfg.llama_model_path = llama_install::model_path().to_string_lossy().into_owned();
+            changed = true;
+        }
+        if cfg.llama_mmproj_path.trim().is_empty() && llama_install::mmproj_installed() {
+            cfg.llama_mmproj_path = llama_install::mmproj_path().to_string_lossy().into_owned();
+            changed = true;
+        }
+        if changed {
+            cfg.save();
+        }
+    }
 
     // メイン(非表示)ウィンドウ
     let main = unsafe {

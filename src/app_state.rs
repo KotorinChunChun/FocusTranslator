@@ -229,9 +229,12 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         WM_APP_TRAY => {
             let ev = (lparam.0 & 0xFFFF) as u32;
-            if ev == windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONUP || ev == windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP {
+            if ev == windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONUP {
                 let cmd = tray::show_menu(hwnd);
                 handle_command(hwnd, cmd);
+            } else if ev == windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP {
+                // 左クリックはメニューを出さず、直接設定画面を開く (SPECv0.5.5)
+                handle_command(hwnd, tray::CMD_SETTINGS);
             }
             LRESULT(0)
         }
@@ -349,8 +352,14 @@ pub fn tick() {
         let down = unsafe { (GetAsyncKeyState(app.cfg.hold_vk()) as u16 & 0x8000) != 0 };
         let esc = unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 };
 
-        let target_active = unsafe { GetForegroundWindow() } == HWND(app.target as *mut _);
-        if app.mode == Mode::Pinned && esc && target_active {
+        // ピン留め中のESCは、翻訳対象アプリが前面のときに加えて、オーバーレイ自身に
+        // フォーカスがある場合も受け付ける (SPECv0.5.5 §3: 以前は対象アプリ前面時のみで、
+        // オーバーレイをクリックして操作した後はESCで閉じられなかった)。
+        let fg = unsafe { GetForegroundWindow() };
+        let target_active = fg == HWND(app.target as *mut _);
+        let overlay_active = !app.overlay.is_invalid()
+            && unsafe { GetAncestor(fg, GA_ROOT) } == app.overlay;
+        if app.mode == Mode::Pinned && esc && (target_active || overlay_active) {
             close_overlay(app);
             app.hold = down;
             return None;

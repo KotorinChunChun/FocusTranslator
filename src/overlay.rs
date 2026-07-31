@@ -252,6 +252,10 @@ thread_local! {
     static TOOLTIP_PENDING: RefCell<Option<usize>> = const { RefCell::new(None) };
     /// 表示中のツールチップ (チップID, 表示位置)。None なら非表示。
     static TOOLTIP_SHOWN: RefCell<Option<(usize, i32, i32)>> = const { RefCell::new(None) };
+    /// OCR/翻訳/解説のLLMプロファイル別チップをホバーしたときの使用状況ツールチップ本文
+    /// (SPECv0.5.5)。表示が始まったタイミングで一度だけDBを集計してキャッシュし、
+    /// 再描画のたびにクエリしないようにする。
+    static LLM_USAGE_TOOLTIP: RefCell<Option<String>> = const { RefCell::new(None) };
     /// 直近に表示したアンカー。同一アンカーでの再描画では実際のウィンドウ位置を維持する。
     static LAST_ANCHOR: RefCell<Option<(i32, i32)>> = const { RefCell::new(None) };
     /// 画像編集モードの実データ (SPECv0.4 §1-§4)。None のとき編集モード無効。
@@ -817,7 +821,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 let had_shown = TOOLTIP_SHOWN.with(|t| t.borrow_mut().take().is_some());
                 match hit {
-                    Some(id) if id >= CHIP_UIA_NODE_BASE || id == CHIP_SELECTED_TEXT => {
+                    Some(id) if id >= CHIP_UIA_NODE_BASE || id == CHIP_SELECTED_TEXT || llm_profile_key_for_chip(id).is_some() => {
                         TOOLTIP_PENDING.with(|t| *t.borrow_mut() = Some(id));
                         unsafe {
                             SetTimer(Some(hwnd), TIMER_TOOLTIP, TOOLTIP_DELAY_MS, None);
@@ -1010,6 +1014,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if let Some(id) = pending
                     && HOVER_ID.with(|h| *h.borrow()) == Some(id)
                 {
+                    if let Some(profile) = llm_profile_key_for_chip(id) {
+                        LLM_USAGE_TOOLTIP.with(|t| *t.borrow_mut() = Some(llm_usage_tooltip_text(&profile)));
+                    }
                     let (mx, my) = MOUSE_POS.with(|p| *p.borrow());
                     TOOLTIP_SHOWN.with(|t| *t.borrow_mut() = Some((id, mx, my)));
                     unsafe {
@@ -1201,17 +1208,56 @@ fn paint(hwnd: HWND) {
 const TOOLTIP_MAX_W: i32 = 360;
 const TOOLTIP_PAD: i32 = 8;
 
+/// チップIDがOCR/翻訳/解説のLLMプロファイル別チップに対応する場合、そのプロファイル名を返す
+/// (SPECv0.5.5)。固定エンジン(oneocr/win/paddle/local/deepl/google)のチップはNoneを返す
+/// — sync_overlay() が ocr_keys/tr_keys へ「固定エンジン群→呼び出し可能なLLMプロファイル名」の
+/// 順で詰めているため、キー文字列がエンジンの固定リストに含まれるかで判定できる。
+fn llm_profile_key_for_chip(id: usize) -> Option<String> {
+    CONTENT.with(|c| {
+        let c = c.borrow();
+        let key = if id < CHIP_OCR_BASE + c.ocr_keys.len() {
+            c.ocr_keys.get(id - CHIP_OCR_BASE)?
+        } else if id >= CHIP_TR_BASE && id < CHIP_TR_BASE + c.tr_keys.len() {
+            c.tr_keys.get(id - CHIP_TR_BASE)?
+        } else if id >= CHIP_EXPLAIN_BASE && id < CHIP_EXPLAIN_BASE + c.explain_keys.len() {
+            c.explain_keys.get(id - CHIP_EXPLAIN_BASE)?
+        } else {
+            return None;
+        };
+        let is_fixed_engine = crate::engine::OCR_KEYS.contains(&key.as_str()) || crate::engine::TR_KEYS.contains(&key.as_str());
+        (!is_fixed_engine).then(|| key.clone())
+    })
+}
+
+/// 指定LLMプロファイルについて、直近1時間の送信回数・トークン数を集計し
+/// ツールチップ用の文言を組み立てる (SPECv0.5.5)。
+fn llm_usage_tooltip_text(profile: &str) -> String {
+    const ONE_HOUR_MS: i64 = 60 * 60 * 1000;
+    let s = crate::logdb::llm_usage_summary(profile, ONE_HOUR_MS);
+    format!(
+        "{profile} (直近1時間)\n送信: {}回 / 合計{}トークン\n(入力{} / 出力{})",
+        s.count,
+        s.tokens_in + s.tokens_out,
+        s.tokens_in,
+        s.tokens_out
+    )
+}
+
 fn draw_tooltip(mem: HDC, win_w: i32, win_h: i32) {
     let shown = TOOLTIP_SHOWN.with(|t| *t.borrow());
     let Some((id, mx, my)) = shown else { return };
-    let text = CONTENT.with(|c| {
-        let c = c.borrow();
-        if id == CHIP_SELECTED_TEXT {
-            c.selected_text.clone()
-        } else {
-            c.uia_nodes.get(id.wrapping_sub(CHIP_UIA_NODE_BASE)).map(|n| n.text.clone())
-        }
-    });
+    let text = if llm_profile_key_for_chip(id).is_some() {
+        LLM_USAGE_TOOLTIP.with(|t| t.borrow().clone())
+    } else {
+        CONTENT.with(|c| {
+            let c = c.borrow();
+            if id == CHIP_SELECTED_TEXT {
+                c.selected_text.clone()
+            } else {
+                c.uia_nodes.get(id.wrapping_sub(CHIP_UIA_NODE_BASE)).map(|n| n.text.clone())
+            }
+        })
+    };
     let Some(text) = text else { return };
     let text = text.trim();
     if text.is_empty() {

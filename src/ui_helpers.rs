@@ -9,7 +9,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
     SendMessageW, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, CBS_DROPDOWNLIST,
     CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
-    WM_SETFONT,
+    CB_SETDROPPEDWIDTH, WM_SETFONT,
 };
 use windows::Win32::UI::Controls::{
     EM_SETPASSWORDCHAR,
@@ -92,6 +92,13 @@ pub fn password_edit(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, 
 }
 
 pub fn combo(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32) -> HWND {
+    combo_h(parent, instance, x, y, w, 200, id)
+}
+
+/// ドロップダウン部分の最大表示高さ(px)を指定できるコンボボックス。既定の`combo()`が使う
+/// 200pxでは項目数が多い一覧(起動中のアプリ等)で数件しか一度に見えずスクロールが必須に
+/// なるため、より多くの項目を一覧できるようにしたい場合はこちらを使う。
+pub fn combo_h(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, dropdown_h: i32, id: i32) -> HWND {
     ctl(
         parent,
         instance,
@@ -101,9 +108,17 @@ pub fn combo(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32)
         x,
         y,
         w,
-        200,
+        dropdown_h,
         id,
     )
+}
+
+/// ドロップダウンリスト部分の表示幅だけを広げる(閉じた状態の表示幅はコンボ自体の幅のまま)。
+/// コンボ本体を狭く保ちたいが、項目名が長く一覧では読みやすくしたい場合に使う。
+pub fn combo_set_dropped_width(h: HWND, w: i32) {
+    unsafe {
+        SendMessageW(h, CB_SETDROPPEDWIDTH, Some(WPARAM(w as usize)), Some(LPARAM(0)));
+    }
 }
 
 pub fn button(parent: HWND, instance: HINSTANCE, text: &str, x: i32, y: i32, w: i32, id: i32) -> HWND {
@@ -212,6 +227,58 @@ pub fn combo_get_item_text(cb: HWND, idx: usize) -> String {
             Some(LPARAM(buf.as_mut_ptr() as isize)),
         );
         String::from_utf16_lossy(&buf[..len as usize])
+    }
+}
+
+const LBS_NOTIFY: u32 = 0x0001;
+const LB_ADDSTRING: u32 = 0x0180;
+const LB_RESETCONTENT: u32 = 0x0184;
+const LB_SETCURSEL: u32 = 0x0186;
+const LB_GETCURSEL: u32 = 0x0188;
+const WS_VSCROLL: u32 = 0x0020_0000;
+
+/// リストボックス(複数行を常時表示する一覧)を作る。コンボボックスと違い、選択せずとも
+/// 中身が全部見えるため、追加・削除を繰り返す「管理一覧」向けのUIに使う。
+pub fn listbox(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, h: i32, id: i32) -> HWND {
+    ctl(
+        parent,
+        instance,
+        w!("LISTBOX"),
+        "",
+        WS_BORDER | WS_TABSTOP | WINDOW_STYLE(LBS_NOTIFY | WS_VSCROLL),
+        x,
+        y,
+        w,
+        h,
+        id,
+    )
+}
+
+pub fn listbox_reset(lb: HWND) {
+    unsafe {
+        SendMessageW(lb, LB_RESETCONTENT, Some(WPARAM(0)), Some(LPARAM(0)));
+    }
+}
+
+pub fn listbox_add_item(lb: HWND, text: &str) {
+    unsafe {
+        let wide = to_wide(text);
+        SendMessageW(lb, LB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide.as_ptr() as isize)));
+    }
+}
+
+/// 選択中の行のインデックス。未選択なら None。
+pub fn listbox_get_sel(lb: HWND) -> Option<usize> {
+    unsafe {
+        let r = SendMessageW(lb, LB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0)));
+        if r.0 < 0 { None } else { Some(r.0 as usize) }
+    }
+}
+
+/// 選択行を指定インデックスへ設定する。
+pub fn listbox_set_sel(lb: HWND, idx: usize) {
+    unsafe {
+        SendMessageW(lb, LB_SETCURSEL, Some(WPARAM(idx)), Some(LPARAM(0)));
     }
 }
 
