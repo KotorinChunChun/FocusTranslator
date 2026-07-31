@@ -140,7 +140,7 @@ const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
 /// 左下欄外のバージョン情報 (SPECv0.5.2追補)。アプリ名は正式名に統一 (SPECv0.5.4 §17)。
 const APP_VERSION_LABEL: &str = crate::util::APP_DISPLAY_NAME;
-const APP_UPDATE_DATE: &str = "2026/7/31";
+const APP_UPDATE_DATE: &str = "2026/8/1";
 /// 開発者名 (SPECv0.5.4 §17)
 const APP_DEVELOPER: &str = "Kotorichun";
 /// 「使い方」ボタンで開くリポジトリルート (README表示。SPECv0.5.4 §11)
@@ -264,17 +264,17 @@ const LAYOUT_COL_X: [i32; 3] = [PAD, PAD * 2 + COL_W, PAD * 3 + COL_W * 2];
 const GROUP_GAP: i32 = 8; // 同列内でグループを縦に並べる際の間隔
 
 const GROUP1_Y: i32 = 8;
-// グループ3(OCR設定)がUIA優先度制御ボタンの分だけグループ1より1行多いため、
-// グループ1側もその高さ(実測196、5行+UIA分の空き)に合わせて下端を揃える
-// (SPECv0.5.5: 以前はここが178のままでグループ2・4の開始位置が列間で最大30pxずれていた)。
-const GROUP1_H: i32 = 196;
+// グループ5(LLMプロファイル設定)と高さを揃え、3列とも上段グループの下端・下段グループの
+// 開始Y座標が一致するようにする(SPECv0.5.5: 実際の内容はグループ1・3の方が短いため、
+// その分の余白は下側に残る。列を跨いだ見た目の統一を優先した実機フィードバックによる)。
+const GROUP1_H: i32 = GROUP5_H;
 const GROUP3_Y: i32 = GROUP1_Y;
 const GROUP3_H: i32 = GROUP1_H; // グループ1と下端を揃える
 
 const GROUP2_Y: i32 = GROUP1_Y + GROUP1_H + GROUP_GAP;
-const GROUP2_H: i32 = 242; // 7行 (最終行はボタン高26) + 下余白14
+const GROUP2_H: i32 = GROUP6_H; // グループ6と高さを揃える(下端も3列とも一致する)
 const GROUP4_Y: i32 = GROUP3_Y + GROUP3_H + GROUP_GAP;
-const GROUP4_H: i32 = GROUP2_H; // グループ2と下端を揃える (翻訳設定は内容的にはやや短い)
+const GROUP4_H: i32 = GROUP2_H; // グループ2と下端を揃える
 
 const GROUP5_Y: i32 = 8;
 const GROUP5_H: i32 = 272; // 8行 (最終行はボタン高26) + 下余白14 (SPECv0.5.5で接続確認行を追加)
@@ -468,13 +468,14 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             20,
             IDC_PADDLE_STATUS,
         );
+        // 「取得ページ」ボタンと位置・幅を揃える(cx+key_w+6, 76px)
         button(
             h,
             inst,
             "インストール",
-            cx + 106,
+            cx + key_w + 6,
             y - 2,
-            104,
+            76,
             IDC_PADDLE_INSTALL,
         );
         y += STEP;
@@ -528,13 +529,14 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             20,
             IDC_ONNX_STATUS,
         );
+        // 「取得ページ」ボタンと位置・幅を揃える(cx+key_w+6, 76px)
         button(
             h,
             inst,
             "インストール",
-            cx + 106,
+            cx + key_w + 6,
             y - 2,
-            104,
+            76,
             IDC_ONNX_INSTALL,
         );
         y += STEP;
@@ -582,6 +584,10 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             COL_W,
             GROUP5_H,
         );
+        // グループ6と同じ操作ボタン列(bx=lx+286, 幅96)をこのグループでも使い、
+        // 縦に隣接する2グループでボタンの並びが揃って見えるようにする (SPECv0.5.5)。
+        const ACTION_BX: i32 = 286; // lxからの相対オフセット (グループ6のbxと同一値)
+        const ACTION_BTN_W: i32 = 96; // グループ6のBTN_Wと同一値
         let mut y = GROUP5_Y + GTOP;
         label(h, inst, "プロファイル編集", lx, y + 2, 90);
         combo(h, inst, lx + 96, y, 150, IDC_PROF_LIST);
@@ -589,15 +595,16 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             h,
             inst,
             "既定にする",
-            lx + 96 + 150 + 6,
+            lx + ACTION_BX,
             y,
-            90,
+            ACTION_BTN_W,
             IDC_PROF_SET_DEFAULT,
         );
         y += STEP;
-        button(h, inst, "新規", lx, y, 46, IDC_PROF_NEW);
-        button(h, inst, "複製", lx + 50, y, 60, IDC_PROF_DUP);
-        button(h, inst, "削除", lx + 114, y, 46, IDC_PROF_DEL);
+        // 「プロファイル編集」コンボと同じX(lx+96)から始める
+        button(h, inst, "新規", lx + 96, y, 46, IDC_PROF_NEW);
+        button(h, inst, "複製", lx + 96 + 50, y, 60, IDC_PROF_DUP);
+        button(h, inst, "削除", lx + 96 + 114, y, 46, IDC_PROF_DEL);
         y += STEP;
         label(h, inst, "API登録名", lx, y + 2, 84);
         edit(h, inst, cx, y, 140, IDC_PROF_NAME);
@@ -609,12 +616,14 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         edit(h, inst, cx, y, 288, IDC_PROF_URL);
         y += STEP;
         label(h, inst, "APIキー", lx, y + 2, 84);
-        password_edit(h, inst, cx, y, key_w, IDC_PROF_KEY);
+        // 「モデル名」の入力欄と幅を揃える
+        password_edit(h, inst, cx, y, 174, IDC_PROF_KEY);
+        // 「種別」コンボ・「解説プロンプト」ボタンと右端(cx+288)を揃える
         button(
             h,
             inst,
             "キーを入手",
-            cx + key_w + 6,
+            cx + 288 - 84,
             y - 2,
             84,
             IDC_PROF_KEY_URL,
@@ -628,19 +637,20 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         y += STEP;
         // 疎通確認 (SPECv0.5.5): Ollama/LM Studio等ローカルサーバでモデル名が分からない場合に
         // 使う。成功時、モデル名欄が空欄ならAPIが返した先頭のモデルidを自動入力する。
-        button(h, inst, "接続確認", cx, y - 2, 90, IDC_PROF_TEST_CONN);
+        // ボタンのXは「解説プロンプト」と揃え、状態表示はその左側に置く。
         ctl(
             h,
             inst,
             w!("STATIC"),
             "",
             WINDOW_STYLE(0),
-            cx + 96,
+            cx,
             y + 2,
-            200,
+            190,
             20,
             IDC_PROF_CONN_STATUS,
         );
+        button(h, inst, "接続確認", cx + 196, y - 2, 90, IDC_PROF_TEST_CONN);
         y += STEP;
         // プロンプトは専用の編集ウィンドウで編集する (SPECv0.4.7 §1)
         label(h, inst, "プロンプト編集", lx, y + 4, 84);
