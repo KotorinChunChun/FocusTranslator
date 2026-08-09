@@ -268,12 +268,13 @@ fn build_command(
         ApiType::CodexCli => {
             let final_path = work_dir.join("final.txt");
             let mut args: Vec<OsString> = vec![
-                "exec".into(),
-                "--skip-git-repo-check".into(),
-                "--sandbox".into(),
-                "read-only".into(),
                 "--ask-for-approval".into(),
                 "never".into(),
+                "exec".into(),
+                "--skip-git-repo-check".into(),
+                "--ephemeral".into(),
+                "--sandbox".into(),
+                "read-only".into(),
                 "--json".into(),
                 "--output-last-message".into(),
                 final_path.as_os_str().to_owned(),
@@ -775,8 +776,18 @@ mod tests {
                     .contains("秘密 & whoami")
             );
             if api_type == ApiType::CodexCli {
+                assert_eq!(
+                    &spec.args[..3],
+                    &[
+                        OsString::from("--ask-for-approval"),
+                        OsString::from("never"),
+                        OsString::from("exec"),
+                    ],
+                    "approvalはCodexのグローバル引数なのでexecより前へ置く"
+                );
+                assert!(args.contains("--skip-git-repo-check"));
+                assert!(args.contains("--ephemeral"));
                 assert!(args.contains("--sandbox read-only"));
-                assert!(args.contains("--ask-for-approval never"));
             } else {
                 assert!(args.contains("--tools Read"));
                 assert!(args.contains("--permission-mode dontAsk"));
@@ -818,5 +829,51 @@ mod tests {
                 assert!(!agent.contains("Bash"));
             }
         }
+    }
+
+    #[test]
+    #[ignore = "ログイン済みCodex CLIで明示実行する実アカウントprobe"]
+    fn codex_cli_real_ocr_translate_explain_probe() {
+        use base64::Engine as _;
+
+        let mut p = profile(ApiType::CodexCli);
+        p.name = "Codex CLI real probe".into();
+
+        let translated = crate::llm_api::call(
+            &p,
+            &LlmRequest::text(
+                "Translate into Japanese. Return only the translation: Operational test succeeded.",
+            ),
+        )
+        .unwrap();
+        println!("translate: {}", translated.text);
+        assert!(translated.text.contains('成') || translated.text.contains('功'));
+
+        let explained = crate::llm_api::call(
+            &p,
+            &LlmRequest::text("Explain CPU in one short Japanese sentence. Include the term CPU."),
+        )
+        .unwrap();
+        println!("explain: {}", explained.text);
+        assert!(explained.text.contains("CPU"));
+
+        let image_path = std::env::var_os("FOCUS_TRANSLATOR_CODEX_TEST_IMAGE")
+            .map(PathBuf::from)
+            .expect("FOCUS_TRANSLATOR_CODEX_TEST_IMAGEにOCR用PNGを指定してください");
+        let image = std::fs::read(&image_path).unwrap();
+        let image_b64 = base64::engine::general_purpose::STANDARD.encode(image);
+        let ocr = crate::llm_api::call(
+            &p,
+            &LlmRequest {
+                prompt: "Read the attached image. Return only the visible text on one line.",
+                image_png_b64: Some(&image_b64),
+                json_mode: false,
+            },
+        )
+        .unwrap();
+        println!("ocr: {}", ocr.text);
+        let normalized = ocr.text.to_ascii_uppercase();
+        assert!(normalized.contains("FOCUS"));
+        assert!(normalized.contains("42"));
     }
 }
