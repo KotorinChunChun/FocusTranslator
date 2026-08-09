@@ -612,10 +612,10 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         // 種別名(「GitHub Models」等)が閉じた表示幅より長いため、ドロップダウン一覧の幅だけ広げる
         combo_set_dropped_width(combo(h, inst, cx + 188, y, 100, IDC_PROF_TYPE), 160);
         y += STEP;
-        label(h, inst, "API URL", lx, y + 2, 84);
+        label(h, inst, "接続先 / CLI", lx, y + 2, 84);
         edit(h, inst, cx, y, 288, IDC_PROF_URL);
         y += STEP;
-        label(h, inst, "APIキー", lx, y + 2, 84);
+        label(h, inst, "APIキー/認証", lx, y + 2, 84);
         // 「モデル名」の入力欄と幅を揃える
         password_edit(h, inst, cx, y, 174, IDC_PROF_KEY);
         // 「種別」コンボ・「解説プロンプト」ボタンと右端(cx+288)を揃える
@@ -1062,6 +1062,7 @@ fn ensure_local_llm_profile_if_ready(h: HWND) {
         model_name: crate::config::ApiType::LlamaCpp.default_model().into(),
         api_url: format!("http://localhost:{port}/v1/chat/completions"),
         api_key_enc: String::new(),
+        cli_path: String::new(),
         ocr_prompt: crate::config::DEFAULT_GEMINI_OCR_PROMPT.into(),
         translate_prompt: crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT.into(),
         explain_prompt: crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT.into(),
@@ -1241,7 +1242,7 @@ fn update_explanations(h: HWND) {
 }
 
 /// APIプロファイル種別のコンボ表示順 (IDC_PROF_TYPE の選択indexと対応)
-const API_TYPE_ORDER: [crate::config::ApiType; 10] = [
+const API_TYPE_ORDER: [crate::config::ApiType; 15] = [
     crate::config::ApiType::Gemini,
     crate::config::ApiType::OpenAI,
     crate::config::ApiType::Claude,
@@ -1252,8 +1253,13 @@ const API_TYPE_ORDER: [crate::config::ApiType; 10] = [
     crate::config::ApiType::NvidiaNim,
     crate::config::ApiType::Ollama,
     crate::config::ApiType::LmStudio,
+    crate::config::ApiType::CodexCli,
+    crate::config::ApiType::ClaudeCli,
+    crate::config::ApiType::CopilotCli,
+    crate::config::ApiType::GeminiCli,
+    crate::config::ApiType::KimiCli,
 ];
-const API_TYPE_DISP: [&str; 10] = [
+const API_TYPE_DISP: [&str; 15] = [
     "Gemini",
     "OpenAI",
     "Claude",
@@ -1264,6 +1270,11 @@ const API_TYPE_DISP: [&str; 10] = [
     "NVIDIA NIM",
     "Ollama",
     "LM Studio",
+    "Codex CLI",
+    "Claude CLI",
+    "GitHub Copilot CLI",
+    "Gemini CLI",
+    "Kimi CLI (K3)",
 ];
 
 fn api_type_index(t: &crate::config::ApiType) -> usize {
@@ -1319,11 +1330,62 @@ fn load_profile_to_ui(h: HWND, idx: usize) {
             set_ctl_text(h, IDC_PROF_NAME, &prof.name);
             combo_select(h, IDC_PROF_TYPE, api_type_index(&prof.api_type));
             set_ctl_text(h, IDC_PROF_MODEL, &prof.model_name);
-            set_ctl_text(h, IDC_PROF_URL, &prof.api_url);
+            set_ctl_text(
+                h,
+                IDC_PROF_URL,
+                if prof.api_type.is_cli() {
+                    &prof.cli_path
+                } else {
+                    &prof.api_url
+                },
+            );
             set_ctl_text(h, IDC_PROF_KEY, &prof.get_key());
             set_ctl_text(h, IDC_PROF_MAXTOK, &prof.max_tokens.to_string());
+            update_profile_kind_controls(h, &prof.api_type);
         }
     });
+}
+
+/// API種別ではURL/キー、CLI種別では実行ファイル/外部ログインを使うため入力欄の意味と
+/// 有効状態を切り替える。接続先欄は共用し、CLI時は空欄ならPATH自動検出とする。
+fn update_profile_kind_controls(h: HWND, api_type: &crate::config::ApiType) {
+    let is_cli = api_type.is_cli();
+    unsafe {
+        for (id, enabled) in [
+            (IDC_PROF_KEY, !is_cli),
+            (IDC_PROF_MAXTOK, !is_cli),
+            (IDC_PROF_KEY_URL, !api_type.key_url().is_empty()),
+        ] {
+            let _ = EnableWindow(
+                windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id)
+                    .unwrap_or_default(),
+                enabled,
+            );
+        }
+    }
+    set_ctl_text(
+        h,
+        IDC_PROF_KEY_URL,
+        if is_cli { "導入案内" } else { "キーを入手" },
+    );
+    if is_cli {
+        let status = PROFILES.with(|p| {
+            let sel = combo_sel(h, IDC_PROF_LIST);
+            p.borrow()
+                .get(sel)
+                .and_then(|prof| crate::llm_cli::resolve_executable(prof).ok())
+                .map(|path| {
+                    format!(
+                        "検出済み: {}",
+                        path.file_name().unwrap_or(path.as_os_str()).to_string_lossy()
+                    )
+                })
+                .unwrap_or_else(|| "CLI未検出".into())
+        });
+        set_ctl_text(h, IDC_PROF_CONN_STATUS, &status);
+    } else {
+        set_ctl_text(h, IDC_PROF_CONN_STATUS, "");
+    }
 }
 
 /// GGUFファイル選択ダイアログを開く (SPECv0.5.2追補: LM Studio等で導入済みのモデルを
@@ -1641,6 +1703,7 @@ fn start_profile_test_connection(h: HWND) {
     std::thread::spawn(move || {
         let result = crate::llm_api::check_connection(&prof);
         let (w, msg, fill): (usize, String, Option<String>) = match result {
+            Ok(r) if r.detail.is_some() => (1, r.detail.unwrap_or_default(), None),
             Ok(r) if r.model_ids.is_empty() => {
                 (1, "接続成功 (モデル一覧は空でした)".to_string(), None)
             }
@@ -1789,6 +1852,7 @@ fn create_new_profile(h: HWND) {
             name,
             api_type,
             api_key_enc: String::new(),
+            cli_path: String::new(),
             ocr_prompt: crate::config::DEFAULT_GEMINI_OCR_PROMPT.to_string(),
             translate_prompt: crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT.to_string(),
             explain_prompt: crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT.to_string(),
@@ -1849,11 +1913,20 @@ fn commit_profile_edit(h: HWND) {
         };
         let prof = &mut profiles[sel];
         prof.name = final_name.clone();
-        prof.api_type =
+        let api_type =
             API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)].clone();
+        prof.api_type = api_type.clone();
         prof.model_name = get_ctl_text(h, IDC_PROF_MODEL).trim().to_string();
-        prof.api_url = get_ctl_text(h, IDC_PROF_URL).trim().to_string();
-        prof.set_key(get_ctl_text(h, IDC_PROF_KEY).trim());
+        let location = get_ctl_text(h, IDC_PROF_URL).trim().to_string();
+        if api_type.is_cli() {
+            prof.cli_path = location;
+            prof.api_url.clear();
+            prof.set_key("");
+        } else {
+            prof.api_url = location;
+            prof.cli_path.clear();
+            prof.set_key(get_ctl_text(h, IDC_PROF_KEY).trim());
+        }
         prof.max_tokens = parse_max_tokens(h);
         Some((outcome, old_name, final_name))
     });
@@ -2383,7 +2456,11 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                                 [combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)];
                             set_ctl_text(h, IDC_PROF_MODEL, t.default_model());
                             set_ctl_text(h, IDC_PROF_URL, t.default_url());
+                            if t.is_cli() {
+                                set_ctl_text(h, IDC_PROF_KEY, "");
+                            }
                             commit_profile_edit(h);
+                            update_profile_kind_controls(h, t);
                         }
                     }
                 }

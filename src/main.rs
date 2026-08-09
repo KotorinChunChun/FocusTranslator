@@ -18,6 +18,7 @@ mod llama_install;
 mod llama_server;
 mod llama_variant_dialog;
 mod llm_api;
+mod llm_cli;
 mod logdb;
 mod logviewer;
 mod markdown;

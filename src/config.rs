@@ -30,6 +30,16 @@ pub enum ApiType {
     /// LM Studio (ローカルサーバ, OpenAI互換API `/v1/chat/completions`)。APIキー不要。
     /// モデル名は読み込み済みモデルのidに依存するため既定値は空欄 (SPECv0.5.5)。
     LmStudio,
+    /// ログイン済みのCodex CLIを非対話モードで呼び出す。
+    CodexCli,
+    /// ログイン済みのClaude Code CLIを非対話モードで呼び出す。
+    ClaudeCli,
+    /// ログイン済みのGitHub Copilot CLIを非対話モードで呼び出す。
+    CopilotCli,
+    /// ログイン済みのGemini CLIを非対話モードで呼び出す。
+    GeminiCli,
+    /// ログイン済みのKimi CLIを非対話モードで呼び出す。既定モデルはKimi K3。
+    KimiCli,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -40,6 +50,9 @@ pub struct ApiProfile {
     pub model_name: String,
     pub api_url: String,
     pub api_key_enc: String,
+    /// CLI種別の実行ファイル。空欄なら種別ごとのコマンド名をPATHから自動検出する。
+    /// API種別では使用しない。
+    pub cli_path: String,
     pub ocr_prompt: String,
     pub translate_prompt: String,
     pub explain_prompt: String,
@@ -110,6 +123,9 @@ impl ApiProfile {
     /// API URL/モデル名が未設定なら必ず失敗する。APIキーの空欄自体は許容するが、
     /// Gemini/Claude/ChatGPTの主要な公式URLではAPIキーが無いと必ず失敗するため許容しない。
     pub fn is_ready(&self) -> bool {
+        if self.api_type.is_cli() {
+            return crate::llm_cli::resolve_executable(self).is_ok();
+        }
         if self.api_url.trim().is_empty() || self.model_name.trim().is_empty() {
             return false;
         }
@@ -122,6 +138,28 @@ impl ApiProfile {
 
 /// プロバイダ種別ごとの既定モデル名と既定URL (設定UIの種別切替・マイグレーションで共用)
 impl ApiType {
+    pub fn is_cli(&self) -> bool {
+        matches!(
+            self,
+            ApiType::CodexCli
+                | ApiType::ClaudeCli
+                | ApiType::CopilotCli
+                | ApiType::GeminiCli
+                | ApiType::KimiCli
+        )
+    }
+
+    pub fn cli_command(&self) -> Option<&'static str> {
+        match self {
+            ApiType::CodexCli => Some("codex"),
+            ApiType::ClaudeCli => Some("claude"),
+            ApiType::CopilotCli => Some("copilot"),
+            ApiType::GeminiCli => Some("gemini"),
+            ApiType::KimiCli => Some("kimi"),
+            _ => None,
+        }
+    }
+
     pub fn default_model(&self) -> &'static str {
         match self {
             ApiType::Gemini => "gemini-3.6-flash",
@@ -135,6 +173,12 @@ impl ApiType {
             // ローカルサーバは導入済みモデルに依存するため既定値を決め打てない。空欄のまま
             // 「接続確認」ボタンで実際に導入されているモデルを調べてから入力してもらう。
             ApiType::Ollama | ApiType::LmStudio => "",
+            // CLI側の既定モデルを追従する。Kimiだけは要件でK3を明示指定する。
+            ApiType::CodexCli
+            | ApiType::ClaudeCli
+            | ApiType::CopilotCli
+            | ApiType::GeminiCli => "",
+            ApiType::KimiCli => "k3",
         }
     }
     pub fn default_url(&self) -> &'static str {
@@ -149,6 +193,11 @@ impl ApiType {
             ApiType::NvidiaNim => crate::llm_api::DEFAULT_NVIDIA_NIM_URL,
             ApiType::Ollama => crate::llm_api::DEFAULT_OLLAMA_URL,
             ApiType::LmStudio => crate::llm_api::DEFAULT_LMSTUDIO_URL,
+            ApiType::CodexCli
+            | ApiType::ClaudeCli
+            | ApiType::CopilotCli
+            | ApiType::GeminiCli
+            | ApiType::KimiCli => "",
         }
     }
 
@@ -165,6 +214,12 @@ impl ApiType {
             ApiType::GitHubModels => "https://github.com/settings/tokens",
             ApiType::NvidiaNim => "https://build.nvidia.com",
             ApiType::Ollama | ApiType::LmStudio => "",
+            ApiType::CodexCli => "https://developers.openai.com/codex/cli/",
+            ApiType::ClaudeCli => "https://code.claude.com/docs/en/overview",
+            ApiType::CopilotCli =>
+                "https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli",
+            ApiType::GeminiCli => "https://github.com/google-gemini/gemini-cli",
+            ApiType::KimiCli => "https://www.kimi.com/help/kimi-code/cli-getting-started",
         }
     }
 }
@@ -193,6 +248,8 @@ pub struct Config {
     
     // API Profile設定
     pub api_profiles: Vec<ApiProfile>,
+    /// v0.5.6のCLI既定プロファイルを一度だけ追加済みか。削除後に復活させないための印。
+    pub cli_profiles_seeded: bool,
     /// セッション中に実際に使用中のLLMプロファイル (チップ切替やキャプチャ開始で変わる)。
     pub active_api_profile: String,
     /// 既定LLMプロファイル (設定画面でのみ変更)。右Ctrl起動時に active_api_profile の初期値となる。
@@ -297,8 +354,9 @@ const OLD_EXPLAIN_PROMPT_V4: &str = "以下は、{{app_title}} というタイ�
 const OLD_EXPLAIN_PROMPT_V52: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されてている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されてているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
 
 /// 初回起動時・マイグレーション時に生成する既定LLMプロファイルの名前一覧
-pub const DEFAULT_PROFILE_NAMES: [&str; 4] =
-    ["Gemini", "GPT", "Claude", "LocalLLM"];
+pub const DEFAULT_PROFILE_NAMES: [&str; 4] = ["Gemini", "GPT", "Claude", "LocalLLM"];
+pub const DEFAULT_CLI_PROFILE_NAMES: [&str; 5] =
+    ["Codex CLI", "Claude CLI", "GitHub Copilot CLI", "Gemini CLI", "Kimi K3"];
 
 /// 既定LLMプロファイルをその名前から新規生成する (設定に同名プロファイルが無いときの
 /// 初期値/バックフィル用)。
@@ -312,6 +370,11 @@ fn seed_profile(name: &str) -> ApiProfile {
             ApiType::LlamaCpp.default_model().into(),
             ApiType::LlamaCpp.default_url().into(),
         ),
+        "Codex CLI" => (ApiType::CodexCli, String::new(), String::new()),
+        "Claude CLI" => (ApiType::ClaudeCli, String::new(), String::new()),
+        "GitHub Copilot CLI" => (ApiType::CopilotCli, String::new(), String::new()),
+        "Gemini CLI" => (ApiType::GeminiCli, String::new(), String::new()),
+        "Kimi K3" => (ApiType::KimiCli, ApiType::KimiCli.default_model().into(), String::new()),
         _ => (ApiType::Gemini, ApiType::Gemini.default_model().into(), ApiType::Gemini.default_url().into()),
     };
     ApiProfile {
@@ -320,6 +383,7 @@ fn seed_profile(name: &str) -> ApiProfile {
         model_name,
         api_url,
         api_key_enc: String::new(),
+        cli_path: String::new(),
         ocr_prompt: DEFAULT_GEMINI_OCR_PROMPT.into(),
         translate_prompt: DEFAULT_GEMINI_TRANSLATE_PROMPT.into(),
         explain_prompt: DEFAULT_GEMINI_EXPLAIN_PROMPT.into(),
@@ -363,6 +427,7 @@ impl Default for Config {
             deepl_key_enc: String::new(),
             google_key_enc: String::new(),
             api_profiles: Vec::new(),
+            cli_profiles_seeded: false,
             active_api_profile: "Gemini".into(),
             default_api_profile: "Gemini".into(),
             gemini_key_enc: String::new(),
@@ -447,6 +512,17 @@ impl Config {
                 }
             }
         }
+        // v0.5.6導入時にCLIプロファイルを一度だけ追加する。フラグを保存した後は、利用者が
+        // 削除したCLIプロファイルを次回起動で復活させない。
+        if !cfg.cli_profiles_seeded {
+            for name in DEFAULT_CLI_PROFILE_NAMES {
+                if !cfg.api_profiles.iter().any(|p| p.name == name) {
+                    cfg.api_profiles.push(seed_profile(name));
+                }
+            }
+            cfg.cli_profiles_seeded = true;
+            migrated = true;
+        }
         // プレースホルダ移行 (SPECv0.4 §7.1): 旧 {{text}} を {{original_text}} へ一度きりで書き換える。
         // 旧既定の解説プロンプトのままなら、新しい既定テンプレートへ差し替える。
         // default_api_profile 未設定の旧構成は、当時の active をコピーして確定・永続化する。
@@ -493,7 +569,7 @@ impl Config {
             // 旧バージョンは Gemini の api_url を空欄のまま保存していた。
             // 実行時は url_or() が既定URLへ解決するため動作に支障は無いが、設定画面の
             // 表示が空欄のままになるので、ここで種別の既定URLへ補完しておく。
-            if p.api_url.is_empty() {
+            if !p.api_type.is_cli() && p.api_url.is_empty() {
                 p.api_url = p.api_type.default_url().into();
                 migrated = true;
             }
@@ -679,8 +755,11 @@ mod tests {
 
         let cfg = Config::load();
 
-        assert_eq!(cfg.api_profiles.len(), 4, "不足していた既定プロファイルが補われる");
+        assert_eq!(cfg.api_profiles.len(), 9, "API/CLIの既定プロファイルが補われる");
         for name in DEFAULT_PROFILE_NAMES {
+            assert!(cfg.api_profiles.iter().any(|p| p.name == name), "{name} が存在する");
+        }
+        for name in DEFAULT_CLI_PROFILE_NAMES {
             assert!(cfg.api_profiles.iter().any(|p| p.name == name), "{name} が存在する");
         }
         let gemini = cfg.api_profiles.iter().find(|p| p.name == "Gemini").unwrap();
@@ -728,9 +807,12 @@ mod tests {
 
         let cfg = Config::load();
 
-        assert_eq!(cfg.api_profiles.len(), 3, "削除済みプロファイルは復活しない");
+        assert_eq!(cfg.api_profiles.len(), 8, "API削除状態を保ちつつCLI既定値を一度追加する");
         assert!(!cfg.api_profiles.iter().any(|p| p.name == "Gemini"), "Gemini は復活しない");
         assert_eq!(cfg.default_api_profile, "GPT", "既定は変更されない");
+        assert!(cfg.cli_profiles_seeded);
+        let cfg2 = Config::load();
+        assert_eq!(cfg2.api_profiles.len(), 8, "CLIプロファイルは二重追加されない");
 
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe {

@@ -46,6 +46,9 @@ pub struct LlmResponse {
 /// プロファイルのプロバイダ種別に応じてリクエストを組み立てて送信し、
 /// 応答本文テキストとトークン数を取り出す。
 pub fn call(prof: &ApiProfile, req: &LlmRequest) -> Result<LlmResponse, String> {
+    if prof.api_type.is_cli() {
+        return crate::llm_cli::call(prof, req);
+    }
     let key = prof.get_key();
     // APIキー要否はチップ表示判定 (ApiProfile::is_ready) と同一基準に統一する。
     // localhost判定だと、LAN上のサーバ等がチップ有効なのに呼び出しで失敗する齟齬が生じる。
@@ -63,12 +66,20 @@ pub fn call(prof: &ApiProfile, req: &LlmRequest) -> Result<LlmResponse, String> 
         | ApiType::Ollama
         | ApiType::LmStudio => call_openai(prof, &key, req),
         ApiType::Claude => call_claude(prof, &key, req),
+        ApiType::CodexCli
+        | ApiType::ClaudeCli
+        | ApiType::CopilotCli
+        | ApiType::GeminiCli
+        | ApiType::KimiCli => unreachable!("CLI種別は上で処理済み"),
     }
 }
 
 /// 送信ボディJSON文字列のみを組み立てる (APIキーは含まない: ヘッダーで送るため)。
 /// 実送信前にDBキャッシュを検索するために使う (SPECv0.4.8追補: 翻訳APIキャッシュ)。
 pub fn build_request_json(prof: &ApiProfile, req: &LlmRequest) -> String {
+    if prof.api_type.is_cli() {
+        return crate::llm_cli::build_request_json(prof, req);
+    }
     match prof.api_type {
         ApiType::Gemini => gemini_body(prof, req).to_string(),
         ApiType::OpenAI
@@ -80,6 +91,11 @@ pub fn build_request_json(prof: &ApiProfile, req: &LlmRequest) -> String {
         | ApiType::Ollama
         | ApiType::LmStudio => openai_body(prof, req).to_string(),
         ApiType::Claude => claude_body(prof, req).to_string(),
+        ApiType::CodexCli
+        | ApiType::ClaudeCli
+        | ApiType::CopilotCli
+        | ApiType::GeminiCli
+        | ApiType::KimiCli => unreachable!("CLI種別は上で処理済み"),
     }
 }
 
@@ -152,9 +168,17 @@ fn claude_body(prof: &ApiProfile, req: &LlmRequest) -> serde_json::Value {
 /// Gemini/Claudeはモデル一覧APIの形式・認証方式が異なるため未対応。
 pub struct ModelListResult {
     pub model_ids: Vec<String>,
+    /// CLI検出など、モデル一覧以外の成功内容を設定画面へ表示する場合に使う。
+    pub detail: Option<String>,
 }
 
 pub fn check_connection(prof: &ApiProfile) -> Result<ModelListResult, String> {
+    if prof.api_type.is_cli() {
+        return crate::llm_cli::check_connection(prof).map(|detail| ModelListResult {
+            model_ids: Vec::new(),
+            detail: Some(detail),
+        });
+    }
     if matches!(prof.api_type, ApiType::Gemini | ApiType::Claude) {
         return Err("このプロバイダの接続確認には対応していません".into());
     }
@@ -181,7 +205,7 @@ pub fn check_connection(prof: &ApiProfile) -> Result<ModelListResult, String> {
         .as_array()
         .map(|arr| arr.iter().filter_map(|m| m["id"].as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
-    Ok(ModelListResult { model_ids })
+    Ok(ModelListResult { model_ids, detail: None })
 }
 
 fn url_or<'a>(url: &'a str, default: &'a str) -> &'a str {
