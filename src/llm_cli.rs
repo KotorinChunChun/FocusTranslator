@@ -49,6 +49,7 @@ struct CommandSpec {
     executable: PathBuf,
     args: Vec<OsString>,
     envs: Vec<(OsString, OsString)>,
+    stdin_text: Option<String>,
     final_message: Option<PathBuf>,
 }
 
@@ -75,9 +76,10 @@ pub fn resolve_executable(prof: &ApiProfile) -> Result<PathBuf, String> {
                     .map_err(|e| format!("現在のフォルダを取得できません: {e}"))?
                     .join(p)
             };
-            return full.is_file().then_some(full).ok_or_else(|| {
-                format!("指定されたCLI実行ファイルが見つかりません: {configured}")
-            });
+            return full
+                .is_file()
+                .then_some(full)
+                .ok_or_else(|| format!("指定されたCLI実行ファイルが見つかりません: {configured}"));
         }
         return find_on_path(configured)
             .ok_or_else(|| format!("CLI実行ファイルがPATHに見つかりません: {configured}"));
@@ -162,7 +164,13 @@ pub fn call(prof: &ApiProfile, req: &LlmRequest<'_>) -> Result<LlmResponse, Stri
         }
         None => None,
     };
-    let spec = build_command(prof, executable, job.path(), image_path.as_deref(), req.prompt)?;
+    let spec = build_command(
+        prof,
+        executable,
+        job.path(),
+        image_path.as_deref(),
+        req.prompt,
+    )?;
     let out = run_process(&spec, job.path(), CLI_TIMEOUT)?;
     if !out.success {
         return Err(process_error(prof, &out));
@@ -199,6 +207,7 @@ pub fn check_connection(prof: &ApiProfile) -> Result<String, String> {
         executable,
         args: vec![OsString::from("--version")],
         envs: Vec::new(),
+        stdin_text: None,
         final_message: None,
     };
     let out = run_process(&spec, job.path(), CHECK_TIMEOUT)?;
@@ -231,11 +240,19 @@ fn prompt_with_image(api_type: &ApiType, prompt: &str, image: Option<&Path>) -> 
     )
 }
 
-fn push_model(args: &mut Vec<OsString>, flag: &str, model: &str) {
+fn push_model(args: &mut Vec<OsString>, flag: &str, model: &str) -> Result<(), String> {
     if !model.trim().is_empty() {
+        if !model
+            .trim()
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
+        {
+            return Err("CLIのモデル名には英数字と - _ . : / だけを使用してください".into());
+        }
         args.push(flag.into());
         args.push(model.trim().into());
     }
+    Ok(())
 }
 
 fn build_command(
@@ -247,7 +264,7 @@ fn build_command(
 ) -> Result<CommandSpec, String> {
     let effective_prompt = prompt_with_image(&prof.api_type, prompt, image);
     let mut envs = Vec::new();
-    let (args, final_message) = match prof.api_type {
+    let (args, stdin_text, final_message) = match prof.api_type {
         ApiType::CodexCli => {
             let final_path = work_dir.join("final.txt");
             let mut args: Vec<OsString> = vec![
@@ -263,47 +280,55 @@ fn build_command(
                 "-C".into(),
                 work_dir.as_os_str().to_owned(),
             ];
-            push_model(&mut args, "--model", &prof.model_name);
+            push_model(&mut args, "--model", &prof.model_name)?;
             if let Some(path) = image {
                 args.push("--image".into());
                 args.push(path.as_os_str().to_owned());
             }
-            args.push(effective_prompt.into());
-            (args, Some(final_path))
+            // `-` はプロンプトをstdinから読む指定。ユーザー文字列をコマンド引数へ入れない。
+            args.push("-".into());
+            (args, Some(effective_prompt), Some(final_path))
         }
         ApiType::ClaudeCli => {
             let mut args: Vec<OsString> = vec![
                 "--print".into(),
-                effective_prompt.into(),
                 "--output-format".into(),
                 "json".into(),
                 "--permission-mode".into(),
                 "dontAsk".into(),
                 "--no-session-persistence".into(),
                 "--tools".into(),
-                if image.is_some() { "Read".into() } else { "".into() },
+                if image.is_some() {
+                    "Read".into()
+                } else {
+                    "".into()
+                },
                 "--disallowedTools".into(),
                 "Bash,Write,Edit,WebFetch,WebSearch,Agent".into(),
             ];
-            push_model(&mut args, "--model", &prof.model_name);
-            (args, None)
+            push_model(&mut args, "--model", &prof.model_name)?;
+            (args, Some(effective_prompt), None)
         }
         ApiType::CopilotCli => {
+            // Copilot CLIは-pの引数が必須なので、ユーザー文字列は引数へ入れずread-onlyの
+            // 一時ファイルへ置く。固定プロンプトから@参照させる。
+            std::fs::write(work_dir.join("request.txt"), effective_prompt.as_bytes())
+                .map_err(|e| format!("Copilot CLI用の依頼ファイルを書き込めません: {e}"))?;
             let mut args: Vec<OsString> = vec![
                 "--prompt".into(),
-                effective_prompt.into(),
+                "@request.txt の依頼内容に回答してください。ファイル変更・コマンド実行・Webアクセスは禁止です。".into(),
                 "--silent".into(),
                 "--no-ask-user".into(),
                 "--allow-tool=read".into(),
                 "--deny-tool=shell,write,url,memory".into(),
             ];
-            push_model(&mut args, "--model", &prof.model_name);
-            (args, None)
+            push_model(&mut args, "--model", &prof.model_name)?;
+            (args, None, None)
         }
         ApiType::GeminiCli => {
             let mut args: Vec<OsString> = vec![
                 "--prompt".into(),
-                effective_prompt.into(),
+                "".into(),
                 "--output-format".into(),
                 "json".into(),
                 "--approval-mode".into(),
@@ -313,8 +338,8 @@ fn build_command(
                 args.push("--allowed-tools".into());
                 args.push("read_file".into());
             }
-            push_model(&mut args, "--model", &prof.model_name);
-            (args, None)
+            push_model(&mut args, "--model", &prof.model_name)?;
+            (args, Some(effective_prompt), None)
         }
         ApiType::KimiCli => {
             let agent_path = work_dir.join("focus-translator-agent.md");
@@ -327,17 +352,23 @@ fn build_command(
                 "--agent-file".into(),
                 agent_path.as_os_str().to_owned(),
                 "--prompt".into(),
-                effective_prompt.into(),
+                "".into(),
                 "--output-format".into(),
                 "stream-json".into(),
             ];
-            push_model(&mut args, "--model", &prof.model_name);
+            push_model(&mut args, "--model", &prof.model_name)?;
             envs.push(("KIMI_CODE_EXPERIMENTAL_FLAG".into(), "1".into()));
-            (args, None)
+            (args, Some(effective_prompt), None)
         }
         _ => return Err("CLI以外のプロファイルがCLI実行経路へ渡されました".into()),
     };
-    Ok(CommandSpec { executable, args, envs, final_message })
+    Ok(CommandSpec {
+        executable,
+        args,
+        envs,
+        stdin_text,
+        final_message,
+    })
 }
 
 fn run_process(spec: &CommandSpec, cwd: &Path, timeout: Duration) -> Result<ProcessOutput, String> {
@@ -347,11 +378,19 @@ fn run_process(spec: &CommandSpec, cwd: &Path, timeout: Duration) -> Result<Proc
         .map_err(|e| format!("CLI標準出力ファイルを作成できません: {e}"))?;
     let stderr_file = File::create(&stderr_path)
         .map_err(|e| format!("CLI標準エラーファイルを作成できません: {e}"))?;
+    let stdin = if let Some(text) = &spec.stdin_text {
+        let path = cwd.join("stdin.txt");
+        std::fs::write(&path, text.as_bytes())
+            .map_err(|e| format!("CLI標準入力ファイルを作成できません: {e}"))?;
+        Stdio::from(File::open(&path).map_err(|e| format!("CLI標準入力ファイルを開けません: {e}"))?)
+    } else {
+        Stdio::null()
+    };
     let mut command = Command::new(&spec.executable);
     command
         .args(&spec.args)
         .current_dir(cwd)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
         .env("NO_COLOR", "1")
@@ -364,12 +403,9 @@ fn run_process(spec: &CommandSpec, cwd: &Path, timeout: Duration) -> Result<Proc
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let mut child = command.spawn().map_err(|e| {
-        format!(
-            "CLIを起動できません ({}): {e}",
-            spec.executable.display()
-        )
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("CLIを起動できません ({}): {e}", spec.executable.display()))?;
     let start = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -399,7 +435,8 @@ fn run_process(spec: &CommandSpec, cwd: &Path, timeout: Duration) -> Result<Proc
 }
 
 fn read_limited(path: &Path) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|e| format!("{}を読み込めません: {e}", path.display()))?;
+    let mut file =
+        File::open(path).map_err(|e| format!("{}を読み込めません: {e}", path.display()))?;
     let mut bytes = Vec::new();
     file.by_ref()
         .take(MAX_CAPTURE_BYTES)
@@ -417,14 +454,21 @@ fn process_error(prof: &ApiProfile, out: &ProcessOutput) -> String {
     format!(
         "{}の実行に失敗しました (終了コード: {}): {}",
         prof.name,
-        out.code.map(|c| c.to_string()).unwrap_or_else(|| "不明".into()),
+        out.code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "不明".into()),
         compact_message(detail, 1200)
     )
 }
 
 fn compact_message(text: &str, max_chars: usize) -> String {
     let clean = strip_ansi(text).replace('\r', "");
-    let joined = clean.lines().map(str::trim).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+    let joined = clean
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut out: String = joined.chars().take(max_chars).collect();
     if joined.chars().count() > max_chars {
         out.push('…');
@@ -466,10 +510,37 @@ fn parse_output(api_type: &ApiType, raw: &str) -> (String, Option<i64>, Option<i
         }
         update_usage(value, &mut tokens_in, &mut tokens_out);
     }
+    if matches!(api_type, ApiType::GeminiCli)
+        && let Some((gemini_in, gemini_out)) = values.last().and_then(gemini_usage)
+    {
+        tokens_in = Some(gemini_in);
+        tokens_out = Some(gemini_out);
+    }
     if text.is_empty() && values.is_empty() {
         text = raw.trim().to_string();
     }
     (text, tokens_in, tokens_out)
+}
+
+fn gemini_usage(value: &serde_json::Value) -> Option<(i64, i64)> {
+    let models = value.get("stats")?.get("models")?.as_object()?;
+    let mut input = 0;
+    let mut output = 0;
+    let mut found = false;
+    for model in models.values() {
+        let Some(tokens) = model.get("tokens") else {
+            continue;
+        };
+        if let Some(n) = tokens.get("prompt").and_then(|v| v.as_i64()) {
+            input += n;
+            found = true;
+        }
+        if let Some(n) = tokens.get("candidates").and_then(|v| v.as_i64()) {
+            output += n;
+            found = true;
+        }
+    }
+    found.then_some((input, output))
 }
 
 fn parse_json_values(raw: &str) -> Vec<serde_json::Value> {
@@ -517,10 +588,7 @@ fn content_text(value: &serde_json::Value) -> Option<String> {
         return Some(s.to_string());
     }
     if let Some(obj) = value.as_object() {
-        return obj
-            .get("text")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        return obj.get("text").and_then(|v| v.as_str()).map(str::to_string);
     }
     let parts = value.as_array()?;
     let text = parts
@@ -607,9 +675,22 @@ mod tests {
     }
 
     #[test]
+    fn gemini_jsonは複数モデルのusageを合算する() {
+        let raw = r#"{"response":"結果","stats":{"models":{"pro":{"tokens":{"prompt":10,"candidates":3}},"flash":{"tokens":{"prompt":5,"candidates":2}}}}}"#;
+        assert_eq!(
+            parse_output(&ApiType::GeminiCli, raw),
+            ("結果".into(), Some(15), Some(5))
+        );
+    }
+
+    #[test]
     fn cliキャッシュキーは画像とモデルを含む() {
         let mut p = profile(ApiType::CodexCli);
-        let req = LlmRequest { prompt: "OCR", image_png_b64: Some("AAAA"), json_mode: true };
+        let req = LlmRequest {
+            prompt: "OCR",
+            image_png_b64: Some("AAAA"),
+            json_mode: true,
+        };
         let a = build_request_json(&p, &req);
         p.model_name = "別モデル".into();
         let b = build_request_json(&p, &req);
@@ -620,24 +701,122 @@ mod tests {
     #[test]
     fn copilotは読み取りだけを許可し副作用ツールを拒否する() {
         let p = profile(ApiType::CopilotCli);
-        let cwd = Path::new("C:\\Temp\\ft-cli-test");
-        let spec = build_command(&p, "copilot.exe".into(), cwd, Some(&cwd.join("input.png")), "OCR")
-            .unwrap();
-        let args = spec.args.iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ");
+        let job = JobDir::create().unwrap();
+        let image = job.path().join("input.png");
+        let spec =
+            build_command(&p, "copilot.exe".into(), job.path(), Some(&image), "OCR").unwrap();
+        let args = spec
+            .args
+            .iter()
+            .map(|s| s.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(args.contains("--allow-tool=read"));
         assert!(args.contains("--deny-tool=shell,write,url,memory"));
-        assert!(args.contains("@input.png"));
+        assert!(
+            !args.contains("OCR"),
+            "ユーザー文字列をコマンド引数へ入れない"
+        );
+        let request = std::fs::read_to_string(job.path().join("request.txt")).unwrap();
+        assert!(request.contains("OCR"));
+        assert!(request.contains("@input.png"));
     }
 
     #[test]
     fn ansiエスケープをエラー表示から除去する() {
-        assert_eq!(compact_message("\u{1b}[31merror\u{1b}[0m\n detail", 100), "error detail");
+        assert_eq!(
+            compact_message("\u{1b}[31merror\u{1b}[0m\n detail", 100),
+            "error detail"
+        );
     }
 
     #[test]
     fn 手動指定した実行ファイルを優先する() {
         let mut p = profile(ApiType::ClaudeCli);
         p.cli_path = std::env::current_exe().unwrap().display().to_string();
-        assert_eq!(resolve_executable(&p).unwrap(), std::env::current_exe().unwrap());
+        assert_eq!(
+            resolve_executable(&p).unwrap(),
+            std::env::current_exe().unwrap()
+        );
+    }
+
+    #[test]
+    fn モデル名のコマンド注入文字を拒否する() {
+        let mut args = Vec::new();
+        assert!(push_model(&mut args, "--model", "safe/model-1.0").is_ok());
+        assert!(push_model(&mut args, "--model", "model & whoami").is_err());
+    }
+
+    #[test]
+    fn codexとclaudeはプロンプトをstdinに置き読み取り権限へ制限する() {
+        let job = JobDir::create().unwrap();
+        let image = job.path().join("input.png");
+        for api_type in [ApiType::CodexCli, ApiType::ClaudeCli] {
+            let p = profile(api_type.clone());
+            let spec = build_command(
+                &p,
+                "cli.exe".into(),
+                job.path(),
+                Some(&image),
+                "秘密 & whoami",
+            )
+            .unwrap();
+            let args = spec
+                .args
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(!args.contains("秘密"));
+            assert!(
+                spec.stdin_text
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("秘密 & whoami")
+            );
+            if api_type == ApiType::CodexCli {
+                assert!(args.contains("--sandbox read-only"));
+                assert!(args.contains("--ask-for-approval never"));
+            } else {
+                assert!(args.contains("--tools Read"));
+                assert!(args.contains("--permission-mode dontAsk"));
+            }
+        }
+    }
+
+    #[test]
+    fn geminiとkimiもプロンプトをstdinに置き副作用ツールを許可しない() {
+        let job = JobDir::create().unwrap();
+        let image = job.path().join("input.png");
+        for api_type in [ApiType::GeminiCli, ApiType::KimiCli] {
+            let mut p = profile(api_type.clone());
+            if api_type == ApiType::KimiCli {
+                p.model_name = "k3".into();
+            }
+            let spec =
+                build_command(&p, "cli.exe".into(), job.path(), Some(&image), "画像をOCR").unwrap();
+            let args = spec
+                .args
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(!args.contains("画像をOCR"));
+            assert!(
+                spec.stdin_text
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("画像をOCR")
+            );
+            if api_type == ApiType::GeminiCli {
+                assert!(args.contains("--allowed-tools read_file"));
+            } else {
+                let agent =
+                    std::fs::read_to_string(job.path().join("focus-translator-agent.md")).unwrap();
+                assert!(agent.contains("- ReadMediaFile"));
+                assert!(agent.contains("subagents: []"));
+                assert!(!agent.contains("Bash"));
+            }
+        }
     }
 }

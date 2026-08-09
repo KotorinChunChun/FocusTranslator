@@ -338,8 +338,7 @@ pub fn llm_ocr_translate(
         json_mode: true,
     })?;
 
-    let inner: serde_json::Value =
-        serde_json::from_str(res.text.trim()).map_err(|_| "LLM応答のJSON解析に失敗".to_string())?;
+    let inner = parse_llm_ocr_json(&res.text)?;
     let source = inner.get("source").and_then(|s| s.as_str()).unwrap_or("").trim().to_string();
     let translation = inner.get("translation").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
     if source.is_empty() {
@@ -353,4 +352,59 @@ pub fn llm_ocr_translate(
         tokens_out: res.tokens_out,
         focus_line: None,
     })
+}
+
+/// CLI経由ではAPIのJSONモードを強制できないため、指示どおりのJSONがMarkdownコード
+/// フェンスで包まれて返る場合も受け入れる。最終的な中身は従来どおりserde_jsonで検証する。
+fn parse_llm_ocr_json(text: &str) -> Result<serde_json::Value, String> {
+    let trimmed = text.trim();
+    if let Ok(value) = serde_json::from_str(trimmed) {
+        return Ok(value);
+    }
+    if let Some(after_fence) = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```JSON"))
+        .or_else(|| trimmed.strip_prefix("```"))
+        && let Some(body) = after_fence.strip_suffix("```")
+        && let Ok(value) = serde_json::from_str(body.trim())
+    {
+        return Ok(value);
+    }
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
+        && start < end
+        && let Ok(value) = serde_json::from_str(&trimmed[start..=end])
+    {
+        return Ok(value);
+    }
+    Err("LLM応答のJSON解析に失敗".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_llm_ocr_json;
+
+    #[test]
+    fn llm_ocrの素のjsonを解析する() {
+        let value = parse_llm_ocr_json(r#"{"source":"Hello","translation":"こんにちは"}"#)
+            .unwrap();
+        assert_eq!(value["source"], "Hello");
+    }
+
+    #[test]
+    fn llm_ocrのmarkdownフェンス付きjsonを解析する() {
+        let value = parse_llm_ocr_json(
+            "```json\n{\"source\":\"Hello\",\"translation\":\"こんにちは\"}\n```",
+        )
+        .unwrap();
+        assert_eq!(value["translation"], "こんにちは");
+    }
+
+    #[test]
+    fn llm_ocrの説明に囲まれたjsonを解析する() {
+        let value = parse_llm_ocr_json(
+            "結果です。\n{\"source\":\"Hello\",\"translation\":\"こんにちは\"}\n以上です。",
+        )
+        .unwrap();
+        assert_eq!(value["source"], "Hello");
+    }
 }
