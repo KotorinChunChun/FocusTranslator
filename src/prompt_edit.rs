@@ -7,25 +7,23 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    COLOR_WINDOW, HBRUSH,
-};
+use windows::Win32::Graphics::Gdi::{COLOR_WINDOW, HBRUSH};
 use windows::Win32::UI::Controls::{
-    INITCOMMONCONTROLSEX, InitCommonControlsEx, ICC_LISTVIEW_CLASSES, LVCF_SUBITEM, LVCF_TEXT,
+    ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_SUBITEM, LVCF_TEXT,
     LVCF_WIDTH, LVCOLUMNW, LVIF_TEXT, LVITEMW, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVS_EX_FULLROWSELECT, LVS_REPORT,
-    LVS_SHOWSELALWAYS, LVS_SINGLESEL, NMHDR, NMITEMACTIVATE, NM_DBLCLK,
+    LVS_SHOWSELALWAYS, LVS_SINGLESEL, NM_DBLCLK, NMHDR, NMITEMACTIVATE,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
     CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetDlgItem,
-    GetWindowLongPtrW, HMENU, HWND_TOPMOST, IDC_ARROW, IDYES, IsWindow, LoadCursorW,
-    MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW, PostMessageW, RegisterClassW, SW_SHOW,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_APPWINDOW,
-    WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetDlgItem, GetWindowLongPtrW,
+    HMENU, HWND_TOPMOST, IDC_ARROW, IDYES, IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO,
+    MessageBoxW, PostMessageW, RegisterClassW, SW_SHOW, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_NOTIFY, WM_SETFONT,
+    WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_APPWINDOW, WS_EX_CLIENTEDGE, WS_EX_TOPMOST,
+    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -134,12 +132,18 @@ pub fn is_open() -> bool {
 /// GWLP_USERDATA に格納した State への可変参照 (メッセージループは単一スレッド前提)
 unsafe fn state_mut<'a>(h: HWND) -> Option<&'a mut State> {
     let ptr = unsafe { GetWindowLongPtrW(h, GWLP_USERDATA) };
-    if ptr == 0 { None } else { Some(unsafe { &mut *(ptr as *mut State) }) }
+    if ptr == 0 {
+        None
+    } else {
+        Some(unsafe { &mut *(ptr as *mut State) })
+    }
 }
 
 /// テンプレートが未保存なら破棄確認を出す (§4.6)。true = 続行してよい。
 fn confirm_discard_template(h: HWND) -> bool {
-    let dirty = unsafe { state_mut(h) }.map(|s| s.tmpl_dirty).unwrap_or(false);
+    let dirty = unsafe { state_mut(h) }
+        .map(|s| s.tmpl_dirty)
+        .unwrap_or(false);
     if !dirty {
         return true;
     }
@@ -231,7 +235,10 @@ fn var_value(name: &str, cfg: &Config, ctx: &PromptContext) -> String {
         _ => String::new(),
     };
     // 長い値は1行に収まるよう先頭50文字+「…」で省略表示する
-    let one_line: String = v.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+    let one_line: String = v
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
     if one_line.chars().count() > 50 {
         one_line.chars().take(50).collect::<String>() + "…"
     } else {
@@ -249,7 +256,12 @@ fn lv_add_col(lvh: HWND, idx: i32, text: &str, width: i32) {
             iSubItem: idx,
             ..Default::default()
         };
-        SendMessageW(lvh, LVM_INSERTCOLUMNW, Some(WPARAM(idx as usize)), Some(LPARAM(&mut col as *mut _ as isize)));
+        SendMessageW(
+            lvh,
+            LVM_INSERTCOLUMNW,
+            Some(WPARAM(idx as usize)),
+            Some(LPARAM(&mut col as *mut _ as isize)),
+        );
     }
 }
 
@@ -263,7 +275,12 @@ fn lv_add_row(lvh: HWND, row: i32, cols: &[String]) {
             pszText: windows::core::PWSTR(first.as_ptr() as *mut _),
             ..Default::default()
         };
-        SendMessageW(lvh, LVM_INSERTITEMW, Some(WPARAM(0)), Some(LPARAM(&mut item as *mut _ as isize)));
+        SendMessageW(
+            lvh,
+            LVM_INSERTITEMW,
+            Some(WPARAM(0)),
+            Some(LPARAM(&mut item as *mut _ as isize)),
+        );
         for (i, c) in cols.iter().enumerate().skip(1) {
             let wide = to_wide(c);
             let mut sub = LVITEMW {
@@ -273,7 +290,12 @@ fn lv_add_row(lvh: HWND, row: i32, cols: &[String]) {
                 pszText: windows::core::PWSTR(wide.as_ptr() as *mut _),
                 ..Default::default()
             };
-            SendMessageW(lvh, LVM_SETITEMTEXTW, Some(WPARAM(row as usize)), Some(LPARAM(&mut sub as *mut _ as isize)));
+            SendMessageW(
+                lvh,
+                LVM_SETITEMTEXTW,
+                Some(WPARAM(row as usize)),
+                Some(LPARAM(&mut sub as *mut _ as isize)),
+            );
         }
     }
 }
@@ -306,8 +328,12 @@ fn regenerate_preview(h: HWND) {
 
 /// ペイン2へ profiles[idx] のテンプレートを読み込む
 fn load_template(h: HWND, idx: usize) {
-    let Some(s) = (unsafe { state_mut(h) }) else { return };
-    let Some(tmpl) = s.profiles.get(idx).map(|p| p.template.clone()) else { return };
+    let Some(s) = (unsafe { state_mut(h) }) else {
+        return;
+    };
+    let Some(tmpl) = s.profiles.get(idx).map(|p| p.template.clone()) else {
+        return;
+    };
     s.cur_idx = idx;
     set_text_programmatic(h, IDC_TEMPLATE, &tmpl);
     if let Some(s) = unsafe { state_mut(h) } {
@@ -434,7 +460,10 @@ fn build_controls(h: HWND, inst: HINSTANCE, mode_b: bool) {
             w!("COMBOBOX"),
             None,
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WINDOW_STYLE(CBS_DROPDOWNLIST),
-            0, 0, 100, 200,
+            0,
+            0,
+            100,
+            200,
             Some(h),
             Some(HMENU(IDC_PROFILE as usize as *mut c_void)),
             Some(inst),
@@ -446,9 +475,14 @@ fn build_controls(h: HWND, inst: HINSTANCE, mode_b: bool) {
             WS_EX_CLIENTEDGE,
             w!("SysListView32"),
             None,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_TABSTOP
                 | WINDOW_STYLE(LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS),
-            0, 0, 100, 100,
+            0,
+            0,
+            100,
+            100,
             Some(h),
             Some(HMENU(IDC_VARLIST as usize as *mut c_void)),
             Some(inst),
@@ -469,7 +503,10 @@ fn build_controls(h: HWND, inst: HINSTANCE, mode_b: bool) {
                 w!("STATIC"),
                 text,
                 WS_CHILD | WS_VISIBLE,
-                0, 0, 100, LBL_H,
+                0,
+                0,
+                100,
+                LBL_H,
                 Some(h),
                 Some(HMENU(id as usize as *mut c_void)),
                 Some(inst),
@@ -482,9 +519,16 @@ fn build_controls(h: HWND, inst: HINSTANCE, mode_b: bool) {
                 WS_EX_CLIENTEDGE,
                 w!("EDIT"),
                 None,
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | WS_VSCROLL
+                WS_CHILD
+                    | WS_VISIBLE
+                    | WS_BORDER
+                    | WS_TABSTOP
+                    | WS_VSCROLL
                     | WINDOW_STYLE(ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN),
-                0, 0, 100, 100,
+                0,
+                0,
+                100,
+                100,
                 Some(h),
                 Some(HMENU(id as usize as *mut c_void)),
                 Some(inst),
@@ -498,7 +542,10 @@ fn build_controls(h: HWND, inst: HINSTANCE, mode_b: bool) {
                 w!("BUTTON"),
                 text,
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                0, 0, BTN_W, BTN_H,
+                0,
+                0,
+                BTN_W,
+                BTN_H,
                 Some(h),
                 Some(HMENU(id as usize as *mut c_void)),
                 Some(inst),
@@ -524,7 +571,12 @@ fn build_controls(h: HWND, inst: HINSTANCE, mode_b: bool) {
 
         let font = crate::ui_helpers::make_font(14, false);
         for ctl in ctls {
-            let _ = SendMessageW(ctl, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(0)));
+            let _ = SendMessageW(
+                ctl,
+                WM_SETFONT,
+                Some(WPARAM(font.0 as usize)),
+                Some(LPARAM(0)),
+            );
         }
     }
 }
@@ -532,15 +584,27 @@ fn build_controls(h: HWND, inst: HINSTANCE, mode_b: bool) {
 /// プロファイルコンボへ選択肢を投入する
 fn populate_profiles(h: HWND, active_idx: usize) {
     unsafe {
-        let Ok(combo) = GetDlgItem(Some(h), IDC_PROFILE) else { return };
+        let Ok(combo) = GetDlgItem(Some(h), IDC_PROFILE) else {
+            return;
+        };
         let names: Vec<String> = state_mut(h)
             .map(|s| s.profiles.iter().map(|p| p.name.clone()).collect())
             .unwrap_or_default();
         for name in &names {
             let wide = to_wide(name);
-            SendMessageW(combo, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide.as_ptr() as isize)));
+            SendMessageW(
+                combo,
+                CB_ADDSTRING,
+                Some(WPARAM(0)),
+                Some(LPARAM(wide.as_ptr() as isize)),
+            );
         }
-        SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(active_idx)), Some(LPARAM(0)));
+        SendMessageW(
+            combo,
+            CB_SETCURSEL,
+            Some(WPARAM(active_idx)),
+            Some(LPARAM(0)),
+        );
     }
 }
 
@@ -553,7 +617,9 @@ fn populate_vars(h: HWND, mode_b: bool) {
         lv_add_col(lv, 2, "値", 150);
     }
     let cfg = Config::load();
-    let ctx = unsafe { state_mut(h) }.and_then(|s| s.ctx.clone()).unwrap_or_default();
+    let ctx = unsafe { state_mut(h) }
+        .and_then(|s| s.ctx.clone())
+        .unwrap_or_default();
     for (i, (name, desc)) in VARS.iter().enumerate() {
         let mut cols = vec![format!("{{{{{name}}}}}"), desc.to_string()];
         if mode_b {
@@ -597,7 +663,13 @@ fn layout(h: HWND, w: i32, ht: i32) {
     // ペイン1
     place(IDC_PROFILE, PAD, PAD, pane1_w, 200);
     let lv_top = PAD + COMBO_H + 6;
-    place(IDC_VARLIST, PAD, lv_top, pane1_w, (ht - lv_top - PAD).max(50));
+    place(
+        IDC_VARLIST,
+        PAD,
+        lv_top,
+        pane1_w,
+        (ht - lv_top - PAD).max(50),
+    );
     // ペイン2
     place(IDC_LBL_TEMPLATE, x2, PAD, pane2_w, LBL_H);
     place(IDC_TEMPLATE, x2, edit_top, pane2_w, edit_h);
@@ -606,7 +678,13 @@ fn layout(h: HWND, w: i32, ht: i32) {
     if mode_b {
         place(IDC_LBL_PREVIEW, pane3_x, PAD, pane3_w, LBL_H);
         place(IDC_PREVIEW, pane3_x, edit_top, pane3_w, edit_h);
-        place(IDC_REGEN, pane3_x + pane3_w - BTN_W * 2 - 8, btn_y, BTN_W, BTN_H);
+        place(
+            IDC_REGEN,
+            pane3_x + pane3_w - BTN_W * 2 - 8,
+            btn_y,
+            BTN_W,
+            BTN_H,
+        );
         place(IDC_SUBMIT, pane3_x + pane3_w - BTN_W, btn_y, BTN_W, BTN_H);
     }
 }
@@ -615,11 +693,14 @@ fn layout(h: HWND, w: i32, ht: i32) {
 fn handle_save(h: HWND) {
     let idx = unsafe { state_mut(h) }.map(|s| s.cur_idx).unwrap_or(0);
     let tmpl = get_multiline_text(h, IDC_TEMPLATE);
-    let Some(name) = unsafe { state_mut(h) }.and_then(|s| s.profiles.get(idx).map(|p| p.name.clone()))
+    let Some(name) =
+        unsafe { state_mut(h) }.and_then(|s| s.profiles.get(idx).map(|p| p.name.clone()))
     else {
         return;
     };
-    let ok = unsafe { state_mut(h) }.map(|s| (s.on_save)(&name, &tmpl)).unwrap_or(false);
+    let ok = unsafe { state_mut(h) }
+        .map(|s| (s.on_save)(&name, &tmpl))
+        .unwrap_or(false);
     if ok {
         if let Some(s) = unsafe { state_mut(h) } {
             if let Some(p) = s.profiles.get_mut(idx) {
@@ -631,7 +712,9 @@ fn handle_save(h: HWND) {
         unsafe {
             MessageBoxW(
                 Some(h),
-                w!("該当プロファイルが見つからないため保存できませんでした。\n設定画面で削除された可能性があります。"),
+                w!(
+                    "該当プロファイルが見つからないため保存できませんでした。\n設定画面で削除された可能性があります。"
+                ),
                 crate::util::display_name_pcwstr(),
                 MB_OK,
             );
@@ -641,7 +724,9 @@ fn handle_save(h: HWND) {
 
 /// 再生成ボタン (§4.4): プレビューが手編集されている場合のみ破棄確認を出す
 fn handle_regen(h: HWND) {
-    let dirty = unsafe { state_mut(h) }.map(|s| s.preview_dirty).unwrap_or(false);
+    let dirty = unsafe { state_mut(h) }
+        .map(|s| s.preview_dirty)
+        .unwrap_or(false);
     if dirty {
         let r = unsafe {
             MessageBoxW(
@@ -664,9 +749,15 @@ fn handle_submit(h: HWND) {
     if text.is_empty() {
         return;
     }
-    let Some(s) = (unsafe { state_mut(h) }) else { return };
+    let Some(s) = (unsafe { state_mut(h) }) else {
+        return;
+    };
     let Some(cb) = s.on_submit.take() else { return };
-    let profile = s.profiles.get(s.cur_idx).map(|p| p.name.clone()).unwrap_or_default();
+    let profile = s
+        .profiles
+        .get(s.cur_idx)
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
     cb(text, profile);
     // 送信後は未保存テンプレートがあっても確認せず閉じる (送信が主目的のため)
     if let Some(s) = unsafe { state_mut(h) } {
@@ -710,7 +801,12 @@ fn handle_var_dblclk(h: HWND, item: i32) {
         if let Ok(edit) = GetDlgItem(Some(h), IDC_TEMPLATE) {
             let wide = to_wide(&text);
             // EM_REPLACESEL は EN_CHANGE を発火するのでダーティ管理は共通処理に任せる
-            SendMessageW(edit, EM_REPLACESEL, Some(WPARAM(1)), Some(LPARAM(wide.as_ptr() as isize)));
+            SendMessageW(
+                edit,
+                EM_REPLACESEL,
+                Some(WPARAM(1)),
+                Some(LPARAM(wide.as_ptr() as isize)),
+            );
             let _ = SetFocus(Some(edit));
         }
     }

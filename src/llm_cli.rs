@@ -200,7 +200,7 @@ pub fn call(prof: &ApiProfile, req: &LlmRequest<'_>) -> Result<LlmResponse, Stri
 }
 
 /// APIの疎通確認と異なりクォータを消費せず、実行ファイルとバージョン表示だけを確認する。
-pub fn check_connection(prof: &ApiProfile) -> Result<String, String> {
+pub fn check_connection(prof: &ApiProfile) -> Result<(String, Vec<String>), String> {
     let executable = resolve_executable(prof)?;
     let job = JobDir::create()?;
     let spec = CommandSpec {
@@ -220,11 +220,167 @@ pub fn check_connection(prof: &ApiProfile) -> Result<String, String> {
         out.stdout.trim()
     };
     let version = compact_message(version, 180);
-    Ok(if version.is_empty() {
+    let detail = if version.is_empty() {
         "CLI検出成功（ログイン状態は初回実行時に確認します）".into()
     } else {
         format!("CLI検出成功: {version}（ログイン状態は初回実行時に確認）")
-    })
+    };
+    let models = discover_models(prof, &spec.executable, job.path());
+    Ok((detail, models))
+}
+
+/// CLIが提供するモデル一覧を優先し、一覧用コマンドが無い／失敗したCLIは公式候補を返す。
+fn discover_models(prof: &ApiProfile, executable: &Path, cwd: &Path) -> Vec<String> {
+    let fallback = fallback_models(&prof.api_type);
+    let args: Option<Vec<OsString>> = match prof.api_type {
+        ApiType::CodexCli => Some(vec!["debug".into(), "models".into()]),
+        ApiType::CopilotCli => Some(vec!["help".into()]),
+        ApiType::KimiCli => Some(vec!["provider".into(), "list".into(), "--json".into()]),
+        ApiType::ClaudeCli | ApiType::GeminiCli => None,
+        _ => None,
+    };
+    let Some(args) = args else {
+        return fallback;
+    };
+    let spec = CommandSpec {
+        executable: executable.to_path_buf(),
+        args,
+        envs: Vec::new(),
+        stdin_text: None,
+        final_message: None,
+    };
+    let Ok(out) = run_process(&spec, cwd, CHECK_TIMEOUT) else {
+        return fallback;
+    };
+    if !out.success {
+        return fallback;
+    }
+    let mut models = match prof.api_type {
+        ApiType::CodexCli => parse_codex_models(&out.stdout),
+        ApiType::CopilotCli => fallback
+            .iter()
+            .filter(|model| {
+                out.stdout.contains(model.as_str()) || out.stderr.contains(model.as_str())
+            })
+            .cloned()
+            .collect(),
+        ApiType::KimiCli => parse_kimi_models(&out.stdout),
+        _ => Vec::new(),
+    };
+    if models.is_empty() {
+        models = fallback;
+    }
+    sort_dedup(&mut models);
+    models
+}
+
+pub fn fallback_models(api_type: &ApiType) -> Vec<String> {
+    let items: &[&str] = match api_type {
+        ApiType::CodexCli => &["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+        ApiType::ClaudeCli => &["haiku", "sonnet", "opus", "default"],
+        ApiType::CopilotCli => &[
+            "claude-haiku-4.5",
+            "mai-code-1-flash",
+            "gemini-3.5-flash",
+            "gemini-3.6-flash",
+            "claude-sonnet-4.6",
+            "gpt-5.3-codex",
+            "gpt-5.4",
+        ],
+        ApiType::GeminiCli => &[
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-flash",
+            "gemini-3-flash-preview",
+            "gemini-2.5-pro",
+            "gemini-3-pro-preview",
+        ],
+        ApiType::KimiCli => &["k3-256k", "k3", "kimi-k2.7-code"],
+        _ => &[],
+    };
+    items.iter().map(|s| (*s).to_string()).collect()
+}
+
+fn parse_codex_models(raw: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    value["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"].as_str().unwrap_or("list") == "list")
+        .filter_map(|m| m["slug"].as_str().map(str::to_string))
+        .collect()
+}
+
+fn parse_kimi_models(raw: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    find_kimi_model_containers(&value, &mut out);
+    out
+}
+
+fn find_kimi_model_containers(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                if key == "models" {
+                    collect_direct_kimi_models(child, out);
+                } else {
+                    find_kimi_model_containers(child, out);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                find_kimi_model_containers(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `kimi provider list --json` の models 直下だけを読む。
+/// capabilities 等の入れ子にある文字列をモデル名として誤収集しない。
+fn collect_direct_kimi_models(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(models) => {
+            for (alias, model) in models {
+                out.push(alias.clone());
+                if let serde_json::Value::Object(fields) = model {
+                    for key in ["id", "name", "model", "alias"] {
+                        if let Some(s) = fields.get(key).and_then(serde_json::Value::as_str) {
+                            out.push(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(models) => {
+            for model in models {
+                match model {
+                    serde_json::Value::String(s) => out.push(s.clone()),
+                    serde_json::Value::Object(fields) => {
+                        for key in ["id", "name", "model", "alias"] {
+                            if let Some(s) = fields.get(key).and_then(serde_json::Value::as_str) {
+                                out.push(s.to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sort_dedup(models: &mut Vec<String>) {
+    models.retain(|s| !s.trim().is_empty() && s.len() <= 160);
+    models.sort_by_key(|s| s.to_ascii_lowercase());
+    models.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
 }
 
 fn prompt_with_image(api_type: &ApiType, prompt: &str, image: Option<&Path>) -> String {
@@ -682,6 +838,20 @@ mod tests {
             parse_output(&ApiType::GeminiCli, raw),
             ("結果".into(), Some(15), Some(5))
         );
+    }
+
+    #[test]
+    fn codexモデル一覧は表示対象だけを取得する() {
+        let raw = r#"{"models":[{"slug":"gpt-light","visibility":"list"},{"slug":"hidden","visibility":"hide"}]}"#;
+        assert_eq!(parse_codex_models(raw), vec!["gpt-light"]);
+    }
+
+    #[test]
+    fn kimiモデル一覧はmodels直下だけを取得する() {
+        let raw = r#"{"providers":[{"name":"managed","models":{"fast":{"model":"k3-256k","capabilities":{"input":["text","image"]}}}}]}"#;
+        let mut models = parse_kimi_models(raw);
+        sort_dedup(&mut models);
+        assert_eq!(models, vec!["fast", "k3-256k"]);
     }
 
     #[test]

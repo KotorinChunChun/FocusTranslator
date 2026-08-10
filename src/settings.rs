@@ -106,8 +106,7 @@ const IDC_PROF_KEY_URL: i32 = 179;
 const IDC_LLAMA_VARIANT_STATUS: i32 = 180;
 /// 導入済みllama.cppを停止して削除するボタン (SPECv0.5.5)
 const IDC_LLAMA_BIN_DELETE: i32 = 181;
-/// LLMプロファイルの疎通確認ボタン・結果表示 (SPECv0.5.5: Ollama/LM Studio等ローカルサーバの
-/// モデル名調査・接続状態確認用。OpenAI互換の `/v1/models` を使うためGemini/Claudeは対象外)
+/// LLMプロファイルのモデル取得ボタン・結果表示。API/CLI種別ごとの方法で候補を取得する。
 const IDC_PROF_TEST_CONN: i32 = 182;
 const IDC_PROF_CONN_STATUS: i32 = 183;
 /// アプリ別の動作設定 (OCR優先/実行しない) ダイアログを開くボタン (SPECv0.5.5 §2)
@@ -116,6 +115,7 @@ const IDC_OCR_PRIORITY_APPS: i32 = 184;
 /// エディットコントロールの通知コード (windows クレートに定義がないもの)
 const EN_KILLFOCUS: u32 = 0x0200;
 const BN_CLICKED: u32 = 0;
+const CBN_KILLFOCUS: u32 = 4;
 
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
@@ -630,7 +630,7 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         );
         y += STEP;
         label(h, inst, "モデル名", lx, y + 2, 84);
-        edit(h, inst, cx, y, 174, IDC_PROF_MODEL);
+        combo_set_dropped_width(editable_combo(h, inst, cx, y, 174, IDC_PROF_MODEL), 330);
         // 応答の最大トークン数 (SPECv0.5.3: 長い解説が途中で切れる場合に引き上げる)
         label(h, inst, "最大Token", cx + 180, y + 2, 60);
         edit(h, inst, cx + 240, y, 48, IDC_PROF_MAXTOK);
@@ -650,7 +650,15 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             20,
             IDC_PROF_CONN_STATUS,
         );
-        button(h, inst, "接続確認", cx + 196, y - 2, 90, IDC_PROF_TEST_CONN);
+        button(
+            h,
+            inst,
+            "モデル取得",
+            cx + 196,
+            y - 2,
+            90,
+            IDC_PROF_TEST_CONN,
+        );
         y += STEP;
         // プロンプトは専用の編集ウィンドウで編集する (SPECv0.4.7 §1)
         label(h, inst, "プロンプト編集", lx, y + 4, 84);
@@ -1329,7 +1337,7 @@ fn load_profile_to_ui(h: HWND, idx: usize) {
         if let Some(prof) = profiles.get(idx) {
             set_ctl_text(h, IDC_PROF_NAME, &prof.name);
             combo_select(h, IDC_PROF_TYPE, api_type_index(&prof.api_type));
-            set_ctl_text(h, IDC_PROF_MODEL, &prof.model_name);
+            refill_model_combo(h, &prof.api_type, &[], &prof.model_name);
             set_ctl_text(
                 h,
                 IDC_PROF_URL,
@@ -1346,13 +1354,59 @@ fn load_profile_to_ui(h: HWND, idx: usize) {
     });
 }
 
+/// モデル候補を更新する。現在の自由入力値は候補に存在しなくても保持する。
+fn refill_model_combo(
+    h: HWND,
+    api_type: &crate::config::ApiType,
+    discovered: &[String],
+    current: &str,
+) {
+    let mut models = if discovered.is_empty() && api_type.is_cli() {
+        crate::llm_cli::fallback_models(api_type)
+    } else {
+        discovered.to_vec()
+    };
+    let default = api_type.default_model();
+    if !default.is_empty() && !models.iter().any(|m| m.eq_ignore_ascii_case(default)) {
+        models.insert(0, default.to_string());
+    }
+    if !current.trim().is_empty()
+        && !models
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(current.trim()))
+    {
+        models.push(current.trim().to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    models.retain(|model| seen.insert(model.to_ascii_lowercase()));
+    combo_reset(h, IDC_PROF_MODEL);
+    let refs: Vec<&str> = models.iter().map(String::as_str).collect();
+    combo_fill(h, IDC_PROF_MODEL, &refs, 0);
+    set_ctl_text(
+        h,
+        IDC_PROF_MODEL,
+        if current.trim().is_empty() {
+            default
+        } else {
+            current.trim()
+        },
+    );
+}
+
 /// API種別ではURL/キー、CLI種別では実行ファイル/外部ログインを使うため入力欄の意味と
 /// 有効状態を切り替える。接続先欄は共用し、CLI時は空欄ならPATH自動検出とする。
 fn update_profile_kind_controls(h: HWND, api_type: &crate::config::ApiType) {
     let is_cli = api_type.is_cli();
+    let uses_api_key = !is_cli
+        && !matches!(
+            api_type,
+            crate::config::ApiType::LlamaCpp
+                | crate::config::ApiType::Ollama
+                | crate::config::ApiType::LmStudio
+        );
     unsafe {
         for (id, enabled) in [
-            (IDC_PROF_KEY, !is_cli),
+            (IDC_PROF_KEY, uses_api_key),
             (IDC_PROF_MAXTOK, !is_cli),
             (IDC_PROF_KEY_URL, !api_type.key_url().is_empty()),
         ] {
@@ -1366,7 +1420,11 @@ fn update_profile_kind_controls(h: HWND, api_type: &crate::config::ApiType) {
     set_ctl_text(
         h,
         IDC_PROF_KEY_URL,
-        if is_cli { "導入案内" } else { "キーを入手" },
+        if is_cli {
+            "導入案内"
+        } else {
+            "キーを入手"
+        },
     );
     if is_cli {
         let status = PROFILES.with(|p| {
@@ -1377,7 +1435,9 @@ fn update_profile_kind_controls(h: HWND, api_type: &crate::config::ApiType) {
                 .map(|path| {
                     format!(
                         "検出済み: {}",
-                        path.file_name().unwrap_or(path.as_os_str()).to_string_lossy()
+                        path.file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy()
                     )
                 })
                 .unwrap_or_else(|| "CLI未検出".into())
@@ -1683,9 +1743,8 @@ fn start_mmproj_install(h: HWND) {
     });
 }
 
-/// プロファイルの疎通確認ボタン押下時の処理 (SPECv0.5.5)。結果はWM_PROF_CONN_RESULTで
-/// 通知する。成功時、モデル名欄が空欄なら応答の先頭モデルidを自動入力する目印として
-/// (メッセージ, 埋め込むモデル名) のタプルをlparamに載せる。
+/// プロファイルのモデル取得ボタン押下時の処理。結果はWM_PROF_CONN_RESULTで通知し、
+/// (プロファイル名, メッセージ, モデル候補一覧) のタプルをlparamに載せる。
 fn start_profile_test_connection(h: HWND) {
     let sel = combo_sel(h, IDC_PROF_LIST);
     let Some(prof) = PROFILES.with(|p| p.borrow().get(sel).cloned()) else {
@@ -1700,21 +1759,24 @@ fn start_profile_test_connection(h: HWND) {
     }
     set_ctl_text(h, IDC_PROF_CONN_STATUS, "確認中…");
     let hwnd_isize = h.0 as isize;
+    let profile_name = prof.name.clone();
     std::thread::spawn(move || {
         let result = crate::llm_api::check_connection(&prof);
-        let (w, msg, fill): (usize, String, Option<String>) = match result {
-            Ok(r) if r.detail.is_some() => (1, r.detail.unwrap_or_default(), None),
-            Ok(r) if r.model_ids.is_empty() => {
-                (1, "接続成功 (モデル一覧は空でした)".to_string(), None)
-            }
+        let (w, msg, models): (usize, String, Vec<String>) = match result {
+            Ok(r) if r.model_ids.is_empty() => (
+                1,
+                r.detail
+                    .unwrap_or_else(|| "接続成功 (モデル一覧は空でした)".to_string()),
+                Vec::new(),
+            ),
             Ok(r) => (
                 1,
-                format!("接続成功 ({}個のモデル)", r.model_ids.len()),
-                Some(r.model_ids[0].clone()),
+                format!("取得成功 ({}モデル)", r.model_ids.len()),
+                r.model_ids,
             ),
-            Err(e) => (0, e, None),
+            Err(e) => (0, e, Vec::new()),
         };
-        let l = Box::into_raw(Box::new((msg, fill))) as isize;
+        let l = Box::into_raw(Box::new((profile_name, msg, models))) as isize;
         unsafe {
             let _ = PostMessageW(
                 Some(HWND(hwnd_isize as *mut _)),
@@ -2454,7 +2516,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             // 種別切替: モデル名・URLをその種別の既定値に置き換え、選択中の行へ自動保存する
                             let t = &API_TYPE_ORDER
                                 [combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)];
-                            set_ctl_text(h, IDC_PROF_MODEL, t.default_model());
+                            refill_model_combo(h, t, &[], t.default_model());
                             set_ctl_text(h, IDC_PROF_URL, t.default_url());
                             if t.is_cli() {
                                 set_ctl_text(h, IDC_PROF_KEY, "");
@@ -2464,7 +2526,13 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         }
                     }
                 }
-                IDC_PROF_NAME | IDC_PROF_URL | IDC_PROF_KEY | IDC_PROF_MODEL | IDC_PROF_MAXTOK
+                IDC_PROF_MODEL
+                    if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE
+                        || notif == CBN_KILLFOCUS =>
+                {
+                    commit_profile_edit(h);
+                }
+                IDC_PROF_NAME | IDC_PROF_URL | IDC_PROF_KEY | IDC_PROF_MAXTOK
                     if notif == EN_KILLFOCUS =>
                 {
                     commit_profile_edit(h);
@@ -2673,8 +2741,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             LRESULT(0)
         }
         WM_PROF_CONN_RESULT => {
-            let (msg, fill_model) =
-                unsafe { *Box::from_raw(lparam.0 as *mut (String, Option<String>)) };
+            let (profile_name, msg, models) =
+                unsafe { *Box::from_raw(lparam.0 as *mut (String, String, Vec<String>)) };
             unsafe {
                 let _ = EnableWindow(
                     windows::Win32::UI::WindowsAndMessaging::GetDlgItem(
@@ -2685,12 +2753,24 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     true,
                 );
             }
-            if wparam.0 == 1
-                && let Some(model) = fill_model
-                && get_ctl_text(h, IDC_PROF_MODEL).trim().is_empty()
-            {
-                set_ctl_text(h, IDC_PROF_MODEL, &model);
-                commit_profile_edit(h);
+            let selected_profile_name = PROFILES.with(|profiles| {
+                profiles
+                    .borrow()
+                    .get(combo_sel(h, IDC_PROF_LIST))
+                    .map(|profile| profile.name.clone())
+            });
+            if selected_profile_name.as_deref() != Some(profile_name.as_str()) {
+                return LRESULT(0);
+            }
+            if wparam.0 == 1 && !models.is_empty() {
+                let current = get_ctl_text(h, IDC_PROF_MODEL);
+                let api_type = API_TYPE_ORDER
+                    [combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)]
+                .clone();
+                refill_model_combo(h, &api_type, &models, &current);
+                if current.trim().is_empty() {
+                    commit_profile_edit(h);
+                }
             }
             set_ctl_text(h, IDC_PROF_CONN_STATUS, &msg);
             LRESULT(0)

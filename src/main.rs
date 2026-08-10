@@ -38,32 +38,26 @@ mod settings;
 mod test_util;
 mod translate;
 mod tray;
-mod uia;
 mod ui_helpers;
+mod uia;
 mod util;
 mod worker;
 
 use config::Config;
-use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE,
-};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    HOT_KEY_MODIFIERS, RegisterHotKey,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, RegisterHotKey};
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, GetMessageW, IsDialogMessageW,
-    MB_ICONWARNING, MB_OK, MSG, MessageBoxW, RegisterClassW, SetTimer, TranslateMessage,
-    WNDCLASSW, WS_OVERLAPPED,
+    MB_ICONWARNING, MB_OK, MSG, MessageBoxW, RegisterClassW, SetTimer, TranslateMessage, WNDCLASSW,
+    WS_OVERLAPPED,
 };
 use windows::core::w;
-
-
 
 fn main() {
     // アンインストール時のクリーンアップ (SPECv0.5.4 §19)。インストーラの [UninstallRun] から
@@ -117,7 +111,11 @@ fn main() {
     }));
 
     let instance: HINSTANCE = unsafe {
-        HINSTANCE(GetModuleHandleW(None).map(|m| m.0).unwrap_or(std::ptr::null_mut()))
+        HINSTANCE(
+            GetModuleHandleW(None)
+                .map(|m| m.0)
+                .unwrap_or(std::ptr::null_mut()),
+        )
     };
     let mut cfg = Config::load();
     overlay_layout::apply_theme(&cfg.overlay_theme);
@@ -175,10 +173,19 @@ fn main() {
     // 範囲指定ホットキー (SPEC §11: 衝突時は通知)
     let (mods, vk) = cfg.region_hotkey_parsed();
     unsafe {
-        if RegisterHotKey(Some(main), app_state::HOTKEY_REGION, HOT_KEY_MODIFIERS(mods), vk).is_err() {
+        if RegisterHotKey(
+            Some(main),
+            app_state::HOTKEY_REGION,
+            HOT_KEY_MODIFIERS(mods),
+            vk,
+        )
+        .is_err()
+        {
             MessageBoxW(
                 Some(main),
-                w!("範囲指定ホットキーを登録できませんでした。他のアプリと衝突しています。設定画面で変更してください。"),
+                w!(
+                    "範囲指定ホットキーを登録できませんでした。他のアプリと衝突しています。設定画面で変更してください。"
+                ),
                 util::display_name_pcwstr(),
                 MB_OK | MB_ICONWARNING,
             );
@@ -188,10 +195,18 @@ fn main() {
 
     if !cfg.first_launch_done {
         unsafe {
-            let msg = windows::core::HSTRING::from("初回起動です。\n高精度な画面認識(PaddleOCR)と、ONNX翻訳モデルをダウンロードしますか？\n（※画面認識は標準でOneOCR(Windows 11内蔵)を使用します。ONNXを導入しないとローカル翻訳ができません）");
+            let msg = windows::core::HSTRING::from(
+                "初回起動です。\n高精度な画面認識(PaddleOCR)と、ONNX翻訳モデルをダウンロードしますか？\n（※画面認識は標準でOneOCR(Windows 11内蔵)を使用します。ONNXを導入しないとローカル翻訳ができません）",
+            );
             let title_w = util::to_wide(&format!("{} - 初回セットアップ", util::APP_DISPLAY_NAME));
             let title = windows::core::PCWSTR(title_w.as_ptr());
-            let result = MessageBoxW(Some(main), &msg, title, windows::Win32::UI::WindowsAndMessaging::MB_YESNO | windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION);
+            let result = MessageBoxW(
+                Some(main),
+                &msg,
+                title,
+                windows::Win32::UI::WindowsAndMessaging::MB_YESNO
+                    | windows::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION,
+            );
             if result == windows::Win32::UI::WindowsAndMessaging::IDYES {
                 settings::open(instance, main);
             }
@@ -206,7 +221,8 @@ fn main() {
         let port = cfg.llama_port;
         let model = llama_install::resolve_model_path(&cfg.llama_model_path);
         // mmprojが存在すれば画像入力対応(VLM)込みで起動する。無ければテキスト専用。
-        let mmproj = Some(llama_install::resolve_mmproj_path(&cfg.llama_mmproj_path)).filter(|p| p.is_file());
+        let mmproj = Some(llama_install::resolve_mmproj_path(&cfg.llama_mmproj_path))
+            .filter(|p| p.is_file());
         if model.is_file() {
             std::thread::spawn(move || {
                 if let Err(e) = llama_server::start(port, &model, mmproj.as_deref()) {

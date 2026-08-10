@@ -2,6 +2,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use std::path::PathBuf;
+use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HLOCAL, HWND, LocalFree};
 use windows::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData,
@@ -10,10 +11,16 @@ use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     SetClipboardData,
 };
-use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
-use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
-use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindow, GW_OWNER, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId};
-use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
+use windows::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GW_OWNER, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId,
+};
 
 pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -31,7 +38,11 @@ static DISPLAY_NAME_W: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new(
 
 /// 表示名の PCWSTR。静的領域を指すのでそのまま API に渡してよい。
 pub fn display_name_pcwstr() -> windows::core::PCWSTR {
-    windows::core::PCWSTR(DISPLAY_NAME_W.get_or_init(|| to_wide(APP_DISPLAY_NAME)).as_ptr())
+    windows::core::PCWSTR(
+        DISPLAY_NAME_W
+            .get_or_init(|| to_wide(APP_DISPLAY_NAME))
+            .as_ptr(),
+    )
 }
 
 /// テスト用の直列化ロック。FOCUSTRANSLATOR_DATA_DIR を切り替えるテスト(logdb)と、
@@ -164,8 +175,10 @@ fn parse_dib(data: &[u8]) -> Option<crate::capture::Captured> {
     if data.len() < 40 {
         return None;
     }
-    let rd_u32 = |off: usize| u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
-    let rd_i32 = |off: usize| i32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+    let rd_u32 =
+        |off: usize| u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+    let rd_i32 =
+        |off: usize| i32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
     let rd_u16 = |off: usize| u16::from_le_bytes([data[off], data[off + 1]]);
 
     let bi_size = rd_u32(0) as usize;
@@ -193,7 +206,11 @@ fn parse_dib(data: &[u8]) -> Option<crate::capture::Captured> {
     // ピクセルデータ開始オフセット = ヘッダ + カラーマスク + カラーパレット。
     // BI_BITFIELDS かつ BITMAPINFOHEADER(40) のときは、ヘッダ直後に12バイトのマスクが入る
     // (BITMAPV4/V5HEADER ではマスクはヘッダ内に含まれるため加算しない)。
-    let mask_bytes = if compression == 3 && bi_size == 40 { 12 } else { 0 };
+    let mask_bytes = if compression == 3 && bi_size == 40 {
+        12
+    } else {
+        0
+    };
     let palette_bytes = clr_used * 4;
     let pixel_off = bi_size + mask_bytes + palette_bytes;
     let bytes_per_px = (bit_count / 8) as usize;
@@ -323,7 +340,11 @@ pub fn perf_log(enabled: bool, line: &str) {
     }
     use std::io::Write;
     let path = config_dir().join("perf.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -336,7 +357,11 @@ pub fn perf_log(enabled: bool, line: &str) {
 pub fn app_log(line: &str) {
     use std::io::Write;
     let path = config_dir().join("app.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -369,9 +394,19 @@ pub fn get_window_context(hwnd: HWND) -> (Option<String>, Option<String>) {
         {
             let mut path = vec![0u16; MAX_PATH as usize];
             let mut size = MAX_PATH;
-            if QueryFullProcessImageNameW(hprocess, windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0), windows::core::PWSTR(path.as_mut_ptr()), &mut size).is_ok() {
+            if QueryFullProcessImageNameW(
+                hprocess,
+                windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(path.as_mut_ptr()),
+                &mut size,
+            )
+            .is_ok()
+            {
                 let full_path = String::from_utf16_lossy(&path[..size as usize]);
-                if let Some(file_name) = std::path::Path::new(&full_path).file_name().and_then(|n| n.to_str()) {
+                if let Some(file_name) = std::path::Path::new(&full_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                {
                     exe = Some(file_name.to_string());
                 }
             }

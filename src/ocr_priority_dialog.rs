@@ -23,12 +23,12 @@ use windows::Win32::Graphics::Gdi::COLOR_BTNFACE;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CBN_SELCHANGE, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumChildWindows,
-    EnumWindows, GWL_EXSTYLE, GA_ROOT, GW_OWNER, GetAncestor, GetCursorPos, GetMessageW, GetWindow,
-    GetWindowLongW, GetWindowRect, IDC_ARROW, IsWindow, IsWindowVisible, KillTimer, LoadCursorW, MSG,
-    RegisterClassW, SW_SHOW, SetForegroundWindow, SetTimer, ShowWindow, TranslateMessage,
-    WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUPWINDOW, WS_SYSMENU, WindowFromPoint,
+    CBN_SELCHANGE, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    EnumChildWindows, EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GetAncestor, GetCursorPos,
+    GetMessageW, GetWindow, GetWindowLongW, GetWindowRect, IDC_ARROW, IsWindow, IsWindowVisible,
+    KillTimer, LoadCursorW, MSG, RegisterClassW, SW_SHOW, SetForegroundWindow, SetTimer,
+    ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSW,
+    WS_CAPTION, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUPWINDOW, WS_SYSMENU, WindowFromPoint,
 };
 use windows::core::w;
 
@@ -101,7 +101,11 @@ fn truncate_chars(s: &str, n: usize) -> String {
 /// のリモートデスクトップ等、タイトルバー自体が無いウィンドウ)ならexe名だけを表示する。
 fn format_running_entry(title: &str, exe: &str) -> String {
     let t = truncate_chars(title.trim(), RUNNING_TITLE_CHARS);
-    if t.is_empty() { exe.to_string() } else { format!("{t}  —  {exe}") }
+    if t.is_empty() {
+        exe.to_string()
+    } else {
+        format!("{t}  —  {exe}")
+    }
 }
 
 /// 実行中の可視トップレベルウィンドウから (タイトル, exeファイル名) の一覧を集める。
@@ -138,7 +142,10 @@ fn enumerate_running_apps() -> Vec<(String, String)> {
                 && !exe.eq_ignore_ascii_case("focus-translator.exe")
             {
                 let list = &mut *(lparam.0 as *mut Vec<(String, String)>);
-                if !list.iter().any(|(_, e): &(String, String)| e.eq_ignore_ascii_case(&exe)) {
+                if !list
+                    .iter()
+                    .any(|(_, e): &(String, String)| e.eq_ignore_ascii_case(&exe))
+                {
                     list.push((title.unwrap_or_default(), exe));
                 }
             }
@@ -147,12 +154,20 @@ fn enumerate_running_apps() -> Vec<(String, String)> {
     }
     let mut list: Vec<(String, String)> = Vec::new();
     unsafe {
-        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut list as *mut Vec<(String, String)> as isize));
+        let _ = EnumWindows(
+            Some(enum_proc),
+            LPARAM(&mut list as *mut Vec<(String, String)> as isize),
+        );
     }
     let cfg = Config::load();
     list.retain(|(_, exe)| {
-        !cfg.ocr_priority_apps.iter().any(|e| e.eq_ignore_ascii_case(exe))
-            && !cfg.disabled_apps.iter().any(|e| e.eq_ignore_ascii_case(exe))
+        !cfg.ocr_priority_apps
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(exe))
+            && !cfg
+                .disabled_apps
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(exe))
     });
     list.sort_by(|a, b| a.1.to_ascii_lowercase().cmp(&b.1.to_ascii_lowercase()));
     list
@@ -195,7 +210,10 @@ fn refresh_lists(h: HWND) {
 
 fn refresh_running(h: HWND) {
     let apps = enumerate_running_apps();
-    let display: Vec<String> = apps.iter().map(|(t, e)| format_running_entry(t, e)).collect();
+    let display: Vec<String> = apps
+        .iter()
+        .map(|(t, e)| format_running_entry(t, e))
+        .collect();
     let display_refs: Vec<&str> = display.iter().map(|s| s.as_str()).collect();
     // combo_fillは追記のみで既存項目をクリアしないため、都度リセットしないと表示上の項目数と
     // RUNNING_EXES(常に総入れ替え)の対応がズレていく(実機報告の不具合)。
@@ -253,7 +271,9 @@ fn add_app(h: HWND, which: AppList, exe: &str) {
 }
 
 fn remove_selected(h: HWND, which: AppList) {
-    let Some(sel) = listbox_get_sel(get_dlg_item(h, which.listbox_id())) else { return };
+    let Some(sel) = listbox_get_sel(get_dlg_item(h, which.listbox_id())) else {
+        return;
+    };
     let mut cfg = Config::load();
     let list = match which {
         AppList::OcrPriority => &mut cfg.ocr_priority_apps,
@@ -301,7 +321,9 @@ pub fn open(parent: HWND) {
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH((COLOR_BTNFACE.0 + 1) as usize as *mut _),
+            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
+                (COLOR_BTNFACE.0 + 1) as usize as *mut _,
+            ),
             lpszClassName: class_name,
             ..Default::default()
         };
@@ -309,7 +331,11 @@ pub fn open(parent: HWND) {
 
         let (x, y) = {
             let mut r = RECT::default();
-            if GetWindowRect(parent, &mut r).is_ok() { (r.left + 30, r.top + 30) } else { (150, 150) }
+            if GetWindowRect(parent, &mut r).is_ok() {
+                (r.left + 30, r.top + 30)
+            } else {
+                (150, 150)
+            }
         };
 
         let Ok(win) = CreateWindowExW(
@@ -345,13 +371,29 @@ pub fn open(parent: HWND) {
         // 既定の200px(9件程度で頭打ち)だと項目数が多い環境でスクロールが必須になるため、
         // ドロップダウンの最大高さを広げてほぼ全件を一度に表示できるようにする。
         combo_h(win, inst, 134, ly - 2, top_field_w, 600, IDC_RUNNING);
-        button(win, inst, "更新", top_btn_x, ly - 2, top_btn_w, IDC_REFRESH_RUNNING);
+        button(
+            win,
+            inst,
+            "更新",
+            top_btn_x,
+            ly - 2,
+            top_btn_w,
+            IDC_REFRESH_RUNNING,
+        );
         ly += 34;
 
         // 手入力(exe名): 起動中のアプリ選択・「ポインタで指定」の結果もここへ転記される
         label(win, inst, "手入力 (exe名)", MARGIN_L, ly, 110);
         edit(win, inst, 134, ly - 2, top_field_w, IDC_MANUAL);
-        button(win, inst, POINT_BTN_IDLE, top_btn_x, ly - 2, top_btn_w, IDC_POINT);
+        button(
+            win,
+            inst,
+            POINT_BTN_IDLE,
+            top_btn_x,
+            ly - 2,
+            top_btn_w,
+            IDC_POINT,
+        );
         ly += 40;
 
         // 2つの一覧を左右に並べる。追加・削除ボタンは各リストボックスの右上に配置し、
@@ -367,12 +409,42 @@ pub fn open(parent: HWND) {
         let remove1_x = add1_x + btn_w + btn_gap;
         let add2_x = col2_x + col_w - (btn_w * 2 + btn_gap);
         let remove2_x = add2_x + btn_w + btn_gap;
-        label(win, inst, "OCR優先アプリリスト", col1_x, ly, add1_x - col1_x - 8);
-        label(win, inst, "実行しないアプリリスト", col2_x, ly, add2_x - col2_x - 8);
+        label(
+            win,
+            inst,
+            "OCR優先アプリリスト",
+            col1_x,
+            ly,
+            add1_x - col1_x - 8,
+        );
+        label(
+            win,
+            inst,
+            "実行しないアプリリスト",
+            col2_x,
+            ly,
+            add2_x - col2_x - 8,
+        );
         button(win, inst, "↓追加", add1_x, ly - 2, btn_w, IDC_ADD_TO_OCR);
         button(win, inst, "↑削除", remove1_x, ly - 2, btn_w, IDC_REMOVE_OCR);
-        button(win, inst, "↓追加", add2_x, ly - 2, btn_w, IDC_ADD_TO_DISABLED);
-        button(win, inst, "↑削除", remove2_x, ly - 2, btn_w, IDC_REMOVE_DISABLED);
+        button(
+            win,
+            inst,
+            "↓追加",
+            add2_x,
+            ly - 2,
+            btn_w,
+            IDC_ADD_TO_DISABLED,
+        );
+        button(
+            win,
+            inst,
+            "↑削除",
+            remove2_x,
+            ly - 2,
+            btn_w,
+            IDC_REMOVE_DISABLED,
+        );
         ly += 30;
 
         let list_h = 240;
@@ -380,7 +452,15 @@ pub fn open(parent: HWND) {
         listbox(win, inst, col2_x, ly, col_w, list_h, IDC_LIST_DISABLED);
         ly += list_h + 16;
 
-        button(win, inst, "閉じる", MARGIN_L + content_w - 80, ly, 80, IDC_CLOSE);
+        button(
+            win,
+            inst,
+            "閉じる",
+            MARGIN_L + content_w - 80,
+            ly,
+            80,
+            IDC_CLOSE,
+        );
 
         let font = make_font(14, false);
         let _ = EnumChildWindows(Some(win), Some(set_font_proc), LPARAM(font.0 as isize));

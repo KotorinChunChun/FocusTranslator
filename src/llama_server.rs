@@ -74,12 +74,18 @@ pub fn start(port: u32, model: &Path, mmproj: Option<&Path>) -> Result<(), Strin
         "\n===== [{ts_ms}] llama-server起動 =====\n実行ファイル: {}\nモデル: {}\nmmproj: {}\nポート: {port}\n============================\n",
         exe.display(),
         model.display(),
-        mmproj.map(|p| p.display().to_string()).unwrap_or_else(|| "(なし: テキスト専用)".into()),
+        mmproj
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(なし: テキスト専用)".into()),
     );
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
         use std::io::Write;
         let _ = f.write_all(header.as_bytes());
     }
@@ -118,7 +124,10 @@ pub fn start(port: u32, model: &Path, mmproj: Option<&Path>) -> Result<(), Strin
         .map_err(|e| format!("サーバーの起動に失敗しました: {e}"))?;
     crate::util::app_log(&format!(
         "llama_server: starting exe={} model={} mmproj={:?} port={port} (log: {})",
-        exe.display(), model.display(), mmproj, log_path.display()
+        exe.display(),
+        model.display(),
+        mmproj,
+        log_path.display()
     ));
     *CHILD.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
 
@@ -130,7 +139,10 @@ pub fn start(port: u32, model: &Path, mmproj: Option<&Path>) -> Result<(), Strin
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    Err("サーバーの起動を確認できませんでした(モデル読み込みに時間がかかっている可能性があります)".into())
+    Err(
+        "サーバーの起動を確認できませんでした(モデル読み込みに時間がかかっている可能性があります)"
+            .into(),
+    )
 }
 
 /// サーバーを停止する。このプロセスが起動した子プロセスがあればそれを終了する。
@@ -156,7 +168,9 @@ pub fn stop(port: u32) -> Result<(), String> {
             ));
         }
         None => {
-            return Err(format!("ポート{port}のプロセス(PID {pid})を確認できないため停止しません。"));
+            return Err(format!(
+                "ポート{port}のプロセス(PID {pid})を確認できないため停止しません。"
+            ));
         }
     }
     terminate_pid(pid)

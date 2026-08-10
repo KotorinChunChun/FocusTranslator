@@ -28,7 +28,10 @@ pub struct OcrOutput {
 
 impl OcrOutput {
     fn text_only(text: String) -> Self {
-        OcrOutput { text, ..Default::default() }
+        OcrOutput {
+            text,
+            ..Default::default()
+        }
     }
 }
 
@@ -176,7 +179,11 @@ pub(crate) fn select_by_focus(
     if items.is_empty() {
         return Err("テキストを検出できませんでした".into());
     }
-    items.sort_by(|a, b| line_cy(a).partial_cmp(&line_cy(b)).unwrap_or(std::cmp::Ordering::Equal));
+    items.sort_by(|a, b| {
+        line_cy(a)
+            .partial_cmp(&line_cy(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     match focus {
         Focus::Line(fy) => {
@@ -246,9 +253,11 @@ fn normalize_line(s: &str) -> String {
                 let prev = chars[..i].iter().rev().find(|c| **c != ' ');
                 let next = chars[i + 1..].iter().find(|c| **c != ' ');
                 if let (Some(&p), Some(&n)) = (prev, next)
-                    && is_cjk_char(p) && is_cjk_char(n) {
-                        continue;
-                    }
+                    && is_cjk_char(p)
+                    && is_cjk_char(n)
+                {
+                    continue;
+                }
             }
             out.push(c);
         }
@@ -277,8 +286,13 @@ pub fn join_paragraph(lines: &[String]) -> String {
             // 行末ハイフンは連結(英文の分綴り)
             out.pop();
             out.push_str(l);
-        } else if crate::util::contains_cjk(out.chars().last().map(String::from).as_deref().unwrap_or(""))
-        {
+        } else if crate::util::contains_cjk(
+            out.chars()
+                .last()
+                .map(String::from)
+                .as_deref()
+                .unwrap_or(""),
+        ) {
             out.push_str(l);
         } else {
             out.push(' ');
@@ -301,16 +315,29 @@ pub fn crop_for_focus(img: &Captured, focus: Focus) -> std::borrow::Cow<'_, Capt
 pub fn crop_for_focus_rect(
     img: &Captured,
     focus: Focus,
-) -> (std::borrow::Cow<'_, Captured>, windows::Win32::Foundation::RECT) {
+) -> (
+    std::borrow::Cow<'_, Captured>,
+    windows::Win32::Foundation::RECT,
+) {
     use windows::Win32::Foundation::RECT;
     if let Focus::Line(fy) = focus {
         let h = 64; // 高さ64pxの帯に切り抜く(複数行を拾うのを防ぐ)
         let top = (fy - h as f32 / 2.0).round() as i32;
-        if let Some((cropped, rect)) = crate::capture::crop_with_rect(img, 0, top, img.width as i32, h) {
+        if let Some((cropped, rect)) =
+            crate::capture::crop_with_rect(img, 0, top, img.width as i32, h)
+        {
             return (std::borrow::Cow::Owned(cropped), rect);
         }
     }
-    (std::borrow::Cow::Borrowed(img), RECT { left: 0, top: 0, right: img.width as i32, bottom: img.height as i32 })
+    (
+        std::borrow::Cow::Borrowed(img),
+        RECT {
+            left: 0,
+            top: 0,
+            right: img.width as i32,
+            bottom: img.height as i32,
+        },
+    )
 }
 
 /// LLM OCR+翻訳統合モード: 画像から原文と訳文を一括取得 (SPEC §8)
@@ -320,7 +347,9 @@ pub fn llm_ocr_translate(
     focus: Focus,
     ctx: &crate::config::PromptContext,
 ) -> Result<OcrOutput, String> {
-    let prof = cfg.active_profile().ok_or("LLM APIプロファイルが設定されていません")?;
+    let prof = cfg
+        .active_profile()
+        .ok_or("LLM APIプロファイルが設定されていません")?;
     let target_img = crop_for_focus(img, focus);
     let png = crate::capture::to_png(&target_img);
     let b64 = B64.encode(&png);
@@ -332,21 +361,38 @@ pub fn llm_ocr_translate(
     ctx.ocr_engine = "llm".into();
     let prompt = cfg.fill_prompt(&prof.ocr_prompt, &ctx);
 
-    let res = crate::llm_api::call(prof, &crate::llm_api::LlmRequest {
-        prompt: &prompt,
-        image_png_b64: Some(&b64),
-        json_mode: true,
-    })?;
+    let res = crate::llm_api::call(
+        prof,
+        &crate::llm_api::LlmRequest {
+            prompt: &prompt,
+            image_png_b64: Some(&b64),
+            json_mode: true,
+        },
+    )?;
 
     let inner = parse_llm_ocr_json(&res.text)?;
-    let source = inner.get("source").and_then(|s| s.as_str()).unwrap_or("").trim().to_string();
-    let translation = inner.get("translation").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
+    let source = inner
+        .get("source")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let translation = inner
+        .get("translation")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if source.is_empty() {
         return Err("テキストを検出できませんでした".into());
     }
     Ok(OcrOutput {
         text: source,
-        translation: if translation.is_empty() { None } else { Some(translation) },
+        translation: if translation.is_empty() {
+            None
+        } else {
+            Some(translation)
+        },
         raw_response: Some(crate::translate::mask_keys(cfg, &res.response_json)),
         tokens_in: res.tokens_in,
         tokens_out: res.tokens_out,
@@ -385,8 +431,7 @@ mod tests {
 
     #[test]
     fn llm_ocrの素のjsonを解析する() {
-        let value = parse_llm_ocr_json(r#"{"source":"Hello","translation":"こんにちは"}"#)
-            .unwrap();
+        let value = parse_llm_ocr_json(r#"{"source":"Hello","translation":"こんにちは"}"#).unwrap();
         assert_eq!(value["source"], "Hello");
     }
 

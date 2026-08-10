@@ -83,7 +83,10 @@ static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 /// Snipping Tool パッケージのインストールフォルダを解決する
 fn package_dir() -> Option<PathBuf> {
     unsafe {
-        let family: Vec<u16> = PACKAGE_FAMILY.encode_utf16().chain(std::iter::once(0)).collect();
+        let family: Vec<u16> = PACKAGE_FAMILY
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let mut count = 0u32;
         let mut buf_len = 0u32;
         let rc = GetPackagesByPackageFamily(
@@ -118,12 +121,18 @@ fn package_dir() -> Option<PathBuf> {
             return None;
         }
         let mut path_buf: Vec<u16> = vec![0; path_len as usize];
-        let rc =
-            GetPackagePathByFullName(PCWSTR(full_name.0), &mut path_len, Some(PWSTR(path_buf.as_mut_ptr())));
+        let rc = GetPackagePathByFullName(
+            PCWSTR(full_name.0),
+            &mut path_len,
+            Some(PWSTR(path_buf.as_mut_ptr())),
+        );
         if rc != ERROR_SUCCESS {
             return None;
         }
-        let end = path_buf.iter().position(|&c| c == 0).unwrap_or(path_buf.len());
+        let end = path_buf
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(path_buf.len());
         Some(PathBuf::from(String::from_utf16_lossy(&path_buf[..end])))
     }
 }
@@ -134,7 +143,11 @@ const FILES: [&str; 3] = ["oneocr.dll", "oneocr.onemodel", "onnxruntime.dll"];
 /// oneocr.dll と oneocr.onemodel を含むフォルダ (Snipping Tool同梱分)
 fn oneocr_dir() -> Option<PathBuf> {
     let dir = package_dir()?.join("SnippingTool");
-    if FILES.iter().all(|f| dir.join(f).is_file()) { Some(dir) } else { None }
+    if FILES.iter().all(|f| dir.join(f).is_file()) {
+        Some(dir)
+    } else {
+        None
+    }
 }
 
 /// WindowsApps配下はACLによりDLLの直接ロードが拒否されるため、コピー先として使う
@@ -195,7 +208,11 @@ macro_rules! proc_as {
 
 fn load_engine() -> Result<Engine, String> {
     // WindowsApps配下からの直接ロードはACLで拒否されるため、設定フォルダへコピーして読み込む
-    let dir = if local_copy_complete() { local_dir() } else { ensure_local_copy()? };
+    let dir = if local_copy_complete() {
+        local_dir()
+    } else {
+        ensure_local_copy()?
+    };
     let dll_path = dir.join("oneocr.dll");
     let wide: Vec<u16> = dll_path.as_os_str().encode_wide_nul();
     let module = unsafe {
@@ -205,13 +222,22 @@ fn load_engine() -> Result<Engine, String> {
     let module = HMODULE(module.0);
 
     let create_init_options = proc_as!(module, c"CreateOcrInitOptions", CreateOcrInitOptionsFn);
-    let set_delay_load =
-        proc_as!(module, c"OcrInitOptionsSetUseModelDelayLoad", SetUseModelDelayLoadFn);
+    let set_delay_load = proc_as!(
+        module,
+        c"OcrInitOptionsSetUseModelDelayLoad",
+        SetUseModelDelayLoadFn
+    );
     let create_pipeline = proc_as!(module, c"CreateOcrPipeline", CreateOcrPipelineFn);
-    let create_process_options =
-        proc_as!(module, c"CreateOcrProcessOptions", CreateOcrProcessOptionsFn);
-    let set_max_lines =
-        proc_as!(module, c"OcrProcessOptionsSetMaxRecognitionLineCount", SetMaxLineCountFn);
+    let create_process_options = proc_as!(
+        module,
+        c"CreateOcrProcessOptions",
+        CreateOcrProcessOptionsFn
+    );
+    let set_max_lines = proc_as!(
+        module,
+        c"OcrProcessOptionsSetMaxRecognitionLineCount",
+        SetMaxLineCountFn
+    );
     let run_pipeline = proc_as!(module, c"RunOcrPipeline", RunOcrPipelineFn);
     let get_line_count = proc_as!(module, c"GetOcrLineCount", GetOcrLineCountFn);
     let get_line = proc_as!(module, c"GetOcrLine", GetOcrLineFn);
@@ -233,7 +259,13 @@ fn load_engine() -> Result<Engine, String> {
             return Err("OneOCRの初期化オプション設定に失敗しました".into());
         }
         let mut pipeline = 0i64;
-        if create_pipeline(model_path.as_ptr(), MODEL_KEY.as_ptr(), init_options, &mut pipeline) != 0 {
+        if create_pipeline(
+            model_path.as_ptr(),
+            MODEL_KEY.as_ptr(),
+            init_options,
+            &mut pipeline,
+        ) != 0
+        {
             return Err("OneOCRモデルの読込に失敗しました".into());
         }
         let mut process_options = 0i64;
@@ -283,7 +315,11 @@ fn pad_image(img: &Captured, pad: u32) -> Captured {
         let dst = ((y + pad as usize) * new_w as usize + pad as usize) * 4;
         bgra[dst..dst + row_bytes].copy_from_slice(&img.bgra[src..src + row_bytes]);
     }
-    Captured { width: new_w, height: new_h, bgra }
+    Captured {
+        width: new_w,
+        height: new_h,
+        bgra,
+    }
 }
 
 /// パディングで画像原点が (pad, pad) だけ動いた分、focus の基準Y座標を補正する
@@ -309,7 +345,9 @@ pub fn ocr_oneocr(img: &Captured, focus: Focus) -> Result<(String, Option<String
 }
 
 fn run_once(img: &Captured, focus: Focus) -> Result<(String, Option<String>), String> {
-    let mut guard = ENGINE.lock().map_err(|_| "OneOCRエンジンのロックに失敗しました".to_string())?;
+    let mut guard = ENGINE
+        .lock()
+        .map_err(|_| "OneOCRエンジンのロックに失敗しました".to_string())?;
     if guard.is_none() {
         *guard = Some(load_engine()?);
     }

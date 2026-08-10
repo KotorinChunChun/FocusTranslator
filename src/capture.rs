@@ -134,7 +134,9 @@ pub fn capture_window(hwnd: HWND) -> Result<Captured, String> {
         }
         let result = (|| -> Result<Captured, String> {
             let frame = frame.ok_or("フレーム取得に失敗しました")?;
-            let surface = frame.Surface().map_err(|e| format!("Surface取得失敗: {e}"))?;
+            let surface = frame
+                .Surface()
+                .map_err(|e| format!("Surface取得失敗: {e}"))?;
             let access: IDirect3DDxgiInterfaceAccess = surface
                 .cast()
                 .map_err(|e| format!("DXGIアクセス失敗: {e}"))?;
@@ -171,7 +173,11 @@ pub fn capture_window(hwnd: HWND) -> Result<Captured, String> {
                 std::ptr::copy_nonoverlapping(s, d, (w * 4) as usize);
             }
             context.Unmap(&staging, 0);
-            Ok(Captured { width: w, height: h, bgra })
+            Ok(Captured {
+                width: w,
+                height: h,
+                bgra,
+            })
         })();
 
         // セッション停止(Close)。失敗は無視。
@@ -207,8 +213,20 @@ pub fn crop_with_rect(img: &Captured, x: i32, y: i32, w: i32, h: i32) -> Option<
         let d = (row * cw) as usize * 4;
         out[d..d + (cw * 4) as usize].copy_from_slice(&img.bgra[s..s + (cw * 4) as usize]);
     }
-    let rect = RECT { left: x0 as i32, top: y0 as i32, right: x1 as i32, bottom: y1 as i32 };
-    Some((Captured { width: cw, height: ch, bgra: out }, rect))
+    let rect = RECT {
+        left: x0 as i32,
+        top: y0 as i32,
+        right: x1 as i32,
+        bottom: y1 as i32,
+    };
+    Some((
+        Captured {
+            width: cw,
+            height: ch,
+            bgra: out,
+        },
+        rect,
+    ))
 }
 
 /// 長辺が max_dim を超える場合にアスペクト比を保って縮小する (SPECv0.5.3:
@@ -247,7 +265,11 @@ pub fn downscale_max(img: &Captured, max_dim: u32) -> Captured {
             }
         }
     }
-    Captured { width: nw, height: nh, bgra: out }
+    Captured {
+        width: nw,
+        height: nh,
+        bgra: out,
+    }
 }
 
 /// 画像へ赤枠を描き込む (SPECv0.5.3: 解説プロンプトで「赤枠内が対象」と示すため)。
@@ -311,7 +333,11 @@ mod tests {
     use super::*;
 
     fn solid(w: u32, h: u32, bgra: [u8; 4]) -> Captured {
-        Captured { width: w, height: h, bgra: bgra.repeat((w * h) as usize) }
+        Captured {
+            width: w,
+            height: h,
+            bgra: bgra.repeat((w * h) as usize),
+        }
     }
 
     #[test]
@@ -329,7 +355,12 @@ mod tests {
     #[test]
     fn draw_red_frame_は矩形の外周へ赤枠を描く() {
         let mut img = solid(100, 100, [0, 0, 0, 255]);
-        let rect = RECT { left: 40, top: 40, right: 60, bottom: 60 };
+        let rect = RECT {
+            left: 40,
+            top: 40,
+            right: 60,
+            bottom: 60,
+        };
         draw_red_frame(&mut img, rect, 3);
         let px = |x: u32, y: u32| {
             let i = ((y * 100 + x) * 4) as usize;

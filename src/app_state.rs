@@ -5,8 +5,8 @@ use crate::capture;
 use crate::config::Config;
 use crate::detect;
 use crate::engine;
-use crate::overlay;
 use crate::logviewer;
+use crate::overlay;
 use crate::region;
 use crate::settings;
 use crate::tray;
@@ -16,24 +16,27 @@ use crate::worker;
 use overlay::OverlayContent;
 use std::cell::RefCell;
 use std::sync::Arc;
-use windows::Win32::Foundation::{
-    HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow, MessageBoxW,
-    WindowFromPoint, KillTimer, SetTimer, MB_OK, MB_ICONWARNING,
-};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, HOT_KEY_MODIFIERS, RegisterHotKey, UnregisterHotKey, VK_ESCAPE,
 };
-use windows::core::{w, PCWSTR};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow, KillTimer, MB_ICONWARNING, MB_OK,
+    MessageBoxW, SetTimer, WindowFromPoint,
+};
+use windows::core::{PCWSTR, w};
 
 /// 埋め込みリソース(build.rs で ID "1" として同梱)からアプリアイコンを取得する。
 #[allow(clippy::manual_dangling_ptr)]
 pub fn app_icon() -> windows::Win32::UI::WindowsAndMessaging::HICON {
     unsafe {
-        let inst = HINSTANCE(windows::Win32::System::LibraryLoader::GetModuleHandleW(None).map(|m| m.0).unwrap_or(std::ptr::null_mut()));
-        windows::Win32::UI::WindowsAndMessaging::LoadIconW(Some(inst), PCWSTR(1usize as *const u16)).unwrap_or_default()
+        let inst = HINSTANCE(
+            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                .map(|m| m.0)
+                .unwrap_or(std::ptr::null_mut()),
+        );
+        windows::Win32::UI::WindowsAndMessaging::LoadIconW(Some(inst), PCWSTR(1usize as *const u16))
+            .unwrap_or_default()
     }
 }
 
@@ -132,7 +135,11 @@ impl App {
     /// (再認識ジョブへ渡す用。exe は空文字を None として扱う)。
     pub fn held_ctx(&self) -> worker::AppContext {
         worker::AppContext {
-            exe: if self.app_exe.is_empty() { None } else { Some(self.app_exe.clone()) },
+            exe: if self.app_exe.is_empty() {
+                None
+            } else {
+                Some(self.app_exe.clone())
+            },
             title: self.app_title.clone(),
             uia_path: self.uia_path.clone(),
             uia_json: self.uia_json.clone(),
@@ -216,7 +223,12 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
 }
 
 #[allow(clippy::missing_safety_doc)]
-pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+pub unsafe extern "system" fn wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         windows::Win32::UI::WindowsAndMessaging::WM_TIMER if wparam.0 == TIMER_POLL => {
             tick();
@@ -272,7 +284,9 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                     overlay::refresh(app.overlay);
                 }
             });
-            unsafe { windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam) }
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
         }
         WM_APP_DETECT => {
             let info = unsafe { Box::from_raw(lparam.0 as *mut detect::DetectInfo) };
@@ -289,13 +303,18 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         windows::Win32::UI::WindowsAndMessaging::WM_DESTROY => {
             tray::remove_icon(hwnd);
             unsafe {
-                let _ = windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(Some(hwnd), HOTKEY_REGION);
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(
+                    Some(hwnd),
+                    HOTKEY_REGION,
+                );
                 let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(Some(hwnd), TIMER_POLL);
                 windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
             }
             LRESULT(0)
         }
-        _ => unsafe { windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam) },
+        _ => unsafe {
+            windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
+        },
     }
 }
 
@@ -357,8 +376,8 @@ pub fn tick() {
         // オーバーレイをクリックして操作した後はESCで閉じられなかった)。
         let fg = unsafe { GetForegroundWindow() };
         let target_active = fg == HWND(app.target as *mut _);
-        let overlay_active = !app.overlay.is_invalid()
-            && unsafe { GetAncestor(fg, GA_ROOT) } == app.overlay;
+        let overlay_active =
+            !app.overlay.is_invalid() && unsafe { GetAncestor(fg, GA_ROOT) } == app.overlay;
         if app.mode == Mode::Pinned && esc && (target_active || overlay_active) {
             close_overlay(app);
             app.hold = down;
@@ -478,7 +497,14 @@ fn start_cycle_params(app: &mut App) -> Option<(u64, i32, i32, isize, Config, is
     app.cur_ocr = app.cfg.default_ocr.clone();
     app.cur_tr = app.cfg.default_translator.clone();
     app.cfg.active_api_profile = app.cfg.default_api_profile.clone();
-    Some((app.generation, pt.x, pt.y, target, app.cfg.clone(), app.main.0 as isize))
+    Some((
+        app.generation,
+        pt.x,
+        pt.y,
+        target,
+        app.cfg.clone(),
+        app.main.0 as isize,
+    ))
 }
 
 pub fn close_overlay(app: &mut App) {
@@ -531,8 +557,16 @@ fn autoload_cached_explanation(app: &mut App) {
         app_exe: app.app_exe.clone(),
         uia_path: app.uia_path.clone(),
         uia_detail: app.uia_json.clone(),
-        ocr_engine: if app.via_uia { String::new() } else { app.cur_ocr.clone() },
-        tr_engine: if app.translation.is_some() { app.cur_tr.clone() } else { String::new() },
+        ocr_engine: if app.via_uia {
+            String::new()
+        } else {
+            app.cur_ocr.clone()
+        },
+        tr_engine: if app.translation.is_some() {
+            app.cur_tr.clone()
+        } else {
+            String::new()
+        },
     };
     let Some(prompt) = crate::worker::build_explain_prompt_for(&app.cfg, &profile, &pc) else {
         return;
@@ -554,12 +588,24 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
         match msg {
             worker::WorkerMsg::Source(src) => {
                 let worker::SourceMsg {
-                    text, method, engine, img, pin, anchor, focus, ms, capture_id, recog_id, ctx,
-                    full_img, crop_rect,
+                    text,
+                    method,
+                    engine,
+                    img,
+                    pin,
+                    anchor,
+                    focus,
+                    ms,
+                    capture_id,
+                    recog_id,
+                    ctx,
+                    full_img,
+                    crop_rect,
                 } = *src;
                 // OCR結果が届いたので読み取り中表示を解除する (SPECv0.5.4 §6)
                 app.ocr_pending = false;
-                if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
+                if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source
+                {
                     return;
                 }
                 app.source = text;
@@ -606,10 +652,18 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 } else if app.mode == Mode::Recognizing {
                     app.mode = Mode::ShowingHold;
                 }
-                util::perf_log(app.cfg.perf_log, &format!("show-source {method} total={ms}ms"));
+                util::perf_log(
+                    app.cfg.perf_log,
+                    &format!("show-source {method} total={ms}ms"),
+                );
                 sync_overlay(app);
             }
-            worker::WorkerMsg::Translation { text, badge, ms, recog_id } => {
+            worker::WorkerMsg::Translation {
+                text,
+                badge,
+                ms,
+                recog_id,
+            } => {
                 app.tr_pending = false;
                 app.translation = Some(text);
                 app.status = None;
@@ -637,7 +691,11 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 app.status = Some(msg);
                 sync_overlay(app);
             }
-            worker::WorkerMsg::Error { msg, anchor, clear_source } => {
+            worker::WorkerMsg::Error {
+                msg,
+                anchor,
+                clear_source,
+            } => {
                 app.explaining = false;
                 app.ocr_pending = false;
                 app.tr_pending = false;
@@ -686,7 +744,10 @@ pub fn handle_region(rect: RECT) {
         overlay::hide(app.overlay);
         app.generation += 1;
         app.mode = Mode::Recognizing;
-        app.origin = POINT { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 };
+        app.origin = POINT {
+            x: (rect.left + rect.right) / 2,
+            y: (rect.top + rect.bottom) / 2,
+        };
         // 範囲指定も起動経路なので、既定エンジン/プロファイルをこの時点で適用する。
         app.cur_ocr = app.cfg.default_ocr.clone();
         app.cur_tr = app.cfg.default_translator.clone();
@@ -726,7 +787,9 @@ pub fn reload_config(hwnd: HWND) {
         // 無条件に ShowWindow するため、設定変更のたびに非表示のオーバーレイが
         // 画面へ出現してしまうのを防ぐ (SPECv0.5.4 §1)。表示中の設定 (テーマ等) は
         // 次回表示時の sync_overlay で反映される。
-        if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(app.overlay) }.as_bool() {
+        if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(app.overlay) }
+            .as_bool()
+        {
             sync_overlay(app);
         }
     });
@@ -764,7 +827,11 @@ pub fn sync_overlay(app: &mut App) {
         tr_labels.push(prof.name.clone());
         tr_enabled.push(true);
     }
-    let explain_keys: Vec<String> = app.cfg.ready_api_profiles().map(|p| p.name.clone()).collect();
+    let explain_keys: Vec<String> = app
+        .cfg
+        .ready_api_profiles()
+        .map(|p| p.name.clone())
+        .collect();
     let explain_labels = explain_keys.clone();
     let explain_enabled = vec![true; explain_keys.len()];
     let content = OverlayContent {
@@ -780,7 +847,9 @@ pub fn sync_overlay(app: &mut App) {
         source_lang: app.cfg.source_lang.clone(),
         target_lang: app.cfg.target_lang.clone(),
         tr_engine_detail: if app.cur_tr == "llm" {
-            app.cfg.active_profile().map(|p| format!("{} {}", p.name, p.model_name))
+            app.cfg
+                .active_profile()
+                .map(|p| format!("{} {}", p.name, p.model_name))
         } else {
             None
         },
@@ -794,11 +863,19 @@ pub fn sync_overlay(app: &mut App) {
         ocr_keys,
         ocr_labels,
         ocr_enabled,
-        cur_ocr_chip_key: if app.cur_ocr == "llm" { app.cfg.active_api_profile.clone() } else { app.cur_ocr.clone() },
+        cur_ocr_chip_key: if app.cur_ocr == "llm" {
+            app.cfg.active_api_profile.clone()
+        } else {
+            app.cur_ocr.clone()
+        },
         tr_keys,
         tr_labels,
         tr_enabled,
-        cur_tr_chip_key: if app.cur_tr == "llm" { app.cfg.active_api_profile.clone() } else { app.cur_tr.clone() },
+        cur_tr_chip_key: if app.cur_tr == "llm" {
+            app.cfg.active_api_profile.clone()
+        } else {
+            app.cur_tr.clone()
+        },
         explanation: app.explanation.clone(),
         explaining: app.explaining,
         ocr_pending: app.ocr_pending,

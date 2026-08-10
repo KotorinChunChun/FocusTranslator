@@ -69,11 +69,17 @@ fn is_japanese_char(c: char) -> bool {
 
 /// 同一 request_json の翻訳結果がDBログに既にあれば (text, recognition_id) を返す。
 /// ログ機能OFF時はDBに触れず常に None (未初期化DBファイルを不用意に作らないため)。
-fn check_db_cache(cfg: &Config, engine: &str, profile: Option<&str>, request_json: &str) -> Option<(String, i64)> {
+fn check_db_cache(
+    cfg: &Config,
+    engine: &str,
+    profile: Option<&str>,
+    request_json: &str,
+) -> Option<(String, i64)> {
     if !cfg.log_enabled {
         return None;
     }
-    crate::logdb::find_cached_translation(engine, profile, request_json).map(|(rid, text)| (text, rid))
+    crate::logdb::find_cached_translation(engine, profile, request_json)
+        .map(|(rid, text)| (text, rid))
 }
 
 /// 翻訳方向 (source, target) を決める。常に設定通り(cfg.source_lang → cfg.target_lang)に固定し、
@@ -111,8 +117,18 @@ pub fn translate(
     ctx.tr_engine.clear();
     let ctx = &ctx;
     let (source, target) = (cfg.source_lang.clone(), cfg.target_lang.clone());
-    let profile = if engine == "llm" { Some(cfg.active_api_profile.clone()) } else { None };
-    let key = (engine.to_string(), profile, source.clone(), target.clone(), text.to_string());
+    let profile = if engine == "llm" {
+        Some(cfg.active_api_profile.clone())
+    } else {
+        None
+    };
+    let key = (
+        engine.to_string(),
+        profile,
+        source.clone(),
+        target.clone(),
+        text.to_string(),
+    );
 
     // キャッシュ確認
     {
@@ -181,13 +197,21 @@ fn translate_local(_cfg: &Config, text: &str, target: &str) -> Result<String, St
     crate::onnx_translate::translate(text, target == "ja")
 }
 
-fn translate_deepl(cfg: &Config, text: &str, target: &str) -> Result<(String, TransDetail, Option<i64>), String> {
+fn translate_deepl(
+    cfg: &Config,
+    text: &str,
+    target: &str,
+) -> Result<(String, TransDetail, Option<i64>), String> {
     let key = cfg.deepl_key();
     if key.is_empty() {
         return Err("DeepL APIキーが未設定です".into());
     }
     // ":fx" で終わるキーは Free プラン
-    let host = if key.ends_with(":fx") { "api-free.deepl.com" } else { "api.deepl.com" };
+    let host = if key.ends_with(":fx") {
+        "api-free.deepl.com"
+    } else {
+        "api.deepl.com"
+    };
     let url = format!("https://{host}/v2/translate");
     let body = serde_json::json!({
         "text": [text],
@@ -197,15 +221,20 @@ fn translate_deepl(cfg: &Config, text: &str, target: &str) -> Result<(String, Tr
     // 送信前にDBキャッシュを検索し、同一request_jsonの成功済み翻訳があればAPIを呼ばない
     // (SPECv0.4.8追補: 別の親であっても検索対象)。
     if let Some((cached_text, rid)) = check_db_cache(cfg, "deepl", None, &req_json) {
-        let detail = TransDetail { request_json: Some(req_json), ..Default::default() };
+        let detail = TransDetail {
+            request_json: Some(req_json),
+            ..Default::default()
+        };
         return Ok((cached_text, detail, Some(rid)));
     }
     let mut res = ureq::post(&url)
         .header("Authorization", format!("DeepL-Auth-Key {key}"))
         .send_json(&body)
         .map_err(|e| format!("DeepL呼び出し失敗: {e}"))?;
-    let v: serde_json::Value =
-        res.body_mut().read_json().map_err(|e| format!("DeepL応答解析失敗: {e}"))?;
+    let v: serde_json::Value = res
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("DeepL応答解析失敗: {e}"))?;
     let detail = TransDetail {
         request_json: Some(req_json),
         response_json: Some(mask_keys(cfg, &v.to_string())),
@@ -218,7 +247,11 @@ fn translate_deepl(cfg: &Config, text: &str, target: &str) -> Result<(String, Tr
         .ok_or("DeepL応答に訳文がありません".into())
 }
 
-fn translate_google(cfg: &Config, text: &str, target: &str) -> Result<(String, TransDetail, Option<i64>), String> {
+fn translate_google(
+    cfg: &Config,
+    text: &str,
+    target: &str,
+) -> Result<(String, TransDetail, Option<i64>), String> {
     let key = cfg.google_key();
     if key.is_empty() {
         return Err("Google APIキーが未設定です".into());
@@ -229,15 +262,20 @@ fn translate_google(cfg: &Config, text: &str, target: &str) -> Result<(String, T
     let body = serde_json::json!({ "q": text, "target": target, "format": "text" });
     let req_json = mask_keys(cfg, &body.to_string());
     if let Some((cached_text, rid)) = check_db_cache(cfg, "google", None, &req_json) {
-        let detail = TransDetail { request_json: Some(req_json), ..Default::default() };
+        let detail = TransDetail {
+            request_json: Some(req_json),
+            ..Default::default()
+        };
         return Ok((cached_text, detail, Some(rid)));
     }
     let mut res = ureq::post(url)
         .header("X-goog-api-key", &key)
         .send_json(&body)
         .map_err(|e| format!("Google翻訳呼び出し失敗: {e}"))?;
-    let v: serde_json::Value =
-        res.body_mut().read_json().map_err(|e| format!("Google応答解析失敗: {e}"))?;
+    let v: serde_json::Value = res
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("Google応答解析失敗: {e}"))?;
     let detail = TransDetail {
         request_json: Some(req_json),
         response_json: Some(mask_keys(cfg, &v.to_string())),
@@ -255,12 +293,17 @@ fn translate_llm(
     cfg: &Config,
     ctx: &crate::config::PromptContext,
 ) -> Result<(String, TransDetail, Option<i64>), String> {
-    let prof = cfg.active_profile().ok_or("LLM APIプロファイルが設定されていません")?;
+    let prof = cfg
+        .active_profile()
+        .ok_or("LLM APIプロファイルが設定されていません")?;
     let prompt = cfg.fill_prompt(&prof.translate_prompt, ctx);
     let req = crate::llm_api::LlmRequest::text(&prompt);
     let req_json = mask_keys(cfg, &crate::llm_api::build_request_json(prof, &req));
     if let Some((cached_text, rid)) = check_db_cache(cfg, "llm", Some(&prof.name), &req_json) {
-        let detail = TransDetail { request_json: Some(req_json), ..Default::default() };
+        let detail = TransDetail {
+            request_json: Some(req_json),
+            ..Default::default()
+        };
         return Ok((cached_text, detail, Some(rid)));
     }
     let res = crate::llm_api::call(prof, &req)?;
@@ -335,4 +378,3 @@ mod tests {
         assert!(is_source_lang_text("", "12345"));
     }
 }
-

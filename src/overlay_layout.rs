@@ -3,17 +3,17 @@
 // overlay.rs の描画 (paint) とウィンドウ管理から分離して可読性を高める。
 use crate::engine;
 use crate::overlay::{
-    EditTool, OverlayContent, CHIP_CLIPBOARD, CHIP_CLOSE, CHIP_COPY, CHIP_COPY_INFO, CHIP_COPY_UIA_JSON,
-    CHIP_COPY_SRC, CHIP_COPY_TR, CHIP_EDIT_APPLY, CHIP_EDIT_CANCEL, CHIP_EDIT_ERASE,
-    CHIP_EDIT_LASSO, CHIP_EDIT_RECT, CHIP_EDIT_RESET, CHIP_EDIT_UNDO, CHIP_EXPLAIN,
-    CHIP_EXPLAIN_BASE, CHIP_IMAGE, CHIP_OCR_BASE, CHIP_OPEN_LOG, CHIP_PIN, CHIP_SETTINGS,
-    CHIP_SWAP_LANG, CHIP_TR_BASE, CHIP_UIA_NODE_BASE, CHIP_EDIT_SRC, CHIP_EDIT_TR, CHIP_EDIT_EXP,
-    CHIP_SELECTED_TEXT, CHIP_EDIT_RESTORE_FULL,
+    CHIP_CLIPBOARD, CHIP_CLOSE, CHIP_COPY, CHIP_COPY_INFO, CHIP_COPY_SRC, CHIP_COPY_TR,
+    CHIP_COPY_UIA_JSON, CHIP_EDIT_APPLY, CHIP_EDIT_CANCEL, CHIP_EDIT_ERASE, CHIP_EDIT_EXP,
+    CHIP_EDIT_LASSO, CHIP_EDIT_RECT, CHIP_EDIT_RESET, CHIP_EDIT_RESTORE_FULL, CHIP_EDIT_SRC,
+    CHIP_EDIT_TR, CHIP_EDIT_UNDO, CHIP_EXPLAIN, CHIP_EXPLAIN_BASE, CHIP_IMAGE, CHIP_OCR_BASE,
+    CHIP_OPEN_LOG, CHIP_PIN, CHIP_SELECTED_TEXT, CHIP_SETTINGS, CHIP_SWAP_LANG, CHIP_TR_BASE,
+    CHIP_UIA_NODE_BASE, EditTool, OverlayContent,
 };
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK, DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, HDC, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint, ReleaseDC, SelectObject,
+    DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK, DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, HDC,
+    HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, ReleaseDC, SelectObject,
 };
 
 /// オーバーレイの配色一式。config.overlay_theme ("system" | "light" | "dark") に応じて
@@ -102,7 +102,11 @@ thread_local! {
 
 /// 現在のテーマ (オーバーレイのレイアウト計算・描画から参照する)
 pub fn theme() -> &'static Theme {
-    if THEME_IS_LIGHT.with(|c| c.get()) { &THEME_LIGHT } else { &THEME_DARK }
+    if THEME_IS_LIGHT.with(|c| c.get()) {
+        &THEME_LIGHT
+    } else {
+        &THEME_DARK
+    }
 }
 
 /// 設定値 ("system" | "light" | "dark") から現在テーマを確定する。
@@ -137,8 +141,21 @@ pub const CHIP_H: i32 = 24;
 pub const CLOSE_SIZE: i32 = 20;
 
 pub enum Item {
-    Text { rect: RECT, text: String, size: i32, color: u32, bold: bool, mono: bool },
-    Chip { rect: RECT, label: String, id: usize, active: bool, enabled: bool },
+    Text {
+        rect: RECT,
+        text: String,
+        size: i32,
+        color: u32,
+        bold: bool,
+        mono: bool,
+    },
+    Chip {
+        rect: RECT,
+        label: String,
+        id: usize,
+        active: bool,
+        enabled: bool,
+    },
 }
 
 /// ブロック(カード)の背景。見出し・本文より下のレイヤーに描画される。
@@ -170,14 +187,28 @@ pub fn measure(hdc: HDC, text: &str, size: i32, bold: bool, maxw: i32) -> (i32, 
 /// measure() の等幅フォント版 (解説Markdownのコードブロック用。SPECv0.5.2追補)
 fn measure_font(hdc: HDC, text: &str, size: i32, bold: bool, mono: bool, maxw: i32) -> (i32, i32) {
     unsafe {
-        let font = if mono { crate::ui_helpers::make_mono_font(size, bold) } else { make_font(size, bold) };
+        let font = if mono {
+            crate::ui_helpers::make_mono_font(size, bold)
+        } else {
+            make_font(size, bold)
+        };
         let old = SelectObject(hdc, HGDIOBJ(font.0));
         let mut wide: Vec<u16> = text.encode_utf16().collect();
         if wide.is_empty() {
             wide.push(' ' as u16);
         }
-        let mut r = RECT { left: 0, top: 0, right: maxw, bottom: 0 };
-        DrawTextW(hdc, &mut wide, &mut r, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        let mut r = RECT {
+            left: 0,
+            top: 0,
+            right: maxw,
+            bottom: 0,
+        };
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut r,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        );
         SelectObject(hdc, old);
         let _ = DeleteObject(HGDIOBJ(font.0));
         (r.right - r.left, r.bottom - r.top)
@@ -204,7 +235,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             };
             let (tw, th) = measure(hdc, &msg, FONT_HEADING, false, MAXW);
             items.push(Item::Text {
-                rect: RECT { left: PAD, top: y, right: PAD + tw + 4, bottom: y + th },
+                rect: RECT {
+                    left: PAD,
+                    top: y,
+                    right: PAD + tw + 4,
+                    bottom: y + th,
+                },
                 text: msg,
                 size: FONT_HEADING,
                 color: thm.status,
@@ -214,7 +250,14 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             y += th + PAD;
             need_w = need_w.max(tw + PAD * 2 + 4);
             let _ = ReleaseDC(Some(hwnd), hdc);
-            return Layout { w: need_w.min(MAXW + PAD * 2), h: y, content_h: y, items, panels: Vec::new(), edit_preview: None };
+            return Layout {
+                w: need_w.min(MAXW + PAD * 2),
+                h: y,
+                content_h: y,
+                items,
+                panels: Vec::new(),
+                edit_preview: None,
+            };
         }
 
         // 見出し行を配置する。見出し文字は左寄せ、チップは右端に寄せて配置する。
@@ -228,14 +271,19 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
          -> i32 {
             let (hw, hh) = measure(hdc, text, FONT_HEADING, false, MAXW);
             items.push(Item::Text {
-                rect: RECT { left: PAD, top: y, right: PAD + hw + 4, bottom: y + hh },
+                rect: RECT {
+                    left: PAD,
+                    top: y,
+                    right: PAD + hw + 4,
+                    bottom: y + hh,
+                },
                 text: text.to_string(),
                 size: FONT_HEADING,
                 color,
                 bold: false,
                 mono: false,
             });
-            
+
             // チップ全体の幅を計算
             let mut chips_w = 0;
             let mut chip_sizes = Vec::new();
@@ -245,14 +293,19 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 chip_sizes.push(w);
                 chips_w += w + 6;
             }
-            
+
             // 右端(MAXW + PAD)から逆算して配置
             let mut x = MAXW + PAD - chips_w;
             let row_h = hh.max(CLOSE_SIZE);
             for (i, (lab, id, enabled)) in chips.iter().enumerate() {
                 let w = chip_sizes[i];
                 items.push(Item::Chip {
-                    rect: RECT { left: x, top: y - 1, right: x + w, bottom: y - 1 + CLOSE_SIZE },
+                    rect: RECT {
+                        left: x,
+                        top: y - 1,
+                        right: x + w,
+                        bottom: y - 1 + CLOSE_SIZE,
+                    },
                     label: lab.to_string(),
                     id: *id,
                     active: false,
@@ -277,7 +330,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                 let w = cw + 18;
                 items.push(Item::Chip {
-                    rect: RECT { left: x, top: *y, right: x + w, bottom: *y + CHIP_H },
+                    rect: RECT {
+                        left: x,
+                        top: *y,
+                        right: x + w,
+                        bottom: *y + CHIP_H,
+                    },
                     label: lab.to_string(),
                     id: base + i,
                     active: keys[i] == cur,
@@ -338,7 +396,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             sys_text_h = th;
             let text_y = y + (row_h.max(th) - th) / 2;
             items.push(Item::Text {
-                rect: RECT { left: PAD, top: text_y, right: PAD + tw + 4, bottom: text_y + th },
+                rect: RECT {
+                    left: PAD,
+                    top: text_y,
+                    right: PAD + tw + 4,
+                    bottom: text_y + th,
+                },
                 text: sys_disp,
                 size: FONT_HEADING,
                 color: thm.status,
@@ -354,16 +417,22 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
 
         // 【入力内容】: 対象アプリ情報 + UIAパスノードボタン + OCR対象画像ボタン。コピーは見出しラベルの左端。
         // クリップボードに取り込める内容があれば「コピー中の内容」ボタンのため表示する (SPECv0.5.4 §20)
-        if !content.app_title.is_empty() || content.has_image || !content.uia_nodes.is_empty()
+        if !content.app_title.is_empty()
+            || content.has_image
+            || !content.uia_nodes.is_empty()
             || content.selected_text.is_some()
-            || content.clipboard_kind != crate::util::ClipboardKind::None {
+            || content.clipboard_kind != crate::util::ClipboardKind::None
+        {
             let block_start = y;
             // UIAノード詳細JSONがあるとき (=UIA経路) は、アプリ情報コピーの隣に
             // 詳細コピーボタンを並べる (SPECv0.5.4 §7)。
             let info_chips: Vec<(&str, usize, bool)> = if content.uia_json.is_empty() {
                 vec![("📋", CHIP_COPY_INFO, true)]
             } else {
-                vec![("📋", CHIP_COPY_INFO, true), ("詳細📋", CHIP_COPY_UIA_JSON, true)]
+                vec![
+                    ("📋", CHIP_COPY_INFO, true),
+                    ("詳細📋", CHIP_COPY_UIA_JSON, true),
+                ]
             };
             let hh = heading_row(
                 &mut items,
@@ -401,15 +470,24 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 let mut info = format!("{base}{body}");
                 let (mut tw, th) = measure(hdc, &info, FONT_INFO, false, 4000);
                 if tw > avail {
-                    let budget = ((avail as f32 / tw.max(1) as f32) * body.chars().count() as f32) as usize;
-                    info = format!("{base}{}", crate::util::truncate_chars(&body, budget.max(4)));
+                    let budget =
+                        ((avail as f32 / tw.max(1) as f32) * body.chars().count() as f32) as usize;
+                    info = format!(
+                        "{base}{}",
+                        crate::util::truncate_chars(&body, budget.max(4))
+                    );
                     let (tw2, _) = measure(hdc, &info, FONT_INFO, false, 4000);
                     tw = tw2;
                 }
                 let row_h = th.max(CHIP_H);
                 let text_y = y + (row_h - th) / 2;
                 items.push(Item::Text {
-                    rect: RECT { left: PAD, top: text_y, right: PAD + tw + 4, bottom: text_y + th },
+                    rect: RECT {
+                        left: PAD,
+                        top: text_y,
+                        right: PAD + tw + 4,
+                        bottom: text_y + th,
+                    },
                     text: info,
                     size: FONT_INFO,
                     color: thm.text,
@@ -451,7 +529,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                     if needs_sep && x > PAD {
                         let sy = y + (CHIP_H - sep_h) / 2;
                         items.push(Item::Text {
-                            rect: RECT { left: x, top: sy, right: x + sep_w, bottom: sy + sep_h },
+                            rect: RECT {
+                                left: x,
+                                top: sy,
+                                right: x + sep_w,
+                                bottom: sy + sep_h,
+                            },
                             text: sep.to_string(),
                             size: FONT_CHIP,
                             color: thm.label,
@@ -462,7 +545,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                     }
 
                     items.push(Item::Chip {
-                        rect: RECT { left: x, top: y, right: x + chip_w, bottom: y + CHIP_H },
+                        rect: RECT {
+                            left: x,
+                            top: y,
+                            right: x + chip_w,
+                            bottom: y + CHIP_H,
+                        },
                         label: lab,
                         id: CHIP_UIA_NODE_BASE + i,
                         active: has_text && node_text == content.source.trim(),
@@ -477,22 +565,32 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
 
             // アプリ名が無い場合のフォールバック
             if content.app_title.is_empty()
-                && (content.has_image || content.selected_text.is_some()
+                && (content.has_image
+                    || content.selected_text.is_some()
                     || content.clipboard_kind != crate::util::ClipboardKind::None)
             {
                 let mut x = PAD;
-                let has_selection = content.selected_text.as_deref().is_some_and(|s| !s.trim().is_empty());
+                let has_selection = content
+                    .selected_text
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty());
                 // 「コピー中の内容」を左端に置く (SPECv0.5.4 §20)。内容が無ければグレーアウト。
                 {
                     let lab = "コピー中の内容";
                     let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                     let chip_w = cw + 20;
                     items.push(Item::Chip {
-                        rect: RECT { left: x, top: y, right: x + chip_w, bottom: y + CHIP_H },
+                        rect: RECT {
+                            left: x,
+                            top: y,
+                            right: x + chip_w,
+                            bottom: y + CHIP_H,
+                        },
                         label: lab.to_string(),
                         id: CHIP_CLIPBOARD,
                         active: false,
-                        enabled: content.clipboard_kind != crate::util::ClipboardKind::None && !content.busy,
+                        enabled: content.clipboard_kind != crate::util::ClipboardKind::None
+                            && !content.busy,
                     });
                     x += chip_w + 6;
                 }
@@ -501,11 +599,17 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                     let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                     let chip_w = cw + 20;
                     items.push(Item::Chip {
-                        rect: RECT { left: x, top: y, right: x + chip_w, bottom: y + CHIP_H },
+                        rect: RECT {
+                            left: x,
+                            top: y,
+                            right: x + chip_w,
+                            bottom: y + CHIP_H,
+                        },
                         label: lab.to_string(),
                         id: CHIP_SELECTED_TEXT,
                         active: has_selection
-                            && content.selected_text.as_deref().map(str::trim) == Some(content.source.trim()),
+                            && content.selected_text.as_deref().map(str::trim)
+                                == Some(content.source.trim()),
                         enabled: has_selection && !content.busy,
                     });
                     x += chip_w + 6;
@@ -514,7 +618,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                     let lab = "キャプチャ画像";
                     let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                     items.push(Item::Chip {
-                        rect: RECT { left: x, top: y, right: x + cw + 20, bottom: y + CHIP_H },
+                        rect: RECT {
+                            left: x,
+                            top: y,
+                            right: x + cw + 20,
+                            bottom: y + CHIP_H,
+                        },
                         label: lab.to_string(),
                         id: CHIP_IMAGE,
                         active: content.edit.is_some(),
@@ -562,7 +671,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             };
             let (sw, sh) = measure(hdc, &ocr_body, FONT_BODY, false, MAXW);
             let text_h = sh.max(24);
-            let rect = RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h };
+            let rect = RECT {
+                left: PAD,
+                top: y,
+                right: PAD + MAXW,
+                bottom: y + text_h,
+            };
             items.push(Item::Text {
                 rect,
                 text: ocr_body,
@@ -575,7 +689,11 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             need_w = need_w.max(sw + PAD * 2 + 4);
 
             // UIA経路はOCRを行っていないため、どのOCRエンジンもアクティブ表示にしない
-            let ocr_cur: &str = if content.via_uia { "" } else { content.cur_ocr_chip_key.as_str() };
+            let ocr_cur: &str = if content.via_uia {
+                ""
+            } else {
+                content.cur_ocr_chip_key.as_str()
+            };
             chip_row(
                 &mut items,
                 &mut y,
@@ -627,12 +745,21 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
 
             let (tw, th) = measure(hdc, t, FONT_BODY, false, MAXW);
             let text_h = th.max(24);
-            let rect = RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h };
+            let rect = RECT {
+                left: PAD,
+                top: y,
+                right: PAD + MAXW,
+                bottom: y + text_h,
+            };
             items.push(Item::Text {
                 rect,
                 text: t.clone(),
                 size: FONT_BODY,
-                color: if content.tr_pending { thm.status } else { thm.text },
+                color: if content.tr_pending {
+                    thm.status
+                } else {
+                    thm.text
+                },
                 bold: false,
                 mono: false,
             });
@@ -668,7 +795,8 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             "【解説】".to_string()
         };
 
-        let copy_btns: &[(&str, usize, bool)] = &[("📋", CHIP_COPY, true), ("✏️", CHIP_EDIT_EXP, true)];
+        let copy_btns: &[(&str, usize, bool)] =
+            &[("📋", CHIP_COPY, true), ("✏️", CHIP_EDIT_EXP, true)];
 
         let hh = heading_row(
             &mut items,
@@ -683,7 +811,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         if content.explaining {
             let (tw, th) = measure(hdc, "解説を取得中...", FONT_HEADING, false, MAXW);
             items.push(Item::Text {
-                rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
+                rect: RECT {
+                    left: PAD,
+                    top: y,
+                    right: PAD + MAXW,
+                    bottom: y + th,
+                },
                 text: "解説を取得中...".to_string(),
                 size: FONT_HEADING,
                 color: thm.status,
@@ -701,7 +834,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                         let text = "─".repeat(40);
                         let (tw, th) = measure(hdc, &text, FONT_INFO, false, MAXW);
                         items.push(Item::Text {
-                            rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
+                            rect: RECT {
+                                left: PAD,
+                                top: y,
+                                right: PAD + MAXW,
+                                bottom: y + th,
+                            },
                             text,
                             size: FONT_INFO,
                             color: thm.panel_border,
@@ -719,7 +857,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                         };
                         let (tw, th) = measure(hdc, &b.text, size, true, MAXW);
                         items.push(Item::Text {
-                            rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + th },
+                            rect: RECT {
+                                left: PAD,
+                                top: y,
+                                right: PAD + MAXW,
+                                bottom: y + th,
+                            },
                             text: b.text,
                             size,
                             color: thm.text,
@@ -735,7 +878,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                         let (tw, th) = measure(hdc, &b.text, FONT_BODY, b.bold, item_maxw);
                         let text_h = th.max(20);
                         items.push(Item::Text {
-                            rect: RECT { left: indent, top: y, right: indent + item_maxw, bottom: y + text_h },
+                            rect: RECT {
+                                left: indent,
+                                top: y,
+                                right: indent + item_maxw,
+                                bottom: y + text_h,
+                            },
                             text: b.text,
                             size: FONT_BODY,
                             color: thm.text,
@@ -748,10 +896,16 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                     crate::markdown::BlockKind::CodeBlock => {
                         let indent = PAD + 8;
                         let code_maxw = MAXW - 8;
-                        let (tw, th) = measure_font(hdc, &b.text, FONT_INFO, false, true, code_maxw);
+                        let (tw, th) =
+                            measure_font(hdc, &b.text, FONT_INFO, false, true, code_maxw);
                         let text_h = th.max(16);
                         items.push(Item::Text {
-                            rect: RECT { left: indent, top: y, right: indent + code_maxw, bottom: y + text_h },
+                            rect: RECT {
+                                left: indent,
+                                top: y,
+                                right: indent + code_maxw,
+                                bottom: y + text_h,
+                            },
                             text: b.text,
                             size: FONT_INFO,
                             color: thm.label,
@@ -765,10 +919,16 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                         // 桁揃え済みの簡易表を等幅フォントで描画する (SPECv0.5.4 §5)。
                         let indent = PAD + 8;
                         let table_maxw = MAXW - 8;
-                        let (tw, th) = measure_font(hdc, &b.text, FONT_INFO, false, true, table_maxw);
+                        let (tw, th) =
+                            measure_font(hdc, &b.text, FONT_INFO, false, true, table_maxw);
                         let text_h = th.max(16);
                         items.push(Item::Text {
-                            rect: RECT { left: indent, top: y, right: indent + table_maxw, bottom: y + text_h },
+                            rect: RECT {
+                                left: indent,
+                                top: y,
+                                right: indent + table_maxw,
+                                bottom: y + text_h,
+                            },
                             text: b.text,
                             size: FONT_INFO,
                             color: thm.text,
@@ -782,7 +942,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                         let (tw, th) = measure(hdc, &b.text, FONT_BODY, b.bold, MAXW);
                         let text_h = th.max(20);
                         items.push(Item::Text {
-                            rect: RECT { left: PAD, top: y, right: PAD + MAXW, bottom: y + text_h },
+                            rect: RECT {
+                                left: PAD,
+                                top: y,
+                                right: PAD + MAXW,
+                                bottom: y + text_h,
+                            },
                             text: b.text,
                             size: FONT_BODY,
                             color: thm.text,
@@ -817,7 +982,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             let w = cw + 20;
             let right = PAD + MAXW;
             items.push(Item::Chip {
-                rect: RECT { left: right - w, top: explain_chip_y, right, bottom: explain_chip_y + CHIP_H },
+                rect: RECT {
+                    left: right - w,
+                    top: explain_chip_y,
+                    right,
+                    bottom: explain_chip_y + CHIP_H,
+                },
                 label: lab.to_string(),
                 id: CHIP_EXPLAIN,
                 active: false,
@@ -850,11 +1020,16 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 if let Item::Chip { id, enabled, .. } = item {
                     let forbidden = *id < CHIP_OCR_BASE + engine::OCR_KEYS.len()
                         || (*id >= CHIP_TR_BASE && *id < CHIP_COPY)
-                        || (*id >= CHIP_EXPLAIN_BASE && *id < CHIP_EXPLAIN_BASE + content.explain_keys.len())
+                        || (*id >= CHIP_EXPLAIN_BASE
+                            && *id < CHIP_EXPLAIN_BASE + content.explain_keys.len())
                         || matches!(
                             *id,
-                            CHIP_EXPLAIN | CHIP_SWAP_LANG
-                                | CHIP_EDIT_SRC | CHIP_EDIT_TR | CHIP_EDIT_EXP | CHIP_SELECTED_TEXT
+                            CHIP_EXPLAIN
+                                | CHIP_SWAP_LANG
+                                | CHIP_EDIT_SRC
+                                | CHIP_EDIT_TR
+                                | CHIP_EDIT_EXP
+                                | CHIP_SELECTED_TEXT
                         )
                         || *id >= CHIP_UIA_NODE_BASE;
                     if forbidden {
@@ -874,14 +1049,24 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         let pin_left = pin_right - CLOSE_SIZE;
 
         items.push(Item::Chip {
-            rect: RECT { left: pin_left, top: ty_close, right: pin_right, bottom: ty_close + CLOSE_SIZE },
+            rect: RECT {
+                left: pin_left,
+                top: ty_close,
+                right: pin_right,
+                bottom: ty_close + CLOSE_SIZE,
+            },
             label: "📌".to_string(),
             id: CHIP_PIN,
             active: content.pinned,
             enabled: !content.busy,
         });
         items.push(Item::Chip {
-            rect: RECT { left: close_left, top: ty_close, right: close_right, bottom: ty_close + CLOSE_SIZE },
+            rect: RECT {
+                left: close_left,
+                top: ty_close,
+                right: close_right,
+                bottom: ty_close + CLOSE_SIZE,
+            },
             label: "✕".to_string(),
             id: CHIP_CLOSE,
             active: false,
@@ -893,7 +1078,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             let right = w - PANEL_MARGIN - 6;
             let left = right - bw;
             items.push(Item::Chip {
-                rect: RECT { left, top: hy - 1, right, bottom: hy - 1 + CLOSE_SIZE },
+                rect: RECT {
+                    left,
+                    top: hy - 1,
+                    right,
+                    bottom: hy - 1 + CLOSE_SIZE,
+                },
                 label: lab,
                 id: CHIP_SWAP_LANG,
                 active: false,
@@ -908,7 +1098,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             // [設定][ログを開く] は処理中でも常に押せる。別ウィンドウを開くだけで
             // 進行中の応答待ちと衝突しないため (SPECv0.5.4 §4)。
             items.push(Item::Chip {
-                rect: RECT { left: log_left, top: ty, right: log_right, bottom: ty + CHIP_H },
+                rect: RECT {
+                    left: log_left,
+                    top: ty,
+                    right: log_right,
+                    bottom: ty + CHIP_H,
+                },
                 label: "ログを開く".to_string(),
                 id: CHIP_OPEN_LOG,
                 active: false,
@@ -917,7 +1112,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             let set_right = log_left - 6;
             let set_left = set_right - set_w;
             items.push(Item::Chip {
-                rect: RECT { left: set_left, top: ty, right: set_right, bottom: ty + CHIP_H },
+                rect: RECT {
+                    left: set_left,
+                    top: ty,
+                    right: set_right,
+                    bottom: ty + CHIP_H,
+                },
                 label: "設定".to_string(),
                 id: CHIP_SETTINGS,
                 active: false,
@@ -932,7 +1132,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             if cap_w > 0 {
                 let cap_left = right_edge - cap_w;
                 items.push(Item::Chip {
-                    rect: RECT { left: cap_left, top: ty, right: right_edge, bottom: ty + CHIP_H },
+                    rect: RECT {
+                        left: cap_left,
+                        top: ty,
+                        right: right_edge,
+                        bottom: ty + CHIP_H,
+                    },
                     label: "キャプチャ画像".to_string(),
                     id: CHIP_IMAGE,
                     active: content.edit.is_some(),
@@ -941,13 +1146,22 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 right_edge = cap_left - 6;
             }
             let sel_left = right_edge - sel_w;
-            let has_selection = content.selected_text.as_deref().is_some_and(|s| !s.trim().is_empty());
+            let has_selection = content
+                .selected_text
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty());
             items.push(Item::Chip {
-                rect: RECT { left: sel_left, top: ty, right: right_edge, bottom: ty + CHIP_H },
+                rect: RECT {
+                    left: sel_left,
+                    top: ty,
+                    right: right_edge,
+                    bottom: ty + CHIP_H,
+                },
                 label: "選択中の文字列".to_string(),
                 id: CHIP_SELECTED_TEXT,
                 active: has_selection
-                    && content.selected_text.as_deref().map(str::trim) == Some(content.source.trim()),
+                    && content.selected_text.as_deref().map(str::trim)
+                        == Some(content.source.trim()),
                 enabled: has_selection && !content.busy,
             });
             // 「選択中の文字列」の左に「コピー中の内容」を置く (SPECv0.5.4 §20)。
@@ -956,11 +1170,17 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             let clip_w2 = clip_cw2 + 20;
             let clip_right = sel_left - 6;
             items.push(Item::Chip {
-                rect: RECT { left: clip_right - clip_w2, top: ty, right: clip_right, bottom: ty + CHIP_H },
+                rect: RECT {
+                    left: clip_right - clip_w2,
+                    top: ty,
+                    right: clip_right,
+                    bottom: ty + CHIP_H,
+                },
                 label: "コピー中の内容".to_string(),
                 id: CHIP_CLIPBOARD,
                 active: false,
-                enabled: content.clipboard_kind != crate::util::ClipboardKind::None && !content.busy,
+                enabled: content.clipboard_kind != crate::util::ClipboardKind::None
+                    && !content.busy,
             });
         }
 
@@ -968,7 +1188,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         let panels: Vec<Panel> = panel_spans
             .iter()
             .map(|(top, bottom, accent)| Panel {
-                rect: RECT { left: PANEL_MARGIN, top: top - 6, right: w - PANEL_MARGIN, bottom: bottom - 2 },
+                rect: RECT {
+                    left: PANEL_MARGIN,
+                    top: top - 6,
+                    right: w - PANEL_MARGIN,
+                    bottom: bottom - 2,
+                },
                 accent: *accent,
             })
             .collect();
@@ -988,16 +1213,25 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             // アンカー位置のモニタのワークエリアから、プレビューに使える最大サイズを動的に求める
             // (固定480x460ではなく、実際の画面サイズいっぱいまでウィンドウを拡張できるようにする)
             let (max_pw, max_ph) = {
-                let pt = POINT { x: content.anchor.0, y: content.anchor.1 };
+                let pt = POINT {
+                    x: content.anchor.0,
+                    y: content.anchor.1,
+                };
                 let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-                let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+                let mut mi = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
                 let _ = GetMonitorInfoW(hmon, &mut mi);
                 let wa = mi.rcWork;
                 let screen_w = wa.right - wa.left;
                 let screen_h = wa.bottom - wa.top;
                 let mw = screen_w - w - PANEL_MARGIN * 2 - 10 - PAD * 2;
                 let mh = screen_h - PAD * 2 - (CHIP_H + 8) - (CHIP_H + PAD) - 10;
-                (mw.clamp(EDIT_PREVIEW_MAX_W, 4000), mh.clamp(EDIT_PREVIEW_MAX_H, 4000))
+                (
+                    mw.clamp(EDIT_PREVIEW_MAX_W, 4000),
+                    mh.clamp(EDIT_PREVIEW_MAX_H, 4000),
+                )
             };
 
             // 基準スケール: 拡大はせず(zoom=1.0時)最大サイズに収める。ズーム倍率を掛けた上で、
@@ -1016,8 +1250,18 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             let mut ex = panel_left;
             let selection_enabled = info.has_selection && !content.busy;
             let tools: [(&str, usize, bool, bool); 5] = [
-                ("矩形", CHIP_EDIT_RECT, info.tool == EditTool::Rect, !content.busy),
-                ("投げ輪", CHIP_EDIT_LASSO, info.tool == EditTool::Lasso, !content.busy),
+                (
+                    "矩形",
+                    CHIP_EDIT_RECT,
+                    info.tool == EditTool::Rect,
+                    !content.busy,
+                ),
+                (
+                    "投げ輪",
+                    CHIP_EDIT_LASSO,
+                    info.tool == EditTool::Lasso,
+                    !content.busy,
+                ),
                 ("選択解除", CHIP_EDIT_RESET, false, !content.busy),
                 ("選択範囲を残す", CHIP_EDIT_APPLY, false, selection_enabled),
                 ("選択範囲を消す", CHIP_EDIT_ERASE, false, selection_enabled),
@@ -1026,7 +1270,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                 let cwid = cw + 18;
                 items.push(Item::Chip {
-                    rect: RECT { left: ex, top: ey, right: ex + cwid, bottom: ey + CHIP_H },
+                    rect: RECT {
+                        left: ex,
+                        top: ey,
+                        right: ex + cwid,
+                        bottom: ey + CHIP_H,
+                    },
                     label: lab.to_string(),
                     id,
                     active,
@@ -1038,7 +1287,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             ey += CHIP_H + 8;
 
             // 画像プレビュー (縦横比維持。ズーム未操作時は拡大しない。ホイールで拡大縮小できる)
-            let preview_rect = RECT { left: panel_left, top: ey, right: panel_left + pw, bottom: ey + ph };
+            let preview_rect = RECT {
+                left: panel_left,
+                top: ey,
+                right: panel_left + pw,
+                bottom: ey + ph,
+            };
             edit_preview = Some((preview_rect, scale));
             edit_max_x = edit_max_x.max(preview_rect.right + PAD);
             ey += ph + 10;
@@ -1056,7 +1310,12 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 let (cw, _) = measure(hdc, lab, FONT_CHIP, false, 200);
                 let cwid = cw + 18;
                 items.push(Item::Chip {
-                    rect: RECT { left: ax, top: ey, right: ax + cwid, bottom: ey + CHIP_H },
+                    rect: RECT {
+                        left: ax,
+                        top: ey,
+                        right: ax + cwid,
+                        bottom: ey + CHIP_H,
+                    },
                     label: lab.to_string(),
                     id,
                     active: false,
@@ -1072,6 +1331,13 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         }
 
         let _ = ReleaseDC(Some(hwnd), hdc);
-        Layout { w: total_w, h: total_h, content_h: y, items, panels, edit_preview }
+        Layout {
+            w: total_w,
+            h: total_h,
+            content_h: y,
+            items,
+            panels,
+            edit_preview,
+        }
     }
 }

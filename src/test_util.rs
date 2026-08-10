@@ -2,9 +2,9 @@
 use crate::capture::Captured;
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    CreateCompatibleDC, CreateDIBSection, CreateSolidBrush, DIB_RGB_COLORS, DT_NOPREFIX, DT_SINGLELINE, DeleteDC, DeleteObject, DrawTextW, FillRect, GetDC, HGDIOBJ, ReleaseDC, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, CreateSolidBrush,
+    DIB_RGB_COLORS, DT_NOPREFIX, DT_SINGLELINE, DeleteDC, DeleteObject, DrawTextW, FillRect, GetDC,
+    HGDIOBJ, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 
 /// GDIでテキストを白背景に黒文字で描画したBGRA画像を作る(実推論の疎通確認用)
@@ -29,7 +29,12 @@ pub fn render_text(text: &str, w: i32, h: i32) -> Captured {
             .expect("DIBセクションの作成に失敗しました");
         let old = SelectObject(mem, HGDIOBJ(bmp.0));
 
-        let rect = RECT { left: 0, top: 0, right: w, bottom: h };
+        let rect = RECT {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        };
         let bg = CreateSolidBrush(COLORREF(0x00FFFFFF));
         FillRect(mem, &rect, bg);
         let _ = DeleteObject(HGDIOBJ(bg.0));
@@ -51,6 +56,10 @@ pub fn render_text(text: &str, w: i32, h: i32) -> Captured {
         let len = (w * h * 4) as usize;
         let bgra = std::slice::from_raw_parts(bits as *const u8, len).to_vec();
         let _ = DeleteObject(HGDIOBJ(bmp.0));
-        Captured { width: w as u32, height: h as u32, bgra }
+        Captured {
+            width: w as u32,
+            height: h as u32,
+            bgra,
+        }
     }
 }

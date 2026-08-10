@@ -101,44 +101,111 @@ unsafe fn create_children(parent: HWND) {
         let hinst = hinst.into();
 
         make(
-            parent, hinst, w!("STATIC"),
-            w!("各コントロールでテキストを選択し、focus-translator のキーを押して検出を確認してください:"),
-            WS_CHILD | WS_VISIBLE, 12, 10, 664, 20, 0,
+            parent,
+            hinst,
+            w!("STATIC"),
+            w!(
+                "各コントロールでテキストを選択し、focus-translator のキーを押して検出を確認してください:"
+            ),
+            WS_CHILD | WS_VISIBLE,
+            12,
+            10,
+            664,
+            20,
+            0,
         );
 
         make(
-            parent, hinst, w!("STATIC"), w!("① 単一行 EDIT:"),
-            WS_CHILD | WS_VISIBLE, 12, 42, 664, 18, 0,
+            parent,
+            hinst,
+            w!("STATIC"),
+            w!("① 単一行 EDIT:"),
+            WS_CHILD | WS_VISIBLE,
+            12,
+            42,
+            664,
+            18,
+            0,
         );
         make(
-            parent, hinst, w!("EDIT"),
+            parent,
+            hinst,
+            w!("EDIT"),
             w!("Select this text in a single-line edit box. 単一行の選択テスト。"),
             WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(ES_AUTOHSCROLL),
-            12, 62, 664, 26, 101,
+            12,
+            62,
+            664,
+            26,
+            101,
         );
 
         make(
-            parent, hinst, w!("STATIC"), w!("② 複数行 EDIT:"),
-            WS_CHILD | WS_VISIBLE, 12, 98, 664, 18, 0,
+            parent,
+            hinst,
+            w!("STATIC"),
+            w!("② 複数行 EDIT:"),
+            WS_CHILD | WS_VISIBLE,
+            12,
+            98,
+            664,
+            18,
+            0,
         );
         make(
-            parent, hinst, w!("EDIT"),
-            w!("This is a multi-line edit control.\r\nSelect any part of this paragraph to test the selected-text detection.\r\n複数行のテキストからも範囲選択して検出できるかを確認します。"),
-            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | WINDOW_STYLE(ES_MULTILINE | ES_AUTOVSCROLL),
-            12, 118, 664, 130, 102,
+            parent,
+            hinst,
+            w!("EDIT"),
+            w!(
+                "This is a multi-line edit control.\r\nSelect any part of this paragraph to test the selected-text detection.\r\n複数行のテキストからも範囲選択して検出できるかを確認します。"
+            ),
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_BORDER
+                | WS_VSCROLL
+                | WINDOW_STYLE(ES_MULTILINE | ES_AUTOVSCROLL),
+            12,
+            118,
+            664,
+            130,
+            102,
         );
 
         make(
-            parent, hinst, w!("STATIC"), w!("③ 編集可能コンボボックス:"),
-            WS_CHILD | WS_VISIBLE, 12, 258, 664, 18, 0,
+            parent,
+            hinst,
+            w!("STATIC"),
+            w!("③ 編集可能コンボボックス:"),
+            WS_CHILD | WS_VISIBLE,
+            12,
+            258,
+            664,
+            18,
+            0,
         );
         let combo = make(
-            parent, hinst, w!("COMBOBOX"), w!(""),
+            parent,
+            hinst,
+            w!("COMBOBOX"),
+            w!(""),
             WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(CBS_DROPDOWN),
-            12, 278, 320, 220, 103,
+            12,
+            278,
+            320,
+            220,
+            103,
         );
-        for item in [w!("First combo item"), w!("Second combo item"), w!("三番目の項目")] {
-            SendMessageW(combo, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(item.as_ptr() as isize)));
+        for item in [
+            w!("First combo item"),
+            w!("Second combo item"),
+            w!("三番目の項目"),
+        ] {
+            SendMessageW(
+                combo,
+                CB_ADDSTRING,
+                Some(WPARAM(0)),
+                Some(LPARAM(item.as_ptr() as isize)),
+            );
         }
     }
 }
