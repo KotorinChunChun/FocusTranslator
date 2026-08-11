@@ -43,6 +43,8 @@ const IDC_CLOSE: i32 = 209;
 const IDC_LIST_DISABLED: i32 = 210;
 const IDC_REMOVE_DISABLED: i32 = 211;
 const IDC_ADD_TO_DISABLED: i32 = 212;
+const IDC_MOVE_TO_DISABLED: i32 = 213;
+const IDC_MOVE_TO_OCR: i32 = 214;
 
 const DLG_W: i32 = 820;
 const DLG_H: i32 = 454;
@@ -294,6 +296,49 @@ fn remove_selected(h: HWND, which: AppList) {
     }
 }
 
+/// `src` の選択行を `dst` の末尾へ移す。移動先に大文字小文字違いを含む同名項目が
+/// 既にある場合は重複追加せず、既存行のindexを返す。
+fn move_list_item(src: &mut Vec<String>, dst: &mut Vec<String>, sel: usize) -> Option<usize> {
+    if sel >= src.len() {
+        return None;
+    }
+    let item = src.remove(sel);
+    if let Some(existing) = dst.iter().position(|e| e.eq_ignore_ascii_case(&item)) {
+        Some(existing)
+    } else {
+        dst.push(item);
+        Some(dst.len() - 1)
+    }
+}
+
+/// 選択中のアプリを反対側の一覧へ移して即保存する。
+fn move_selected(h: HWND, from: AppList) {
+    let Some(sel) = listbox_get_sel(get_dlg_item(h, from.listbox_id())) else {
+        return;
+    };
+    let to = match from {
+        AppList::OcrPriority => AppList::Disabled,
+        AppList::Disabled => AppList::OcrPriority,
+    };
+    let mut cfg = Config::load();
+    let moved_to = match from {
+        AppList::OcrPriority => {
+            move_list_item(&mut cfg.ocr_priority_apps, &mut cfg.disabled_apps, sel)
+        }
+        AppList::Disabled => {
+            move_list_item(&mut cfg.disabled_apps, &mut cfg.ocr_priority_apps, sel)
+        }
+    };
+    let Some(dest_sel) = moved_to else {
+        return;
+    };
+    cfg.save();
+    refresh_lists(h);
+    refresh_running(h);
+    notify_main_reload();
+    listbox_set_sel(get_dlg_item(h, to.listbox_id()), dest_sel);
+}
+
 /// 設定変更をメインスレッドへ通知する(実行中のホールドサイクルへ即座に反映するため。
 /// settings.rs の auto_save と同じ通知経路)。
 fn notify_main_reload() {
@@ -399,10 +444,12 @@ pub fn open(parent: HWND) {
         // 2つの一覧を左右に並べる。追加・削除ボタンは各リストボックスの右上に配置し、
         // 「↓追加」(手入力欄の内容がリストへ落ちる)・「↑削除」(選択行がリストから抜ける)
         // の矢印表記で情報の移動方向を示す。
-        let col_gap = 24;
-        let col_w = (content_w - col_gap) / 2;
+        let move_col_w = 78;
+        let col_gap = 10;
+        let col_w = (content_w - move_col_w - col_gap * 2) / 2;
         let col1_x = MARGIN_L;
-        let col2_x = MARGIN_L + col_w + col_gap;
+        let move_x = col1_x + col_w + col_gap;
+        let col2_x = move_x + move_col_w + col_gap;
         let btn_w = 70;
         let btn_gap = 4;
         let add1_x = col1_x + col_w - (btn_w * 2 + btn_gap);
@@ -450,6 +497,24 @@ pub fn open(parent: HWND) {
         let list_h = 240;
         listbox(win, inst, col1_x, ly, col_w, list_h, IDC_LIST_OCR);
         listbox(win, inst, col2_x, ly, col_w, list_h, IDC_LIST_DISABLED);
+        button(
+            win,
+            inst,
+            "→ 移動",
+            move_x,
+            ly + 78,
+            move_col_w,
+            IDC_MOVE_TO_DISABLED,
+        );
+        button(
+            win,
+            inst,
+            "← 移動",
+            move_x,
+            ly + 118,
+            move_col_w,
+            IDC_MOVE_TO_OCR,
+        );
         ly += list_h + 16;
 
         button(
@@ -556,6 +621,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             match id {
                 IDC_REMOVE_OCR => remove_selected(h, AppList::OcrPriority),
                 IDC_REMOVE_DISABLED => remove_selected(h, AppList::Disabled),
+                IDC_MOVE_TO_DISABLED => move_selected(h, AppList::OcrPriority),
+                IDC_MOVE_TO_OCR => move_selected(h, AppList::Disabled),
                 IDC_REFRESH_RUNNING => refresh_running(h),
                 // 起動中のアプリを選んだら、手入力欄へ転記するだけ(共通の追加フローに乗せる)
                 IDC_RUNNING if notif == CBN_SELCHANGE => {
@@ -603,5 +670,30 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(h, msg, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::move_list_item;
+
+    #[test]
+    fn move_list_item_は選択行を移動先末尾へ移す() {
+        let mut src = vec!["a.exe".into(), "b.exe".into()];
+        let mut dst = vec!["c.exe".into()];
+
+        assert_eq!(move_list_item(&mut src, &mut dst, 0), Some(1));
+        assert_eq!(src, ["b.exe"]);
+        assert_eq!(dst, ["c.exe", "a.exe"]);
+    }
+
+    #[test]
+    fn move_list_item_は移動先の同名項目を重複させない() {
+        let mut src = vec!["APP.exe".into()];
+        let mut dst = vec!["app.exe".into()];
+
+        assert_eq!(move_list_item(&mut src, &mut dst, 0), Some(0));
+        assert!(src.is_empty());
+        assert_eq!(dst, ["app.exe"]);
     }
 }
