@@ -295,6 +295,10 @@ pub struct Config {
     pub detect_key: String,
     /// 領域表示 (プレビューキー側): プレビューキー(detect_key)押下中も枠表示するか (既定OFF)
     pub preview_detect_enabled: bool,
+    /// 旧既定LCtrlから「なし」への一度限りの移行を適用済みか。
+    /// フィールド欠落時だけfalseにするため、Config::defaultのtrueとは別指定する。
+    #[serde(default = "preview_key_none_not_migrated")]
+    pub preview_key_none_migrated: bool,
     /// 認識ログの保持上限件数
     pub log_max_records: u32,
     /// 初回起動時のセットアップ提案ダイアログを表示済みか
@@ -332,6 +336,10 @@ pub struct Config {
 
 fn default_ocr_priority_apps() -> Vec<String> {
     vec!["TeamViewer.exe".to_string()]
+}
+
+fn preview_key_none_not_migrated() -> bool {
+    false
 }
 
 /// 翻訳プロンプトの既定値 (SPECv0.5.3: 既に訳先言語ならそのまま返す指示を追加)
@@ -488,6 +496,7 @@ impl Default for Config {
             detect_enabled: false,
             detect_key: "なし".into(),
             preview_detect_enabled: false,
+            preview_key_none_migrated: true,
             log_max_records: 5000,
             first_launch_done: false,
             overlay_theme: "system".into(),
@@ -585,6 +594,15 @@ impl Config {
             } else {
                 cfg.active_api_profile.clone()
             };
+            migrated = true;
+        }
+        // v0.5.6追加要望: 無効のまま保存されていた旧既定LCtrlだけを一度「なし」へ移す。
+        // プレビュー表示を有効にしている設定と、移行後の手動選択は変更しない。
+        if !cfg.preview_key_none_migrated {
+            if !cfg.preview_detect_enabled && cfg.detect_key == "LCtrl" {
+                cfg.detect_key = "なし".into();
+            }
+            cfg.preview_key_none_migrated = true;
             migrated = true;
         }
         // 初期CLI統合時の既定名を、公式製品名「Kimi Code CLI」へ移行する。
@@ -833,6 +851,34 @@ mod tests {
         assert_eq!(cfg.detect_key, "なし");
         assert_eq!(cfg.detect_vk(), 0);
         assert!(!cfg.preview_detect_enabled);
+        assert!(cfg.preview_key_none_migrated);
+    }
+
+    #[test]
+    fn 無効な旧既定lctrlを一度だけなしへ移行する() {
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("ft_preview_key_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::set_var("FOCUSTRANSLATOR_DATA_DIR", &tmp);
+        }
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            Config::path(),
+            r#"{"detect_key":"LCtrl","preview_detect_enabled":false}"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load();
+        assert_eq!(cfg.detect_key, "なし");
+        assert!(cfg.preview_key_none_migrated);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::remove_var("FOCUSTRANSLATOR_DATA_DIR");
+        }
     }
 
     #[test]
