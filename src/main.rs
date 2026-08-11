@@ -7,6 +7,7 @@ mod app_state;
 mod capture;
 mod capture_plan;
 mod chip_handler;
+mod clipboard_text;
 mod config;
 mod detect;
 mod engine;

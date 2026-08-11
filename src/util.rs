@@ -9,7 +9,7 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    SetClipboardData,
+    RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
@@ -21,6 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GW_OWNER, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId,
 };
+use windows::core::w;
 
 pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -127,11 +128,24 @@ pub enum ClipboardKind {
 const CF_UNICODETEXT: u32 = 13;
 const CF_DIB: u32 = 8;
 
+fn html_clipboard_format() -> u32 {
+    static FORMAT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *FORMAT.get_or_init(|| unsafe { RegisterClipboardFormatW(w!("HTML Format")) })
+}
+
+fn rtf_clipboard_format() -> u32 {
+    static FORMAT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *FORMAT.get_or_init(|| unsafe { RegisterClipboardFormatW(w!("Rich Text Format")) })
+}
+
 /// クリップボードの内容種別を判定する (SPECv0.5.4 §20)。OpenClipboard 不要で軽量なため
 /// オーバーレイ同期毎に呼べる。テキストを画像より優先する。
 pub fn clipboard_kind() -> ClipboardKind {
     unsafe {
-        if IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok() {
+        if IsClipboardFormatAvailable(html_clipboard_format()).is_ok()
+            || IsClipboardFormatAvailable(rtf_clipboard_format()).is_ok()
+            || IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok()
+        {
             ClipboardKind::Text
         } else if IsClipboardFormatAvailable(CF_DIB).is_ok() {
             ClipboardKind::Image
@@ -141,25 +155,49 @@ pub fn clipboard_kind() -> ClipboardKind {
     }
 }
 
-/// クリップボードのテキスト (CF_UNICODETEXT) を取得する (SPECv0.5.4 §20)。
+/// OpenClipboard中の指定形式を、GlobalSizeで境界を確認しながらコピーする。
+unsafe fn clipboard_bytes(format: u32) -> Option<Vec<u8>> {
+    let h = unsafe { GetClipboardData(format).ok()? };
+    let hg = HGLOBAL(h.0);
+    let ptr = unsafe { GlobalLock(hg) } as *const u8;
+    if ptr.is_null() {
+        return None;
+    }
+    let size = unsafe { GlobalSize(hg) };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+    let _ = unsafe { GlobalUnlock(hg) };
+    Some(bytes)
+}
+
+/// クリップボードのテキストを取得する。HTML/RTFはMarkdownへ変換し、どちらも無い場合は
+/// CF_UNICODETEXTを取得時の空白・改行を変えずに返す。
 pub fn get_clipboard_text(hwnd: HWND) -> Option<String> {
     unsafe {
         if OpenClipboard(Some(hwnd)).is_err() {
             return None;
         }
         let result = (|| {
-            let h = GetClipboardData(CF_UNICODETEXT).ok()?;
-            let ptr = GlobalLock(HGLOBAL(h.0)) as *const u16;
-            if ptr.is_null() {
-                return None;
+            let html_format = html_clipboard_format();
+            if IsClipboardFormatAvailable(html_format).is_ok()
+                && let Some(bytes) = clipboard_bytes(html_format)
+                && let Some(markdown) = crate::clipboard_text::html_to_markdown(&bytes)
+            {
+                return Some(markdown);
             }
-            let mut len = 0usize;
-            while *ptr.add(len) != 0 {
-                len += 1;
+            let rtf_format = rtf_clipboard_format();
+            if IsClipboardFormatAvailable(rtf_format).is_ok()
+                && let Some(bytes) = clipboard_bytes(rtf_format)
+                && let Some(markdown) = crate::clipboard_text::rtf_to_markdown(&bytes)
+            {
+                return Some(markdown);
             }
-            let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
-            let _ = GlobalUnlock(HGLOBAL(h.0));
-            Some(s)
+            let bytes = clipboard_bytes(CF_UNICODETEXT)?;
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .take_while(|unit| *unit != 0)
+                .collect();
+            Some(String::from_utf16_lossy(&units))
         })();
         let _ = CloseClipboard();
         result

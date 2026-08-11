@@ -128,9 +128,8 @@ fn begin_fresh_session(status: &str) -> Option<(u64, String, isize, (i32, i32))>
 fn chip_clipboard(c: ChipCtx) {
     match crate::util::clipboard_kind() {
         crate::util::ClipboardKind::Text => {
-            let text = crate::util::get_clipboard_text(main_hwnd())
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty());
+            let text =
+                crate::util::get_clipboard_text(main_hwnd()).filter(|t| !t.trim().is_empty());
             let Some(text) = text else {
                 with_app(|app| {
                     app.badge = Some("クリップボードのテキストを取得できませんでした".into());
