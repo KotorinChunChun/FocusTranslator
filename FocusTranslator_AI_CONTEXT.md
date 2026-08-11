@@ -9,6 +9,7 @@
 - `capture.rs` / `capture_plan.rs` / `uia.rs`: カーソル下や選択範囲のキャプチャ計画、UI Automationによる文字列・画面情報の取得。
 - `ocr.rs`: OneOCR、Windows OCR、PaddleOCR、LLM/VLMを共通のOCR結果へ正規化する上位経路。
 - `oneocr.rs` / `paddle_ocr.rs`: 各OCRエンジン固有の実装。
+- `clipboard_text.rs`: WindowsクリップボードのCF_HTML／RTFをMarkdownへ変換する純粋な解析処理。クリップボードAPIの所有は`util.rs`。
 
 ### 翻訳・LLM
 
@@ -54,6 +55,10 @@ Codex CLI 0.147.0では `--ask-for-approval never` は `exec` サブコマンド
 ### 範囲選択ホットキーとESC
 
 範囲選択は `region.rs` がHWNDを単一管理し、起動済みなら同じウィンドウを再利用する。登録時の `MOD_NOREPEAT` と合わせて、キーリピートと再トリガーの双方から多重生成を防ぐ。ESCは範囲ウィンドウの`WM_KEYDOWN`だけに依存せず、メインタイマーから`GetAsyncKeyState`も確認する。ピン留めオーバーレイも前面ウィンドウに関係なくESCで閉じる。
+
+### リッチクリップボードとBossGuard
+
+クリップボードはHTML、RTF、Unicodeプレーンテキスト、画像の順に判定する。HTML／RTFは`clipboard_text.rs`でMarkdownへ変換し、プレーンテキストは空判定以外でtrimせず原文を保持する。BossGuardは対象アプリの情報を隠す機能ではなく、FocusTranslator自身のアプリ名・開発者名だけを`util.rs`の空白表示へ切り替える。ログや機能名まで消さないこと。
 
 ## SPECからの逸脱・未実装事項
 
