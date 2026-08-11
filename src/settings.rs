@@ -141,7 +141,7 @@ const WM_PROF_CONN_RESULT: u32 = WM_APP + 20;
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
 /// 左下欄外のバージョン情報 (SPECv0.5.2追補)。アプリ名は正式名に統一 (SPECv0.5.4 §17)。
-const APP_UPDATE_DATE: &str = "2026/8/1";
+const APP_UPDATE_DATE: &str = "2026/8/11";
 /// 開発者名 (SPECv0.5.4 §17)
 const APP_DEVELOPER: &str = "Kotorichun";
 /// 「使い方」ボタンで開くリポジトリルート (README表示。SPECv0.5.4 §11)
