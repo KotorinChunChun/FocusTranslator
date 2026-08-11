@@ -357,7 +357,7 @@ pub const DEFAULT_CLI_PROFILE_NAMES: [&str; 5] = [
     "Claude CLI",
     "GitHub Copilot CLI",
     "Gemini CLI",
-    "Kimi K3",
+    "Kimi Code CLI",
 ];
 
 /// 既定LLMプロファイルをその名前から新規生成する (設定に同名プロファイルが無いときの
@@ -404,7 +404,7 @@ fn seed_profile(name: &str) -> ApiProfile {
             ApiType::GeminiCli.default_model().into(),
             String::new(),
         ),
-        "Kimi K3" => (
+        "Kimi Code CLI" => (
             ApiType::KimiCli,
             ApiType::KimiCli.default_model().into(),
             String::new(),
@@ -581,6 +581,22 @@ impl Config {
             } else {
                 cfg.active_api_profile.clone()
             };
+            migrated = true;
+        }
+        // 初期CLI統合時の既定名を、公式製品名「Kimi Code CLI」へ移行する。
+        if !cfg.api_profiles.iter().any(|p| p.name == "Kimi Code CLI")
+            && let Some(profile) = cfg
+                .api_profiles
+                .iter_mut()
+                .find(|p| p.name == "Kimi K3" && p.api_type == ApiType::KimiCli)
+        {
+            profile.name = "Kimi Code CLI".into();
+            if cfg.active_api_profile == "Kimi K3" {
+                cfg.active_api_profile = profile.name.clone();
+            }
+            if cfg.default_api_profile == "Kimi K3" {
+                cfg.default_api_profile = profile.name.clone();
+            }
             migrated = true;
         }
         for p in &mut cfg.api_profiles {
@@ -803,6 +819,37 @@ mod tests {
             (ApiType::KimiCli, "k3-256k"),
         ] {
             assert_eq!(api_type.default_model(), expected);
+        }
+    }
+
+    #[test]
+    fn kimi旧既定プロファイル名を公式名へ移行する() {
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("ft_kimi_name_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::set_var("FOCUSTRANSLATOR_DATA_DIR", &tmp);
+        }
+        let json = r#"{
+            "api_profiles": [{"name":"Kimi K3","api_type":"KimiCli","model_name":"k3"}],
+            "active_api_profile":"Kimi K3",
+            "default_api_profile":"Kimi K3",
+            "cli_profiles_seeded":true
+        }"#;
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(Config::path(), json).unwrap();
+
+        let cfg = Config::load();
+        assert!(cfg.api_profiles.iter().any(|p| p.name == "Kimi Code CLI"));
+        assert!(!cfg.api_profiles.iter().any(|p| p.name == "Kimi K3"));
+        assert_eq!(cfg.active_api_profile, "Kimi Code CLI");
+        assert_eq!(cfg.default_api_profile, "Kimi Code CLI");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::remove_var("FOCUSTRANSLATOR_DATA_DIR");
         }
     }
 

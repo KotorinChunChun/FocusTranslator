@@ -1282,7 +1282,7 @@ const API_TYPE_DISP: [&str; 15] = [
     "Claude CLI",
     "GitHub Copilot CLI",
     "Gemini CLI",
-    "Kimi CLI (K3)",
+    "Kimi Code CLI",
 ];
 
 fn api_type_index(t: &crate::config::ApiType) -> usize {
