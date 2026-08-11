@@ -22,7 +22,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GA_ROOT, GetAncestor, GetCursorPos, KillTimer, MB_ICONWARNING, MB_OK, MessageBoxW, SetTimer,
-    WindowFromPoint,
+    SetWindowTextW, WindowFromPoint,
 };
 use windows::core::{PCWSTR, w};
 
@@ -771,6 +771,12 @@ pub fn reload_config(hwnd: HWND) {
         app.cfg.active_api_profile = keep_profile;
         // オーバーレイのテーマ設定を反映する (sync_overlay の再描画で配色が切り替わる)
         crate::overlay_layout::apply_theme(&app.cfg.overlay_theme);
+        let main_title = crate::util::to_wide(crate::util::app_display_name(app.cfg.boss_guard));
+        unsafe {
+            let _ = SetWindowTextW(hwnd, PCWSTR(main_title.as_ptr()));
+        }
+        crate::overlay::apply_boss_guard(app.overlay, app.cfg.boss_guard);
+        crate::logviewer::apply_boss_guard(app.cfg.boss_guard);
         unsafe {
             let _ = KillTimer(Some(hwnd), TIMER_POLL);
             SetTimer(Some(hwnd), TIMER_POLL, app.cfg.poll_ms, None);
@@ -845,6 +851,7 @@ pub fn sync_overlay(app: &mut App) {
     let explain_enabled = vec![true; explain_keys.len()];
     let content = OverlayContent {
         main_hwnd: app.main.0 as isize,
+        boss_guard: app.cfg.boss_guard,
         anchor: app.anchor,
         source: app.source.clone(),
         translation: app.translation.clone(),

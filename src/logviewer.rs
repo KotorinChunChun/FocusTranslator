@@ -177,8 +177,11 @@ pub fn open(instance: HINSTANCE) {
                 *r.borrow_mut() = true;
             }
         });
-        let title_w =
-            crate::util::to_wide(&format!("{} ログビューア", crate::util::APP_DISPLAY_NAME));
+        let cfg = crate::config::Config::load();
+        let title_w = crate::util::to_wide(&format!(
+            "{} ログビューア",
+            crate::util::app_display_name(cfg.boss_guard)
+        ));
         if let Ok(h) = CreateWindowExW(
             WS_EX_TOPMOST,
             class,
@@ -199,6 +202,19 @@ pub fn open(instance: HINSTANCE) {
             let _ = ShowWindow(h, SW_SHOW);
             let _ = SetForegroundWindow(h);
         }
+    }
+}
+
+pub fn apply_boss_guard(enabled: bool) {
+    if !is_open() {
+        return;
+    }
+    let title = crate::util::to_wide(&format!(
+        "{} ログビューア",
+        crate::util::app_display_name(enabled)
+    ));
+    unsafe {
+        let _ = SetWindowTextW(hwnd(), PCWSTR(title.as_ptr()));
     }
 }
 

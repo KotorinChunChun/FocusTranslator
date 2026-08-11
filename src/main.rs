@@ -150,10 +150,11 @@ fn main() {
             ..Default::default()
         };
         RegisterClassW(&wc);
+        let title = util::to_wide(util::app_display_name(cfg.boss_guard));
         CreateWindowExW(
             Default::default(),
             class,
-            w!("FocusTranslator"),
+            windows::core::PCWSTR(title.as_ptr()),
             WS_OVERLAPPED,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -167,7 +168,7 @@ fn main() {
         .expect("メインウィンドウの作成に失敗")
     };
 
-    let overlay = overlay::create(instance);
+    let overlay = overlay::create(instance, cfg.boss_guard);
     tray::add_icon(main);
 
     // 範囲指定ホットキー (SPEC §11: 衝突時は通知)
@@ -198,7 +199,10 @@ fn main() {
             let msg = windows::core::HSTRING::from(
                 "初回起動です。\n高精度な画面認識(PaddleOCR)と、ONNX翻訳モデルをダウンロードしますか？\n（※画面認識は標準でOneOCR(Windows 11内蔵)を使用します。ONNXを導入しないとローカル翻訳ができません）",
             );
-            let title_w = util::to_wide(&format!("{} - 初回セットアップ", util::APP_DISPLAY_NAME));
+            let title_w = util::to_wide(&format!(
+                "{} - 初回セットアップ",
+                util::app_display_name(cfg.boss_guard)
+            ));
             let title = windows::core::PCWSTR(title_w.as_ptr());
             let result = MessageBoxW(
                 Some(main),

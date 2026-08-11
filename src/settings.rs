@@ -17,8 +17,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, IDC_ARROW,
     IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO,
     MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL,
-    SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
+    SetForegroundWindow, SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_DESTROY, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
 };
 use windows::core::{PCWSTR, w};
 
@@ -111,6 +111,8 @@ const IDC_PROF_TEST_CONN: i32 = 182;
 const IDC_PROF_CONN_STATUS: i32 = 183;
 /// アプリ別の動作設定 (OCR優先/実行しない) ダイアログを開くボタン (SPECv0.5.5 §2)
 const IDC_OCR_PRIORITY_APPS: i32 = 184;
+/// アプリ名・開発者名を空白表示へ切り替えるBossGuard。
+const IDC_BOSS_GUARD: i32 = 185;
 
 /// エディットコントロールの通知コード (windows クレートに定義がないもの)
 const EN_KILLFOCUS: u32 = 0x0200;
@@ -139,7 +141,6 @@ const WM_PROF_CONN_RESULT: u32 = WM_APP + 20;
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
 /// 左下欄外のバージョン情報 (SPECv0.5.2追補)。アプリ名は正式名に統一 (SPECv0.5.4 §17)。
-const APP_VERSION_LABEL: &str = crate::util::APP_DISPLAY_NAME;
 const APP_UPDATE_DATE: &str = "2026/8/1";
 /// 開発者名 (SPECv0.5.4 §17)
 const APP_DEVELOPER: &str = "Kotorichun";
@@ -229,7 +230,11 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
         let win_y = 10;
         let win_h = win_h.min(screen_h - 40);
-        let title_w = crate::util::to_wide(&format!("{} 設定", crate::util::APP_DISPLAY_NAME));
+        let boss_guard = Config::load().boss_guard;
+        let title_w = crate::util::to_wide(&format!(
+            "{} 設定",
+            crate::util::app_display_name(boss_guard)
+        ));
         if let Ok(h) = CreateWindowExW(
             ex_style,
             class,
@@ -362,6 +367,16 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let mut y = GROUP2_Y + GTOP;
         checkbox(h, inst, "起動時に常駐する", lx, y, 170, IDC_AUTOSTART);
         checkbox(h, inst, "計測ログを有効化", lx + 180, y, 160, IDC_PERFLOG);
+        y += STEP;
+        checkbox(
+            h,
+            inst,
+            "BossGuard（アプリ名・開発者名を隠す）",
+            lx,
+            y,
+            320,
+            IDC_BOSS_GUARD,
+        );
         y += STEP;
         checkbox(
             h,
@@ -828,10 +843,7 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     button(h, inst, "閉じる", right - 86, LAYOUT_BTN_Y, 80, IDC_CLOSE);
 
     // ---- 左下欄外: バージョン情報 (SPECv0.5.2追補。開発者名を併記: SPECv0.5.4 §17) ----
-    let version_text = format!(
-        "{APP_VERSION_LABEL}  v{}  (更新日: {APP_UPDATE_DATE})  開発: {APP_DEVELOPER}",
-        env!("CARGO_PKG_VERSION")
-    );
+    let version_text = version_info_text(Config::load().boss_guard);
     ctl(
         h,
         inst,
@@ -873,6 +885,27 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             LPARAM(font.0 as isize),
         );
     }
+}
+
+fn version_info_text(boss_guard: bool) -> String {
+    let developer = if boss_guard {
+        crate::util::HIDDEN_BRANDING
+    } else {
+        APP_DEVELOPER
+    };
+    format!(
+        "{}  v{}  (更新日: {APP_UPDATE_DATE})  開発: {developer}",
+        crate::util::app_display_name(boss_guard),
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn apply_boss_guard(h: HWND, enabled: bool) {
+    let title = to_wide(&format!("{} 設定", crate::util::app_display_name(enabled)));
+    unsafe {
+        let _ = SetWindowTextW(h, PCWSTR(title.as_ptr()));
+    }
+    set_ctl_text(h, IDC_VERSION_INFO, &version_info_text(enabled));
 }
 
 fn populate(h: HWND) {
@@ -957,6 +990,7 @@ fn populate(h: HWND) {
     load_profile_to_ui(h, sel);
     update_prof_default_btn(h);
     check_set(h, IDC_AUTOSTART, cfg.autostart);
+    check_set(h, IDC_BOSS_GUARD, cfg.boss_guard);
     check_set(h, IDC_PERFLOG, cfg.perf_log);
     check_set(h, IDC_LOG_ENABLED, cfg.log_enabled);
     check_set(h, IDC_DEBUG_MODE, cfg.debug_mode);
@@ -2112,6 +2146,7 @@ fn save(h: HWND, ask_consent: bool) {
     }
 
     cfg.autostart = check_get(h, IDC_AUTOSTART);
+    cfg.boss_guard = check_get(h, IDC_BOSS_GUARD);
     cfg.perf_log = check_get(h, IDC_PERFLOG);
     cfg.log_enabled = check_get(h, IDC_LOG_ENABLED);
     cfg.debug_mode = check_get(h, IDC_DEBUG_MODE);
@@ -2264,6 +2299,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     update_explanations(h);
                 }
                 IDC_AUTOSTART
+                | IDC_BOSS_GUARD
                 | IDC_PERFLOG
                 | IDC_LOG_ENABLED
                 | IDC_DEBUG_MODE
@@ -2273,6 +2309,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     if notif == BN_CLICKED =>
                 {
                     auto_save(h, false);
+                    if id == IDC_BOSS_GUARD {
+                        apply_boss_guard(h, check_get(h, IDC_BOSS_GUARD));
+                    }
                 }
                 IDC_POLL | IDC_PIN_HOLD | IDC_HOTKEY | IDC_DEEPL | IDC_GOOGLE | IDC_LOG_MAX
                     if notif == EN_KILLFOCUS =>

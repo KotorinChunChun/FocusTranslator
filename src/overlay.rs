@@ -26,11 +26,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowRect,
     HTCAPTION, HTCLIENT, HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, IsWindowVisible, KillTimer,
     LoadCursorW, MA_NOACTIVATE, PostMessageW, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SendMessageW, SetTimer, SetWindowPos, ShowWindow, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_PAINT, WM_TIMER, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SWP_NOACTIVATE, SendMessageW, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
 // チップID (main へ WM_APP_CHIP で通知)
 pub const CHIP_OCR_BASE: usize = 0; // 0..=4
@@ -166,6 +166,7 @@ struct EditState {
 #[derive(Default, Clone)]
 pub struct OverlayContent {
     pub main_hwnd: isize,
+    pub boss_guard: bool,
     pub anchor: (i32, i32),
     pub source: String,
     pub translation: Option<String>,
@@ -471,7 +472,7 @@ pub fn finish_edit_session() -> Option<(Arc<Captured>, Option<RECT>)> {
     result
 }
 
-pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
+pub fn create(instance: windows::Win32::Foundation::HINSTANCE, boss_guard: bool) -> HWND {
     unsafe {
         let class = w!("FocusTranslatorOverlay");
         let wc = WNDCLASSW {
@@ -483,13 +484,14 @@ pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
             ..Default::default()
         };
         RegisterClassW(&wc);
+        let title = crate::util::to_wide(crate::util::app_display_name(boss_guard));
         CreateWindowExW(
             WS_EX_TOPMOST
                 | WS_EX_TOOLWINDOW
                 | WS_EX_NOACTIVATE
                 | windows::Win32::UI::WindowsAndMessaging::WS_EX_TRANSPARENT,
             class,
-            w!("FocusTranslator"),
+            PCWSTR(title.as_ptr()),
             WS_POPUP,
             0,
             0,
@@ -501,6 +503,13 @@ pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
             None,
         )
         .unwrap_or_default()
+    }
+}
+
+pub fn apply_boss_guard(hwnd: HWND, enabled: bool) {
+    let title = crate::util::to_wide(crate::util::app_display_name(enabled));
+    unsafe {
+        let _ = SetWindowTextW(hwnd, PCWSTR(title.as_ptr()));
     }
 }
 

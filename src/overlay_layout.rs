@@ -230,8 +230,14 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
 
         if content.error_only {
             let msg = match &content.status {
-                Some(s) if !s.is_empty() => format!("{} - {}", crate::util::APP_SHORT_NAME, s),
-                _ => crate::util::APP_SHORT_NAME.to_string(),
+                Some(s) if !s.is_empty() => {
+                    format!(
+                        "{} - {}",
+                        crate::util::app_short_name(content.boss_guard),
+                        s
+                    )
+                }
+                _ => crate::util::app_short_name(content.boss_guard).to_string(),
             };
             let (tw, th) = measure(hdc, &msg, FONT_HEADING, false, MAXW);
             items.push(Item::Text {
@@ -373,7 +379,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
             msg_part.push_str(&format!("[{}]", b));
         }
 
-        let mut sys_disp = crate::util::APP_SHORT_NAME.to_string();
+        let mut sys_disp = crate::util::app_short_name(content.boss_guard).to_string();
         if !msg_part.is_empty() {
             sys_disp.push_str(" - ");
             sys_disp.push_str(&msg_part);

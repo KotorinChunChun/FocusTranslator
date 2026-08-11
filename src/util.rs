@@ -34,15 +34,37 @@ pub const APP_DISPLAY_NAME: &str = "なにこれ？（Focus Translator）";
 /// タイトルとして使う (括弧書きの英語名までは表示しない)。
 pub const APP_SHORT_NAME: &str = "なにこれ？";
 
+/// BossGuard有効時にアプリ名・開発者名の代わりに表示する空白文字。
+pub const HIDDEN_BRANDING: &str = "　";
+
+pub fn app_display_name(boss_guard: bool) -> &'static str {
+    if boss_guard {
+        HIDDEN_BRANDING
+    } else {
+        APP_DISPLAY_NAME
+    }
+}
+
+pub fn app_short_name(boss_guard: bool) -> &'static str {
+    if boss_guard {
+        HIDDEN_BRANDING
+    } else {
+        APP_SHORT_NAME
+    }
+}
+
 static DISPLAY_NAME_W: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+static HIDDEN_BRANDING_W: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
 
 /// 表示名の PCWSTR。静的領域を指すのでそのまま API に渡してよい。
 pub fn display_name_pcwstr() -> windows::core::PCWSTR {
-    windows::core::PCWSTR(
-        DISPLAY_NAME_W
-            .get_or_init(|| to_wide(APP_DISPLAY_NAME))
-            .as_ptr(),
-    )
+    let boss_guard = crate::config::Config::load().boss_guard;
+    let wide = if boss_guard {
+        HIDDEN_BRANDING_W.get_or_init(|| to_wide(HIDDEN_BRANDING))
+    } else {
+        DISPLAY_NAME_W.get_or_init(|| to_wide(APP_DISPLAY_NAME))
+    };
+    windows::core::PCWSTR(wide.as_ptr())
 }
 
 /// テスト用の直列化ロック。FOCUSTRANSLATOR_DATA_DIR を切り替えるテスト(logdb)と、

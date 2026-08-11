@@ -325,6 +325,9 @@ pub struct Config {
     /// 大文字小文字は区別しない。既定は空(誰も除外しない)。
     #[serde(default)]
     pub disabled_apps: Vec<String>,
+    /// アプリ自身の表示名・開発者名を画面上で空白化するBossGuard。
+    #[serde(default)]
+    pub boss_guard: bool,
 }
 
 fn default_ocr_priority_apps() -> Vec<String> {
@@ -494,6 +497,7 @@ impl Default for Config {
             llama_mmproj_path: String::new(),
             ocr_priority_apps: default_ocr_priority_apps(),
             disabled_apps: Vec::new(),
+            boss_guard: false,
         }
     }
 }
@@ -829,6 +833,20 @@ mod tests {
         assert_eq!(cfg.detect_key, "なし");
         assert_eq!(cfg.detect_vk(), 0);
         assert!(!cfg.preview_detect_enabled);
+    }
+
+    #[test]
+    fn boss_guardは既定で無効() {
+        let cfg = Config::default();
+        assert!(!cfg.boss_guard);
+        assert_eq!(
+            crate::util::app_display_name(false),
+            crate::util::APP_DISPLAY_NAME
+        );
+        assert_eq!(
+            crate::util::app_display_name(true),
+            crate::util::HIDDEN_BRANDING
+        );
     }
 
     #[test]
