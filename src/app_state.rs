@@ -21,8 +21,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, HOT_KEY_MODIFIERS, RegisterHotKey, UnregisterHotKey, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GetAncestor, GetCursorPos, KillTimer, MB_ICONWARNING, MB_OK, MessageBoxW, SetTimer,
-    SetWindowTextW, WindowFromPoint,
+    GA_ROOT, GetAncestor, GetCursorPos, KillTimer, MB_ICONWARNING, MB_OK, MessageBoxW,
+    SetForegroundWindow, SetTimer, SetWindowTextW, WindowFromPoint,
 };
 use windows::core::{PCWSTR, w};
 
@@ -167,6 +167,23 @@ pub fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
         };
         guard.as_mut().map(f)
     })
+}
+
+/// オーバーレイ表示の起点として保存した対象アプリを前面に戻す。
+/// オーバーレイ自身は WS_EX_NOACTIVATE のままなので、クリックを受けた時点で明示的に呼ぶ。
+pub fn activate_overlay_target() -> bool {
+    let Some(target) = with_app(|app| app.target) else {
+        return false;
+    };
+    if target == 0 {
+        return false;
+    }
+    unsafe {
+        let target = HWND(target as *mut _);
+        let root = GetAncestor(target, GA_ROOT);
+        let target = if root.is_invalid() { target } else { root };
+        !target.is_invalid() && SetForegroundWindow(target).as_bool()
+    }
 }
 
 pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
@@ -742,14 +759,26 @@ pub fn handle_region(rect: RECT) {
     // 画像編集画面を開いたまま範囲指定した場合も、ホールドキー起動時と同様に
     // 古い編集セッションを破棄してから開始する (展開したまま前の画像が残るのを防ぐ)。
     overlay::exit_edit_mode();
+    // 前回の結果オーバーレイが選択矩形中央に残っていても、起点アプリとして誤採用しない。
+    with_app(|app| overlay::hide(app.overlay));
+    let center = POINT {
+        x: (rect.left + rect.right) / 2,
+        y: (rect.top + rect.bottom) / 2,
+    };
+    let target = unsafe {
+        let root = GetAncestor(WindowFromPoint(center), GA_ROOT);
+        if root.is_invalid() {
+            0
+        } else {
+            root.0 as isize
+        }
+    };
     let Some((generation, cfg, main)) = with_app(|app| {
         overlay::hide(app.overlay);
         app.generation += 1;
         app.mode = Mode::Recognizing;
-        app.origin = POINT {
-            x: (rect.left + rect.right) / 2,
-            y: (rect.top + rect.bottom) / 2,
-        };
+        app.origin = center;
+        app.target = target;
         // 範囲指定も起動経路なので、既定エンジン/プロファイルをこの時点で適用する。
         app.cur_ocr = app.cfg.default_ocr.clone();
         app.cur_tr = app.cfg.default_translator.clone();

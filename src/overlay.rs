@@ -1006,6 +1006,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(HTCLIENT as isize)
         }
         WM_LBUTTONDOWN => {
+            // WS_EX_NOACTIVATE のオーバーレイを操作した後もESC等の入力先が自然に戻るよう、
+            // 表示の起点となった対象アプリのトップレベルウィンドウを前面化する。
+            let _ = crate::app_state::activate_overlay_target();
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             let hit = hit_test_chip(x, y);
