@@ -13,15 +13,16 @@
 ### 翻訳・LLM
 
 - `translate.rs`: ONNX、翻訳API、LLMプロファイルを共通の翻訳結果へ正規化する上位経路。
-- `llm_api.rs`: `ApiProfile`を受け、HTTP API方式とCLI方式を振り分ける共通入口。キャッシュ用リクエスト表現と接続確認も同じ境界で振り分ける。
-- `llm_cli.rs`: Codex、Claude、GitHub Copilot、Gemini、KimiのCLI検出、非対話コマンド構築、一時ファイル、タイムアウト、出力・usage正規化を担当する。HTTPや画面表示の責務は持たない。
+- `llm_api.rs`: `ApiProfile`を受け、HTTP API方式とCLI方式を振り分ける共通入口。キャッシュ用リクエスト表現に加え、OpenAI互換／Gemini／Claudeのモデル一覧取得も担当する。
+- `llm_cli.rs`: Codex、Claude、GitHub Copilot、Gemini、Kimi CodeのCLI検出、モデル候補取得、非対話コマンド構築、一時ファイル、タイムアウト、出力・usage正規化を担当する。HTTPや画面表示の責務は持たない。
 - `onnx_translate.rs`: ローカルONNX翻訳モデルの推論。
 - `llama_server.rs`: アプリ内で管理するllama.cppサーバーのライフサイクル。
 
 ### 設定・画面・処理制御
 
-- `config.rs`: `ApiType` / `ApiProfile`を含む永続設定、既定値、設定移行。CLIプロファイルは初回移行時に一度だけ追加し、利用者が削除したものを再作成しない。
-- `settings.rs`: Win32設定画面。LLMプロファイルではAPIのURL・キー入力と、CLIの自動検出・手動パス・導入案内を同じ編集領域で切り替える。
+- `config.rs`: `ApiType` / `ApiProfile`を含む永続設定、既定値、設定移行。CLIプロファイルは初回移行時に一度だけ追加し、利用者が削除したものを再作成しない。プレビューキーの新規既定値は「なし」。
+- `settings.rs`: Win32設定画面。LLMプロファイルではAPI／CLI種別に応じて不要欄を無効化し、モデル名を自由入力可能なコンボボックスとして扱う。
+- `region.rs` / `app_state.rs`: 範囲選択ウィンドウの単一起動と、ホットキー・ESC・ピン留めを含むアプリ状態遷移。
 - `worker.rs`: キャプチャ後のOCR・翻訳・解説処理とログ記録を調停する。
 - `overlay.rs` / `chip_handler.rs`: 結果表示と、OCR・翻訳・解説エンジン／プロファイル別チップからの再実行。
 - `logdb.rs` / `logviewer.rs`: キャッシュを含むSQLite履歴とログ画面。
@@ -44,7 +45,15 @@ Codex CLI 0.147.0では `--ask-for-approval never` は `exec` サブコマンド
 
 ### CLIプロファイル移行
 
-`Config.cli_profiles_seeded` は既存利用者へ5種類の既定CLIプロファイルを一度だけ加えるための移行フラグである。単純に「足りない名前を毎回追加」すると、利用者が意図的に削除したプロファイルを起動のたびに復活させるため、このフラグを維持すること。
+`Config.cli_profiles_seeded` は既存利用者へ5種類の既定CLIプロファイルを一度だけ加えるための移行フラグである。単純に「足りない名前を毎回追加」すると、利用者が意図的に削除したプロファイルを起動のたびに復活させるため、このフラグを維持すること。初期実装の既定名 `Kimi K3` は、同じ名前のKimiプロファイルがある場合に限り `Kimi Code CLI` へ移行する。プレビュー表示が無効のまま旧既定LCtrlを保持している設定は `preview_key_none_migrated` で一度だけ「なし」へ移し、以後の手動選択を上書きしない。
+
+### モデル一覧と自由入力の両立
+
+設定画面のモデル欄は `CBS_DROPDOWN` であり、取得候補にない文字列も保持する。APIは各社のモデル一覧APIを呼び、CLIはCodexのJSONカタログ、Kimiのprovider JSON、Copilotのhelp出力を優先する。機械可読な一覧を提供しないCLIや取得失敗時は公式候補へフォールバックするが、現在の自由入力値を消してはならない。CLI既定モデルは応答速度と定額枠節約を優先した軽量候補である。
+
+### 範囲選択ホットキーとESC
+
+範囲選択は `region.rs` がHWNDを単一管理し、起動済みなら同じウィンドウを再利用する。登録時の `MOD_NOREPEAT` と合わせて、キーリピートと再トリガーの双方から多重生成を防ぐ。ESCは範囲ウィンドウの`WM_KEYDOWN`だけに依存せず、メインタイマーから`GetAsyncKeyState`も確認する。ピン留めオーバーレイも前面ウィンドウに関係なくESCで閉じる。
 
 ## SPECからの逸脱・未実装事項
 
