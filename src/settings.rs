@@ -151,6 +151,7 @@ const GITHUB_RELEASES_PAGE_URL: &str =
     "https://github.com/KotorinChunChun/FocusTranslator/releases";
 
 const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
+const PREVIEW_KEYS: [&str; 6] = ["なし", "RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
 const OCR_KEYS: [&str; 4] = ["oneocr", "win", "paddle", "llm"];
 const OCR_DISP: [&str; 4] = [
     "OneOCR (oneocr.dll)",
@@ -963,11 +964,11 @@ fn populate(h: HWND) {
     combo_fill(
         h,
         IDC_DETECT_KEY,
-        &HOLD_KEYS,
-        HOLD_KEYS
+        &PREVIEW_KEYS,
+        PREVIEW_KEYS
             .iter()
             .position(|k| *k == cfg.detect_key)
-            .unwrap_or(1), // 既定 LCtrl
+            .unwrap_or(0), // 既定「なし」
     );
     check_set(h, IDC_PREVIEW_DETECT_MODE, cfg.preview_detect_enabled);
     combo_fill(
@@ -2115,7 +2116,8 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.log_enabled = check_get(h, IDC_LOG_ENABLED);
     cfg.debug_mode = check_get(h, IDC_DEBUG_MODE);
     cfg.detect_enabled = check_get(h, IDC_DETECT_MODE);
-    cfg.detect_key = HOLD_KEYS[combo_sel(h, IDC_DETECT_KEY).min(HOLD_KEYS.len() - 1)].to_string();
+    cfg.detect_key =
+        PREVIEW_KEYS[combo_sel(h, IDC_DETECT_KEY).min(PREVIEW_KEYS.len() - 1)].to_string();
     cfg.preview_detect_enabled = check_get(h, IDC_PREVIEW_DETECT_MODE);
     cfg.overlay_theme =
         THEME_KEYS[combo_sel(h, IDC_OVERLAY_THEME).min(THEME_KEYS.len() - 1)].to_string();
@@ -2216,7 +2218,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 {
                     // キャプチャキーとプレビューキーの重複ガード (SPECv0.5.3):
                     // 同じキーだと挙動が未定義になるため、警告して変更前の値へ戻す。
-                    if combo_sel(h, IDC_HOLDKEY) == combo_sel(h, IDC_DETECT_KEY) {
+                    let hold_key = HOLD_KEYS[combo_sel(h, IDC_HOLDKEY).min(HOLD_KEYS.len() - 1)];
+                    let preview_key =
+                        PREVIEW_KEYS[combo_sel(h, IDC_DETECT_KEY).min(PREVIEW_KEYS.len() - 1)];
+                    if preview_key != "なし" && hold_key == preview_key {
                         unsafe {
                             MessageBoxW(
                                 Some(h),
@@ -2237,10 +2242,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         combo_select(
                             h,
                             IDC_DETECT_KEY,
-                            HOLD_KEYS
+                            PREVIEW_KEYS
                                 .iter()
                                 .position(|k| *k == cfg.detect_key)
-                                .unwrap_or(1),
+                                .unwrap_or(0),
                         );
                     } else {
                         auto_save(h, false);

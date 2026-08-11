@@ -291,7 +291,7 @@ pub struct Config {
     /// キャプチャ範囲を枠表示するデバッグ機能 (既定OFF)
     pub detect_enabled: bool,
     /// プレビューキー: 実際の翻訳は行わず、検出範囲の枠表示だけを確認できるキー
-    /// (hold_key と同じ表記、既定 LCtrl)
+    /// (hold_key と同じ表記に「なし」を加えたもの、既定は「なし」)
     pub detect_key: String,
     /// 領域表示 (プレビューキー側): プレビューキー(detect_key)押下中も枠表示するか (既定OFF)
     pub preview_detect_enabled: bool,
@@ -483,7 +483,7 @@ impl Default for Config {
             log_enabled: false,
             debug_mode: false,
             detect_enabled: false,
-            detect_key: "LCtrl".into(),
+            detect_key: "なし".into(),
             preview_detect_enabled: false,
             log_max_records: 5000,
             first_launch_done: false,
@@ -742,6 +742,7 @@ impl Config {
 /// キー名(ホールドキー/検出キー共通の表記) → 仮想キーコード
 fn key_vk(name: &str) -> i32 {
     match name {
+        "なし" => 0,
         "LCtrl" => 0xA2,
         "RShift" => 0xA1,
         "RAlt" => 0xA5,
@@ -820,6 +821,14 @@ mod tests {
         ] {
             assert_eq!(api_type.default_model(), expected);
         }
+    }
+
+    #[test]
+    fn プレビューキーは既定で無効() {
+        let cfg = Config::default();
+        assert_eq!(cfg.detect_key, "なし");
+        assert_eq!(cfg.detect_vk(), 0);
+        assert!(!cfg.preview_detect_enabled);
     }
 
     #[test]

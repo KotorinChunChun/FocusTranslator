@@ -21,8 +21,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, HOT_KEY_MODIFIERS, RegisterHotKey, UnregisterHotKey, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow, KillTimer, MB_ICONWARNING, MB_OK,
-    MessageBoxW, SetTimer, WindowFromPoint,
+    GA_ROOT, GetAncestor, GetCursorPos, KillTimer, MB_ICONWARNING, MB_OK, MessageBoxW, SetTimer,
+    WindowFromPoint,
 };
 use windows::core::{PCWSTR, w};
 
@@ -50,6 +50,7 @@ pub const WM_APP_DETECT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP +
 
 pub const TIMER_POLL: usize = 1;
 pub const HOTKEY_REGION: i32 = 1;
+pub const MOD_NOREPEAT_VALUE: u32 = 0x4000;
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum Mode {
@@ -366,19 +367,18 @@ fn tick_edit_undo_hotkey() {
 
 /// 100ms周期のポーリング (SPEC §4)
 pub fn tick() {
+    // 範囲選択ウィンドウが前面化できなかった場合もESCを取りこぼさない。
+    // このtickでは続けてピン留めオーバーレイまで閉じないよう、閉じた時点で戻る。
+    if region::cancel_if_escape_pressed() {
+        return;
+    }
     tick_edit_undo_hotkey();
     let action = with_app(|app| {
         let down = unsafe { (GetAsyncKeyState(app.cfg.hold_vk()) as u16 & 0x8000) != 0 };
         let esc = unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 };
 
-        // ピン留め中のESCは、翻訳対象アプリが前面のときに加えて、オーバーレイ自身に
-        // フォーカスがある場合も受け付ける (SPECv0.5.5 §3: 以前は対象アプリ前面時のみで、
-        // オーバーレイをクリックして操作した後はESCで閉じられなかった)。
-        let fg = unsafe { GetForegroundWindow() };
-        let target_active = fg == HWND(app.target as *mut _);
-        let overlay_active =
-            !app.overlay.is_invalid() && unsafe { GetAncestor(fg, GA_ROOT) } == app.overlay;
-        if app.mode == Mode::Pinned && esc && (target_active || overlay_active) {
+        // ピン留め中は前面ウィンドウに依存せずESCで閉じる。
+        if app.mode == Mode::Pinned && esc {
             close_overlay(app);
             app.hold = down;
             return None;
@@ -423,10 +423,12 @@ pub fn tick() {
 /// 領域検出モード (デバッグ) のポーリング
 fn tick_detect() {
     let action = with_app(|app| {
+        let preview_vk = app.cfg.detect_vk();
         let down = unsafe {
             (app.cfg.detect_enabled && (GetAsyncKeyState(app.cfg.hold_vk()) as u16 & 0x8000) != 0)
                 || (app.cfg.preview_detect_enabled
-                    && (GetAsyncKeyState(app.cfg.detect_vk()) as u16 & 0x8000) != 0)
+                    && preview_vk != 0
+                    && (GetAsyncKeyState(preview_vk) as u16 & 0x8000) != 0)
         };
         if !down {
             if app.detect_on {
@@ -774,7 +776,14 @@ pub fn reload_config(hwnd: HWND) {
             SetTimer(Some(hwnd), TIMER_POLL, app.cfg.poll_ms, None);
             let _ = UnregisterHotKey(Some(hwnd), HOTKEY_REGION);
             let (mods, vk) = app.cfg.region_hotkey_parsed();
-            if RegisterHotKey(Some(hwnd), HOTKEY_REGION, HOT_KEY_MODIFIERS(mods), vk).is_err() {
+            if RegisterHotKey(
+                Some(hwnd),
+                HOTKEY_REGION,
+                HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT_VALUE),
+                vk,
+            )
+            .is_err()
+            {
                 MessageBoxW(
                     Some(hwnd),
                     w!("範囲指定ホットキーを登録できませんでした。他のアプリと衝突しています。"),

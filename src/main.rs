@@ -176,7 +176,7 @@ fn main() {
         if RegisterHotKey(
             Some(main),
             app_state::HOTKEY_REGION,
-            HOT_KEY_MODIFIERS(mods),
+            HOT_KEY_MODIFIERS(mods | app_state::MOD_NOREPEAT_VALUE),
             vk,
         )
         .is_err()
