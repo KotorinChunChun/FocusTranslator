@@ -28,6 +28,9 @@ pub struct Captured {
     pub bgra: Vec<u8>,
 }
 
+/// LLMへ送信する対象アプリ全体スクリーンショットの長辺上限 (px)。
+pub const LLM_SCREENSHOT_MAX_DIM: u32 = 1600;
+
 /// 画像内容のハッシュ値 (SPECv0.4追補: 同一画像+同一エンジンでの再OCR判定に使う)。
 /// サイズ + ピクセル列をそのままSHA-256にかけるだけで、同一内容なら常に同じ値になる。
 pub fn hash_hex(img: &Captured) -> String {
@@ -325,8 +328,8 @@ pub fn prepare_llm_screenshot(full: &Captured, rect: RECT, max_dim: u32) -> Capt
     prepared
 }
 
-/// BGRA → PNG エンコード(外部OCR/Gemini送信用)
-pub fn to_png(img: &Captured) -> Vec<u8> {
+/// BGRA画像を表示・PNGエンコード用のRGBAへ変換する。
+pub fn to_rgba(img: &Captured) -> Vec<u8> {
     let mut rgba = vec![0u8; img.bgra.len()];
     for i in (0..img.bgra.len()).step_by(4) {
         rgba[i] = img.bgra[i + 2];
@@ -334,6 +337,12 @@ pub fn to_png(img: &Captured) -> Vec<u8> {
         rgba[i + 2] = img.bgra[i];
         rgba[i + 3] = 255;
     }
+    rgba
+}
+
+/// BGRA → PNG エンコード(外部OCR/Gemini送信用)
+pub fn to_png(img: &Captured) -> Vec<u8> {
+    let rgba = to_rgba(img);
     let mut out = Vec::new();
     {
         let mut enc = png::Encoder::new(&mut out, img.width, img.height);
@@ -410,5 +419,11 @@ mod tests {
         };
         assert_eq!(px(38, 20), [0, 0, 255], "縮小後の左枠が赤");
         assert_eq!(px(50, 20), [10, 20, 30], "対象内部は元画像のまま");
+    }
+
+    #[test]
+    fn to_rgba_は赤青を入れ替えて不透明化する() {
+        let img = solid(1, 1, [10, 20, 30, 40]);
+        assert_eq!(to_rgba(&img), vec![30, 20, 10, 255]);
     }
 }

@@ -1,4 +1,4 @@
-// プレビューウィンドウ: ログビューアから画像をクリックしたときに開く原寸表示ウィンドウ。
+// プレビューウィンドウ: ログビューアやプロンプト編集画面から開く原寸表示ウィンドウ。
 // クリック&ドラッグでパンニング、マウスホイールで拡大縮小(デフォルト100%)、
 // 矢印キーでのスクロールも併用できる。画像範囲外へはパン/スクロールできない。
 use std::cell::RefCell;
@@ -40,6 +40,8 @@ pub(crate) enum ImgKind {
     Ocr,
     /// 対象アプリ全体画像 (crop_rect があれば赤枠を表示する)
     Full,
+    /// LLMへ実際に添付する加工済み画像 (赤枠は画像へ描画済み)
+    LlmPrompt,
 }
 
 const MIN_ZOOM: f64 = 0.1;
@@ -178,6 +180,11 @@ pub(crate) fn open_preview(
         ImgKind::Full => {
             w!("全体画像 (クリック&ドラッグ:パン / ホイール:拡大縮小 / Esc:閉じる / Ctrl+C:コピー)")
         }
+        ImgKind::LlmPrompt => {
+            w!(
+                "LLM送信画像 (クリック&ドラッグ:パン / ホイール:拡大縮小 / Esc:閉じる / Ctrl+C:コピー)"
+            )
+        }
     };
 
     // 既存のプレビューウィンドウがあれば再利用する(2つ以上開かない)
@@ -270,6 +277,7 @@ pub(crate) fn refresh_if_open(
         Some(ImgKind::Full) if full_image.is_some() => {
             open_preview(parent, ImgKind::Full, full_image, box_rect);
         }
+        Some(ImgKind::LlmPrompt) => {}
         _ => {}
     }
 }

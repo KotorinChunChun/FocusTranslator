@@ -592,9 +592,6 @@ fn crop_for_log(band_rect: RECT, img: &Captured, focus: ocr::Focus) -> (Captured
     (cropped.into_owned(), full_rect)
 }
 
-/// LLMへ送信する全体スクリーンショットの長辺上限 (px)。
-const LLM_SCREENSHOT_MAX_DIM: u32 = 1600;
-
 /// OCR入力を設定に応じて従来の対象画像、または赤枠付き全体画像へ切り替える。
 /// 戻り値のboolは、OCRプロンプトへ赤枠の説明を加えるかどうかを表す。
 fn prepare_ocr_input<'a>(
@@ -612,7 +609,7 @@ fn prepare_ocr_input<'a>(
             std::borrow::Cow::Owned(crate::capture::prepare_llm_screenshot(
                 &prompt_image.full,
                 prompt_image.rect,
-                LLM_SCREENSHOT_MAX_DIM,
+                crate::capture::LLM_SCREENSHOT_MAX_DIM,
             )),
             ocr::Focus::All,
             true,
@@ -1635,8 +1632,11 @@ impl PromptImage {
 /// 解説用の送信画像を組み立てる: 縮小 → 対象範囲へ赤枠描画 → PNG。
 /// 戻り値: (PNGバイト列, 画像ハッシュ)。
 fn build_prompt_image(img: &PromptImage) -> (Vec<u8>, String) {
-    let prepared =
-        crate::capture::prepare_llm_screenshot(&img.full, img.rect, LLM_SCREENSHOT_MAX_DIM);
+    let prepared = crate::capture::prepare_llm_screenshot(
+        &img.full,
+        img.rect,
+        crate::capture::LLM_SCREENSHOT_MAX_DIM,
+    );
     let hash = crate::capture::hash_hex(&prepared);
     (crate::capture::to_png(&prepared), hash)
 }

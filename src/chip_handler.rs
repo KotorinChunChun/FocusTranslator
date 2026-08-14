@@ -810,6 +810,11 @@ fn chip_explain(c: ChipCtx) {
         // 送信時に赤枠付き全体キャプチャを添付するため、閉包へ引き渡す (SPECv0.5.3)
         let full_img = c.last_full_img.clone();
         let crop_rect = c.last_crop_rect;
+        let prompt_image = if c.cfg.send_full_screenshot_to_llm {
+            crate::worker::PromptImage::new(full_img.clone(), crop_rect)
+        } else {
+            None
+        };
         let inst = with_app(|app| app.instance).unwrap_or_default();
         crate::prompt_edit::open(
             inst,
@@ -819,6 +824,7 @@ fn chip_explain(c: ChipCtx) {
             profiles,
             active_idx,
             Some(pc),
+            prompt_image,
             Box::new(|name, tmpl| {
                 crate::prompt_edit::save_prompt_to_config(
                     crate::prompt_edit::PromptKind::Explain,

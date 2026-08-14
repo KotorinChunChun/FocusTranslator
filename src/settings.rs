@@ -2109,6 +2109,7 @@ fn open_prompt_editor(h: HWND, kind: crate::prompt_edit::PromptKind) {
         profiles,
         active_idx,
         None,
+        None,
         Box::new(move |n, t| crate::prompt_edit::save_prompt_to_config(kind, n, t)),
         None,
     );

@@ -14,7 +14,7 @@ use windows::Win32::UI::Controls::{
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMTEXTW, LVS_EX_FULLROWSELECT, LVS_REPORT,
     LVS_SHOWSELALWAYS, LVS_SINGLESEL, NM_DBLCLK, NMHDR, NMITEMACTIVATE,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetDlgItem, GetWindowLongPtrW,
@@ -53,6 +53,8 @@ const IDC_SAVE: i32 = 103;
 const IDC_PREVIEW: i32 = 104;
 const IDC_REGEN: i32 = 105;
 const IDC_SUBMIT: i32 = 106;
+/// LLMへ実際に添付する赤枠付き全体画像を既存画像プレビューで開く。
+const IDC_OPEN_IMAGE: i32 = 107;
 // ペインの見出しラベル (WM_SIZE で再配置するためIDを持たせる)
 const IDC_LBL_TEMPLATE: i32 = 110;
 const IDC_LBL_PREVIEW: i32 = 111;
@@ -107,6 +109,8 @@ struct State {
     ctx: Option<PromptContext>,
     on_save: OnSave,
     on_submit: Option<OnSubmit>,
+    /// モードBでLLMへ添付予定の全体画像と対象矩形。設定OFF・取得失敗時はNone。
+    prompt_image: Option<crate::worker::PromptImage>,
     /// ペイン2/3の未保存編集フラグ (§4.6)
     tmpl_dirty: bool,
     preview_dirty: bool,
@@ -346,6 +350,7 @@ fn load_template(h: HWND, idx: usize) {
 /// ctx: Some(_) でモードB (値列・ペイン3・送信が有効になる)。
 /// on_save: 保存ボタン。(プロファイル名, 新テンプレート) を受け取り成功なら true。
 /// on_submit: 送信ボタン。(送信プロンプト, プロファイル名)。モードBのみ Some。
+/// prompt_image: LLMへ添付予定の赤枠付き全体画像プレビュー。送信対象外なら None。
 #[allow(clippy::too_many_arguments)]
 pub fn open(
     inst: HINSTANCE,
@@ -355,6 +360,7 @@ pub fn open(
     profiles: Vec<ProfilePrompt>,
     active_idx: usize,
     ctx: Option<PromptContext>,
+    prompt_image: Option<crate::worker::PromptImage>,
     on_save: OnSave,
     on_submit: Option<OnSubmit>,
 ) {
@@ -373,6 +379,7 @@ pub fn open(
         ctx,
         on_save,
         on_submit,
+        prompt_image,
         tmpl_dirty: false,
         preview_dirty: false,
         suppress_change: false,
@@ -454,6 +461,7 @@ pub fn open(
 
 fn build_controls(h: HWND, inst: HINSTANCE, mode_b: bool) {
     unsafe {
+        let has_prompt_image = state_mut(h).is_some_and(|state| state.prompt_image.is_some());
         // ペイン1: プロファイルコンボ + 変数一覧 (位置・サイズは WM_SIZE で確定する)
         let combo = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
@@ -564,9 +572,11 @@ fn build_controls(h: HWND, inst: HINSTANCE, mode_b: bool) {
         if mode_b {
             let lbl3 = mk_label(w!("送信内容"), IDC_LBL_PREVIEW);
             let prev = mk_edit(IDC_PREVIEW);
+            let open_image = mk_btn(w!("画像を開く"), IDC_OPEN_IMAGE);
             let regen = mk_btn(w!("再生成"), IDC_REGEN);
             let submit = mk_btn(w!("送信"), IDC_SUBMIT);
-            ctls.extend([lbl3, prev, regen, submit]);
+            let _ = EnableWindow(open_image, has_prompt_image);
+            ctls.extend([lbl3, prev, open_image, regen, submit]);
         }
 
         let font = crate::ui_helpers::make_font(14, false);
@@ -679,6 +689,13 @@ fn layout(h: HWND, w: i32, ht: i32) {
         place(IDC_LBL_PREVIEW, pane3_x, PAD, pane3_w, LBL_H);
         place(IDC_PREVIEW, pane3_x, edit_top, pane3_w, edit_h);
         place(
+            IDC_OPEN_IMAGE,
+            pane3_x + pane3_w - BTN_W * 3 - 16,
+            btn_y,
+            BTN_W,
+            BTN_H,
+        );
+        place(
             IDC_REGEN,
             pane3_x + pane3_w - BTN_W * 2 - 8,
             btn_y,
@@ -687,6 +704,25 @@ fn layout(h: HWND, w: i32, ht: i32) {
         );
         place(IDC_SUBMIT, pane3_x + pane3_w - BTN_W, btn_y, BTN_W, BTN_H);
     }
+}
+
+/// LLMへ送信予定の赤枠付き画像を、ログビューアと共通の画像ポップアップで表示する。
+fn handle_open_image(h: HWND) {
+    let Some(image) = (unsafe { state_mut(h) }).and_then(|s| s.prompt_image.clone()) else {
+        return;
+    };
+    let prepared = crate::capture::prepare_llm_screenshot(
+        &image.full,
+        image.rect,
+        crate::capture::LLM_SCREENSHOT_MAX_DIM,
+    );
+    let rgba = crate::capture::to_rgba(&prepared);
+    crate::image_preview::open_preview(
+        h,
+        crate::image_preview::ImgKind::LlmPrompt,
+        Some((prepared.width, prepared.height, rgba)),
+        None,
+    );
 }
 
 /// 保存ボタン (§4.3)
@@ -819,6 +855,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             let notif = ((wparam.0 >> 16) & 0xFFFF) as u32;
             match id {
                 IDC_SAVE => handle_save(h),
+                IDC_OPEN_IMAGE => handle_open_image(h),
                 IDC_REGEN => handle_regen(h),
                 IDC_SUBMIT => handle_submit(h),
                 IDC_PROFILE if notif == CBN_SELCHANGE => handle_profile_change(h),

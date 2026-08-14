@@ -1641,7 +1641,7 @@ fn prepare_logged_prompt_image(
             right: x + w,
             bottom: y + h,
         },
-        1600,
+        crate::capture::LLM_SCREENSHOT_MAX_DIM,
     ))
 }
 
