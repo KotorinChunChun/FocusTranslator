@@ -54,6 +54,12 @@ fn prompt_ctx_from_app(original: &str) -> crate::config::PromptContext {
     .unwrap_or_default()
 }
 
+/// 現在保持している対象アプリ全体画像と対象矩形をLLM添付用にまとめる。
+fn current_prompt_image() -> Option<crate::worker::PromptImage> {
+    with_app(|app| crate::worker::PromptImage::new(app.last_full_img.clone(), app.last_crop_rect))
+        .flatten()
+}
+
 /// テキストを原文として採用し再翻訳する共通処理。UIAパスノードチップと「選択中の文字列」
 /// チップのどちらも、OCRを介さずテキストをそのまま採用する点で同じ形になるため共用する。
 fn adopt_text_and_retranslate(text: String, cur_tr: String, recog_id: Option<i64>, main: isize) {
@@ -74,7 +80,16 @@ fn adopt_text_and_retranslate(text: String, cur_tr: String, recog_id: Option<i64
     .unwrap_or(0);
     let cfg2 = Config::load();
     let pc = prompt_ctx_from_app(&text);
-    crate::worker::retranslate(new_gen, cur_tr, cfg2, text, main, recog_id, pc);
+    crate::worker::retranslate(
+        new_gen,
+        cur_tr,
+        cfg2,
+        text,
+        main,
+        recog_id,
+        pc,
+        current_prompt_image(),
+    );
 }
 
 /// 直前のキャプチャで得た環境情報を破棄して、新しい入力セッションを開始する
@@ -613,7 +628,16 @@ fn chip_edit_source(c: ChipCtx) {
 
         let cfg2 = Config::load();
         let pc = prompt_ctx_from_app(&new_text);
-        crate::worker::retranslate(new_gen, c.cur_tr, cfg2, new_text, c.main, c.recog_id, pc);
+        crate::worker::retranslate(
+            new_gen,
+            c.cur_tr,
+            cfg2,
+            new_text,
+            c.main,
+            c.recog_id,
+            pc,
+            crate::worker::PromptImage::new(c.last_full_img, c.last_crop_rect),
+        );
     }
 }
 
@@ -680,7 +704,16 @@ fn chip_swap_lang(c: ChipCtx) {
     .unwrap_or(0);
     let cfg2 = Config::load();
     let pc = prompt_ctx_from_app(&c.source);
-    crate::worker::retranslate(new_gen, c.cur_tr, cfg2, c.source, c.main, c.recog_id, pc);
+    crate::worker::retranslate(
+        new_gen,
+        c.cur_tr,
+        cfg2,
+        c.source,
+        c.main,
+        c.recog_id,
+        pc,
+        crate::worker::PromptImage::new(c.last_full_img, c.last_crop_rect),
+    );
 }
 
 /// 解説(プロファイル別ボタン, SPECv0.5.2追補): OCR/翻訳のエンジンチップと同様、クリックした
@@ -698,7 +731,9 @@ fn chip_explain_with_profile(c: ChipCtx, profile: String) {
     // キャッシュ済み解説の即時表示は §2 の自動表示が担い、ここでは行わない。
     // 外部プロファイルへの解説依頼は同意を確認する (SPECv0.5.3)。
     // 全体キャプチャがあれば赤枠付きで画像も送るため、画像送信の同意も対象。
-    let with_image = c.last_full_img.is_some();
+    let with_image = c.cfg.send_full_screenshot_to_llm
+        && c.last_full_img.is_some()
+        && c.last_crop_rect.is_some();
     if !ensure_consent_profile(&profile, with_image, &c.cfg) {
         return;
     }
@@ -723,13 +758,7 @@ fn chip_explain_with_profile(c: ChipCtx, profile: String) {
     .unwrap_or(0);
     let cfg2 = Config::load();
     // 全体キャプチャがあれば赤枠付きで添付する (SPECv0.5.3)
-    let image = c
-        .last_full_img
-        .clone()
-        .map(|full| crate::worker::ExplainImage {
-            full,
-            rect: c.last_crop_rect,
-        });
+    let image = crate::worker::PromptImage::new(c.last_full_img.clone(), c.last_crop_rect);
     // 手動クリックのため常にLLMへ問い合わせる (SPECv0.5.4 §3)
     crate::worker::explain(new_gen, r_id, cfg2, prompt, profile, c.main, image, true);
 }
@@ -801,7 +830,10 @@ fn chip_explain(c: ChipCtx) {
                 // プロンプト編集ウィンドウからの送信も、外部プロファイルなら同意を確認する
                 // (SPECv0.5.3)。プロファイルはウィンドウ内で切替できるため送信時点で判定する。
                 let cfg_now = Config::load();
-                if !ensure_consent_profile(&profile, full_img.is_some(), &cfg_now) {
+                let with_image = cfg_now.send_full_screenshot_to_llm
+                    && full_img.is_some()
+                    && crop_rect.is_some();
+                if !ensure_consent_profile(&profile, with_image, &cfg_now) {
                     return;
                 }
                 let new_gen = with_app(|app| {
@@ -816,10 +848,7 @@ fn chip_explain(c: ChipCtx) {
                 .unwrap_or(0);
                 let cfg2 = Config::load();
                 // 全体キャプチャがあれば赤枠付きで添付する (SPECv0.5.3)
-                let image = full_img.clone().map(|full| crate::worker::ExplainImage {
-                    full,
-                    rect: crop_rect,
-                });
+                let image = crate::worker::PromptImage::new(full_img.clone(), crop_rect);
                 // プロンプト編集からの送信も手動操作のため常に問い合わせる (SPECv0.5.4 §3)
                 crate::worker::explain(
                     new_gen,
@@ -977,7 +1006,16 @@ fn switch_tr_engine(id: usize, c: ChipCtx) {
     .unwrap_or(0);
     let cfg2 = Config::load();
     let pc = prompt_ctx_from_app(&c.source);
-    crate::worker::retranslate(new_gen, target_tr, cfg2, c.source, c.main, c.recog_id, pc);
+    crate::worker::retranslate(
+        new_gen,
+        target_tr,
+        cfg2,
+        c.source,
+        c.main,
+        c.recog_id,
+        pc,
+        crate::worker::PromptImage::new(c.last_full_img, c.last_crop_rect),
+    );
 }
 
 fn engine_unavailable_msg(key: &str) -> String {

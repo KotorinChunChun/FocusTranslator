@@ -6,14 +6,14 @@
 
 ### 入力・認識
 
-- `capture.rs` / `capture_plan.rs` / `uia.rs`: カーソル下や選択範囲のキャプチャ計画、UI Automationによる文字列・画面情報の取得。
-- `ocr.rs`: OneOCR、Windows OCR、PaddleOCR、LLM/VLMを共通のOCR結果へ正規化する上位経路。
+- `capture.rs` / `capture_plan.rs` / `uia.rs`: カーソル下や選択範囲のキャプチャ計画、UI Automationによる文字列・画面情報の取得。`capture.rs`はLLM送信用に全体画像を長辺1600pxへ縮小し、対象矩形を赤枠で示す共通加工も担当する。
+- `ocr.rs`: OneOCR、Windows OCR、PaddleOCR、LLM/VLMを共通のOCR結果へ正規化する上位経路。赤枠付き全体画像を受けたLLM経路では、赤枠内だけを文字起こし・翻訳する補足指示を加える。
 - `oneocr.rs` / `paddle_ocr.rs`: 各OCRエンジン固有の実装。
 - `clipboard_text.rs`: WindowsクリップボードのCF_HTML／RTFをMarkdownへ変換する純粋な解析処理。クリップボードAPIの所有は`util.rs`。
 
 ### 翻訳・LLM
 
-- `translate.rs`: ONNX、翻訳API、LLMプロファイルを共通の翻訳結果へ正規化する上位経路。
+- `translate.rs`: ONNX、翻訳API、LLMプロファイルを共通の翻訳結果へ正規化する上位経路。LLM翻訳は任意の赤枠付き全体画像を添付でき、画像ハッシュをメモリ／DBキャッシュキーへ含める。base64本体はログ用リクエストJSONへ残さない。
 - `llm_api.rs`: `ApiProfile`を受け、HTTP API方式とCLI方式を振り分ける共通入口。キャッシュ用リクエスト表現に加え、OpenAI互換／Gemini／Claudeのモデル一覧取得も担当する。
 - `llm_cli.rs`: Codex、Claude、GitHub Copilot、Gemini、Kimi CodeのCLI検出、モデル候補取得、非対話コマンド構築、一時ファイル、タイムアウト、出力・usage正規化を担当する。HTTPや画面表示の責務は持たない。
 - `onnx_translate.rs`: ローカルONNX翻訳モデルの推論。
@@ -21,12 +21,12 @@
 
 ### 設定・画面・処理制御
 
-- `config.rs`: `ApiType` / `ApiProfile`を含む永続設定、既定値、設定移行。CLIプロファイルは初回移行時に一度だけ追加し、利用者が削除したものを再作成しない。プレビューキーの新規既定値は「なし」。`boss_guard`はFocusTranslator自身の識別表示だけを空白化する。
-- `settings.rs`: Win32設定画面。LLMプロファイルではAPI／CLI種別に応じて不要欄を無効化し、モデル名を自由入力可能なコンボボックスとして扱う。BossGuard切替時は設定自身のタイトルとバージョン欄も即時更新する。
+- `config.rs`: `ApiType` / `ApiProfile`を含む永続設定、既定値、設定移行。CLIプロファイルは初回移行時に一度だけ追加し、利用者が削除したものを再作成しない。プレビューキーの新規既定値は「なし」。`boss_guard`はFocusTranslator自身の識別表示だけを空白化する。`send_full_screenshot_to_llm`はプライバシー優先で既定OFFであり、旧設定のフィールド欠落もOFFへフォールバックする。
+- `settings.rs`: Win32設定画面。システム設定で赤枠付き全体スクリーンショットのLLM送信を切り替える。LLMプロファイルではAPI／CLI種別に応じて不要欄を無効化し、モデル名を自由入力可能なコンボボックスとして扱う。BossGuard切替時は設定自身のタイトルとバージョン欄も即時更新する。
 - `region.rs` / `app_state.rs`: 範囲選択ウィンドウの単一起動と、ホットキー・ESC・ピン留めを含むアプリ状態遷移。通常キャプチャと範囲指定の表示起点となるトップレベルHWNDを保持し、オーバーレイクリック時の前面復帰にも使う。
-- `worker.rs`: キャプチャ後のOCR・翻訳・解説処理とログ記録を調停する。
+- `worker.rs`: キャプチャ後のOCR・翻訳・解説処理とログ記録を調停する。全体画像と対象矩形がそろい、設定がONのときだけ`PromptImage`を赤枠付き画像へ加工して各LLM経路へ渡す。
 - `overlay.rs` / `chip_handler.rs`: 結果表示と、OCR・翻訳・解説エンジン／プロファイル別チップからの再実行。`WS_EX_NOACTIVATE`を維持しつつ、クリック時は`app_state`へ保存した表示起点ウィンドウを前面化する。【コピー中の内容】はリッチ形式をMarkdownとして、プレーン形式を空白・改行を削らず取り込む。
-- `logdb.rs` / `logviewer.rs`: キャッシュを含むSQLite履歴とログ画面。
+- `logdb.rs` / `logviewer.rs`: キャッシュを含むSQLite履歴とログ画面。ログからの再OCR・再翻訳・再解説も、保存済み全体画像と対象矩形があれば同じ全体画像送信設定・外部送信同意に従う。
 
 ## 実装の詳細・既知の制約
 
@@ -63,6 +63,12 @@ Codex CLI 0.147.0では `--ask-for-approval never` は `exec` サブコマンド
 ### リッチクリップボードとBossGuard
 
 クリップボードはHTML、RTF、Unicodeプレーンテキスト、画像の順に判定する。HTML／RTFは`clipboard_text.rs`でMarkdownへ変換し、プレーンテキストは空判定以外でtrimせず原文を保持する。BossGuardは対象アプリの情報を隠す機能ではなく、FocusTranslator自身のアプリ名・開発者名だけを`util.rs`の空白表示へ切り替える。ログや機能名まで消さないこと。
+
+### 赤枠付き全体スクリーンショットのLLM送信
+
+`send_full_screenshot_to_llm`は、画面全体の文脈をLLMへ渡す利便性と、対象アプリ内の無関係な情報まで送るプライバシーリスクを利用者が明示的に選べるよう既定OFFにしている。ONでも全体画像と対象矩形の両方がそろわない入力は画像を添付せず、従来の対象画像またはテキストだけの処理へ戻す。LLM統合OCRでは赤枠付き全体画像そのものをOCR入力とし、翻訳・解説では同じ画像を補助コンテキストとして添付する。外部プロファイルへ初めて画像を送る際は、従来の画像送信同意を必ず確認する。
+
+画像付き翻訳のキャッシュは原文だけでは分離できないため、加工後画像のSHA-256をメモリキャッシュキーとDB用リクエスト表現へ含める。一方、PNGのbase64本体をDBへ保存するとログが巨大化し画面内容も重複保存するため、ログ用JSONには`sha256:<hash>`だけを入れる。解説キャッシュも同様にプロンプト末尾の画像ハッシュで画面ごとに分離する。
 
 ## SPECからの逸脱・未実装事項
 

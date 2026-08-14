@@ -8,10 +8,10 @@ use crate::config::Config;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// キャッシュキー: (エンジン, プロファイル, 翻訳元言語, 訳先言語, 原文)。
+/// キャッシュキー: (エンジン, プロファイル, 翻訳元言語, 訳先言語, 原文, 添付画像hash)。
 /// LLM翻訳プロンプトは {{source_lang}} を含むため、元言語もキーに含める
 /// (SPECv0.5.3: 元言語だけを変更した直後に古い訳文が返るのを防ぐ)。
-type CacheKey = (String, Option<String>, String, String, String);
+type CacheKey = (String, Option<String>, String, String, String, String);
 static CACHE: Mutex<Option<HashMap<CacheKey, String>>> = Mutex::new(None);
 const CACHE_MAX: usize = 500;
 
@@ -110,6 +110,8 @@ pub fn translate(
     cfg: &Config,
     text: &str,
     ctx: &crate::config::PromptContext,
+    image_png_b64: Option<&str>,
+    image_hash: Option<&str>,
 ) -> Result<Translated, String> {
     let mut ctx = ctx.clone();
     ctx.original_text = text.to_string();
@@ -128,6 +130,7 @@ pub fn translate(
         source.clone(),
         target.clone(),
         text.to_string(),
+        image_hash.unwrap_or_default().to_string(),
     );
 
     // キャッシュ確認
@@ -151,7 +154,8 @@ pub fn translate(
 
     // エラーメッセージにURL等の形でAPIキーが混入しても表示・ログへ漏れないよう伏字化する
     // (SPECv0.5.3)。
-    let result = translate_once(engine, cfg, text, &target, ctx).map_err(|e| mask_keys(cfg, &e));
+    let result = translate_once(engine, cfg, text, &target, ctx, image_png_b64, image_hash)
+        .map_err(|e| mask_keys(cfg, &e));
     match result {
         Ok((t, detail, db_rid)) => {
             let mut guard = CACHE.lock().unwrap();
@@ -181,13 +185,15 @@ fn translate_once(
     text: &str,
     target: &str,
     ctx: &crate::config::PromptContext,
+    image_png_b64: Option<&str>,
+    image_hash: Option<&str>,
 ) -> Result<(String, TransDetail, Option<i64>), String> {
     match engine {
         "local" => translate_local(cfg, text, target).map(|t| (t, TransDetail::default(), None)),
         "deepl" => translate_deepl(cfg, text, target),
         "google" => translate_google(cfg, text, target),
         // LLMの翻訳方向はプロンプトテンプレート側で cfg から埋める
-        "llm" => translate_llm(cfg, ctx),
+        "llm" => translate_llm(cfg, ctx, image_png_b64, image_hash),
         other => Err(format!("不明な翻訳エンジン: {other}")),
     }
 }
@@ -292,13 +298,29 @@ fn translate_google(
 fn translate_llm(
     cfg: &Config,
     ctx: &crate::config::PromptContext,
+    image_png_b64: Option<&str>,
+    image_hash: Option<&str>,
 ) -> Result<(String, TransDetail, Option<i64>), String> {
     let prof = cfg
         .active_profile()
         .ok_or("LLM APIプロファイルが設定されていません")?;
-    let prompt = cfg.fill_prompt(&prof.translate_prompt, ctx);
-    let req = crate::llm_api::LlmRequest::text(&prompt);
-    let req_json = mask_keys(cfg, &crate::llm_api::build_request_json(prof, &req));
+    let mut prompt = cfg.fill_prompt(&prof.translate_prompt, ctx);
+    if image_png_b64.is_some() {
+        prompt.push_str("\n\n## 添付画像について\n添付画像は対象アプリ全体のスクリーンショットです。赤枠で囲まれた箇所が翻訳対象です。原文テキストと照合し、画面全体の文脈を考慮して翻訳してください。");
+    }
+    let req = crate::llm_api::LlmRequest {
+        prompt: &prompt,
+        image_png_b64,
+        json_mode: false,
+    };
+    // DBキャッシュ・ログには巨大なbase64本体を残さず、画像hashだけを識別子として記録する。
+    let log_image = image_hash.map(|hash| format!("sha256:{hash}"));
+    let log_req = crate::llm_api::LlmRequest {
+        prompt: &prompt,
+        image_png_b64: log_image.as_deref(),
+        json_mode: false,
+    };
+    let req_json = mask_keys(cfg, &crate::llm_api::build_request_json(prof, &log_req));
     if let Some((cached_text, rid)) = check_db_cache(cfg, "llm", Some(&prof.name), &req_json) {
         let detail = TransDetail {
             request_json: Some(req_json),
@@ -307,8 +329,12 @@ fn translate_llm(
         return Ok((cached_text, detail, Some(rid)));
     }
     let res = crate::llm_api::call(prof, &req)?;
+    debug_assert!(
+        !res.request_json.is_empty(),
+        "LLM呼び出しでは送信リクエストJSONが記録される"
+    );
     let detail = TransDetail {
-        request_json: Some(mask_keys(cfg, &res.request_json)),
+        request_json: Some(req_json),
         response_json: Some(mask_keys(cfg, &res.response_json)),
         tokens_in: res.tokens_in,
         tokens_out: res.tokens_out,

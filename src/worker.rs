@@ -473,7 +473,12 @@ fn ensure_ocr_consent(cfg: &Config, engine: &str, main: isize) -> Result<(), Str
 /// 翻訳エンジンが外部送信を要する場合の同意確認 (SPECv0.5.3)。拒否なら Err。
 /// 自動・明示を問わず翻訳実行の直前に呼ぶ (明示操作はチップ側で同意済みのため、
 /// ここでは追加のダイアログは出ない)。
-fn ensure_tr_consent(cfg: &Config, engine: &str, main: isize) -> Result<(), String> {
+fn ensure_tr_consent(
+    cfg: &Config,
+    engine: &str,
+    main: isize,
+    with_image: bool,
+) -> Result<(), String> {
     let external = match engine {
         "deepl" | "google" => true,
         "llm" => cfg.active_profile().is_some_and(|p| p.is_external()),
@@ -482,7 +487,7 @@ fn ensure_tr_consent(cfg: &Config, engine: &str, main: isize) -> Result<(), Stri
     if !external {
         return Ok(());
     }
-    if request_consent_blocking(main, false) {
+    if request_consent_blocking(main, with_image) {
         Ok(())
     } else {
         Err("外部送信の同意が得られないため翻訳をスキップしました。設定画面で既定翻訳エンジンを変更するか、同意を許可してください。".into())
@@ -548,6 +553,7 @@ fn dispatch_translation(
     main: isize,
     recog_id: Option<i64>,
     pc: crate::config::PromptContext,
+    image: Option<PromptImage>,
     t0: &Instant,
 ) {
     if let Some(tr) = &o.translation {
@@ -567,7 +573,7 @@ fn dispatch_translation(
     } else {
         // 自動サイクル(ホールド/範囲/再OCR)からの翻訳は元言語チェックを適用する (SPECv0.4.8追補)
         translate(
-            generation, cfg, o.text, tr_engine, main, recog_id, pc, false,
+            generation, cfg, o.text, tr_engine, main, recog_id, pc, image, false,
         );
     }
 }
@@ -584,6 +590,35 @@ fn crop_for_log(band_rect: RECT, img: &Captured, focus: ocr::Focus) -> (Captured
         bottom: band_rect.top + sub.bottom,
     };
     (cropped.into_owned(), full_rect)
+}
+
+/// LLMへ送信する全体スクリーンショットの長辺上限 (px)。
+const LLM_SCREENSHOT_MAX_DIM: u32 = 1600;
+
+/// OCR入力を設定に応じて従来の対象画像、または赤枠付き全体画像へ切り替える。
+/// 戻り値のboolは、OCRプロンプトへ赤枠の説明を加えるかどうかを表す。
+fn prepare_ocr_input<'a>(
+    cfg: &Config,
+    engine: &str,
+    img: &'a Captured,
+    focus: ocr::Focus,
+    prompt_image: Option<&PromptImage>,
+) -> (std::borrow::Cow<'a, Captured>, ocr::Focus, bool) {
+    if cfg.send_full_screenshot_to_llm
+        && engine == "llm"
+        && let Some(prompt_image) = prompt_image
+    {
+        return (
+            std::borrow::Cow::Owned(crate::capture::prepare_llm_screenshot(
+                &prompt_image.full,
+                prompt_image.rect,
+                LLM_SCREENSHOT_MAX_DIM,
+            )),
+            ocr::Focus::All,
+            true,
+        );
+    }
+    (std::borrow::Cow::Borrowed(img), focus, false)
 }
 
 /// UIA経路(選択文字列/カーソル位置テキスト)の採用結果を記録・送信・翻訳する共通処理。
@@ -626,6 +661,7 @@ fn adopt_uia_text(
         Some((b, _)) => (Some(Arc::new(b.img)), Some(Arc::new(b.full))),
         None => (None, None),
     };
+    let prompt_image = PromptImage::new(full_img.clone(), extent_rect);
 
     let capture_id = log_cap(
         &cfg,
@@ -670,7 +706,17 @@ fn adopt_uia_text(
     );
     // UIA経路なので ocr_engine は空文字 (SPECv0.4 §7.1)
     let pc = prompt_ctx(ctx, "");
-    translate(generation, cfg, text, tr_engine, main, recog_id, pc, false);
+    translate(
+        generation,
+        cfg,
+        text,
+        tr_engine,
+        main,
+        recog_id,
+        pc,
+        prompt_image,
+        false,
+    );
 }
 
 /// クリップボードのテキストを新規セッションとして取り込み翻訳する (SPECv0.5.4 §20)。
@@ -729,7 +775,9 @@ pub fn clipboard_text(
         );
         // OCRを経ていないため ocr_engine は空文字 (SPECv0.4 §7.1)
         let pc = prompt_ctx(&ctx, "");
-        translate(generation, cfg, text, tr_engine, main, recog_id, pc, false);
+        translate(
+            generation, cfg, text, tr_engine, main, recog_id, pc, None, false,
+        );
     });
 }
 
@@ -839,13 +887,30 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         let mut used = band;
         let mut focus = capture_plan::focus_for(kind, used.focus_y);
         let pc = prompt_ctx(&ctx, &engine);
-        let mut out = ocr::run(&engine, &cfg, &used.img, focus, &pc);
+        let (_, initial_full_rect) = crop_for_log(used.rect, &used.img, focus);
+        let mut prompt_image =
+            PromptImage::new(Some(Arc::new(used.full.clone())), Some(initial_full_rect));
+        let (ocr_img, ocr_focus, full_screenshot) =
+            prepare_ocr_input(&cfg, &engine, &used.img, focus, prompt_image.as_ref());
+        let mut out = ocr::run(&engine, &cfg, &ocr_img, ocr_focus, &pc, full_screenshot);
         if out.is_err() {
             // 既定の帯を拡大して再試行 (SPEC §6.3)
             if let Ok(wide) = capture_plan::capture_band(x, y, target, 1800, 340) {
                 focus = ocr::Focus::Line(wide.focus_y);
-                out = ocr::run(&engine, &cfg, &wide.img, focus, &pc);
                 used = wide;
+                let (_, wide_full_rect) = crop_for_log(used.rect, &used.img, focus);
+                prompt_image =
+                    PromptImage::new(Some(Arc::new(used.full.clone())), Some(wide_full_rect));
+                let (retry_img, retry_focus, retry_full_screenshot) =
+                    prepare_ocr_input(&cfg, &engine, &used.img, focus, prompt_image.as_ref());
+                out = ocr::run(
+                    &engine,
+                    &cfg,
+                    &retry_img,
+                    retry_focus,
+                    &pc,
+                    retry_full_screenshot,
+                );
             }
         }
         // 段落帯: OCRしたカーソル直下行を直下要素の全テキスト (UIA Name) から検索し、
@@ -906,7 +971,17 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                         Some(full_rect),
                     ),
                 );
-                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
+                dispatch_translation(
+                    generation,
+                    cfg,
+                    o,
+                    tr_engine,
+                    main,
+                    recog_id,
+                    pc,
+                    prompt_image,
+                    &t0,
+                );
             }
             Err(e) => {
                 let ms = t0.elapsed().as_millis();
@@ -959,6 +1034,7 @@ fn translate(
     main: isize,
     recog_id: Option<i64>,
     pc: crate::config::PromptContext,
+    image: Option<PromptImage>,
     force: bool,
 ) {
     if !force && !crate::translate::is_source_lang_text(&cfg.source_lang, &text) {
@@ -970,14 +1046,31 @@ fn translate(
         return;
     }
     std::thread::spawn(move || {
+        let prepared_image = if cfg.send_full_screenshot_to_llm && engine == "llm" {
+            image.as_ref().map(build_prompt_image)
+        } else {
+            None
+        };
         // 外部送信を要するエンジンは実行直前に同意を確認する (SPECv0.5.3:
         // 同意なしのローカルへの無言フォールバックは廃止。拒否時はスキップ表示)。
-        if let Err(msg) = ensure_tr_consent(&cfg, &engine, main) {
+        if let Err(msg) = ensure_tr_consent(&cfg, &engine, main, prepared_image.is_some()) {
             post(main, generation, WorkerMsg::TranslationSkipped { msg });
             return;
         }
         let t0 = Instant::now();
-        match crate::translate::translate(&engine, &cfg, &text, &pc) {
+        let image_b64 = prepared_image.as_ref().map(|(png, _)| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(png)
+        });
+        let image_hash = prepared_image.as_ref().map(|(_, hash)| hash.as_str());
+        match crate::translate::translate(
+            &engine,
+            &cfg,
+            &text,
+            &pc,
+            image_b64.as_deref(),
+            image_hash,
+        ) {
             Ok(t) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("translate {engine} {ms}ms"));
@@ -1121,7 +1214,14 @@ pub fn reocr(job: ReocrJob) {
             }
             None => (ocr::crop_for_focus(&image, focus).into_owned(), None),
         };
-        let hash = crate::capture::hash_hex(&log_img);
+        let prompt_image = PromptImage::new(full_img.clone(), full_rect);
+        let (ocr_image, ocr_focus, full_screenshot) =
+            prepare_ocr_input(&cfg, &ocr_engine, &image, focus, prompt_image.as_ref());
+        let hash = if full_screenshot {
+            crate::capture::hash_hex(&ocr_image)
+        } else {
+            crate::capture::hash_hex(&log_img)
+        };
         let extent = Extent {
             full: full_img.as_deref(),
             rect: full_rect,
@@ -1173,7 +1273,7 @@ pub fn reocr(job: ReocrJob) {
                     text.clone(),
                     "OCR",
                     Some(ocr_engine.clone()),
-                    Some(image),
+                    Some(image.clone()),
                     pin,
                     anchor,
                     focus,
@@ -1188,11 +1288,28 @@ pub fn reocr(job: ReocrJob) {
                 text,
                 ..Default::default()
             };
-            dispatch_translation(generation, cfg, o, tr_engine, main, rid, pc, &t0);
+            dispatch_translation(
+                generation,
+                cfg,
+                o,
+                tr_engine,
+                main,
+                rid,
+                pc,
+                prompt_image,
+                &t0,
+            );
             return;
         }
 
-        let mut result = ocr::run(&ocr_engine, &cfg, &image, focus, &pc);
+        let mut result = ocr::run(
+            &ocr_engine,
+            &cfg,
+            &ocr_image,
+            ocr_focus,
+            &pc,
+            full_screenshot,
+        );
         // 段落帯の再キャプチャ時も、直下要素の全テキストから段落を復元する
         if let Ok(o) = &mut result
             && let Some(full) = &hover_text
@@ -1235,7 +1352,17 @@ pub fn reocr(job: ReocrJob) {
                         full_rect,
                     ),
                 );
-                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
+                dispatch_translation(
+                    generation,
+                    cfg,
+                    o,
+                    tr_engine,
+                    main,
+                    recog_id,
+                    pc,
+                    prompt_image,
+                    &t0,
+                );
             }
             Err(e) => {
                 let use_capture_id = if held && !fresh_capture {
@@ -1268,6 +1395,7 @@ pub fn reocr(job: ReocrJob) {
 }
 
 /// 翻訳チップ切替: 現在の原文を選択エンジンで再翻訳 (SPEC §8)。
+#[allow(clippy::too_many_arguments)]
 pub fn retranslate(
     generation: u64,
     engine: String,
@@ -1276,9 +1404,12 @@ pub fn retranslate(
     main: isize,
     recog_id: Option<i64>,
     pc: crate::config::PromptContext,
+    image: Option<PromptImage>,
 ) {
     // 明示的な再翻訳操作のため元言語チェックはスキップし常に翻訳する (SPECv0.4.8追補)
-    translate(generation, cfg, text, engine, main, recog_id, pc, true);
+    translate(
+        generation, cfg, text, engine, main, recog_id, pc, image, true,
+    );
 }
 
 /// 範囲指定モード: 選択矩形をOCRして段落結合→翻訳、最初からピン留め (SPEC §3.2)
@@ -1371,7 +1502,10 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
         // Focus::All → 全行を段落結合
         let ctx = AppContext::capture(cx, cy, root);
         let pc = prompt_ctx(&ctx, &engine);
-        match ocr::run(&engine, &cfg, &img, ocr::Focus::All, &pc) {
+        let prompt_image = PromptImage::new(Some(Arc::new(full.clone())), Some(img_rect));
+        let (ocr_img, ocr_focus, full_screenshot) =
+            prepare_ocr_input(&cfg, &engine, &img, ocr::Focus::All, prompt_image.as_ref());
+        match ocr::run(&engine, &cfg, &ocr_img, ocr_focus, &pc, full_screenshot) {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("region OCR({engine}) {ms}ms"));
@@ -1417,7 +1551,17 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
                         Some(img_rect),
                     ),
                 );
-                dispatch_translation(generation, cfg, o, tr_engine, main, recog_id, pc, &t0);
+                dispatch_translation(
+                    generation,
+                    cfg,
+                    o,
+                    tr_engine,
+                    main,
+                    recog_id,
+                    pc,
+                    prompt_image,
+                    &t0,
+                );
             }
             Err(e) => {
                 let ms = t0.elapsed().as_millis();
@@ -1472,31 +1616,27 @@ pub fn build_explain_prompt_for(
 
 /// 解説に添付するアプリ全体キャプチャ (SPECv0.5.3)。
 /// rect は full 内での解説対象範囲 (物理ピクセル座標)。赤枠を描いてから送信する。
-pub struct ExplainImage {
+#[derive(Clone)]
+pub struct PromptImage {
     pub full: Arc<Captured>,
-    pub rect: Option<RECT>,
+    pub rect: RECT,
 }
 
-/// 解説送信用画像の長辺上限 (px)。全体キャプチャは大きくなりがちなため縮小して送る。
-const EXPLAIN_IMAGE_MAX_DIM: u32 = 1600;
+impl PromptImage {
+    /// 全体画像と対象矩形が両方そろうときだけ、LLM添付用の画像情報を返す。
+    pub fn new(full: Option<Arc<Captured>>, rect: Option<RECT>) -> Option<Self> {
+        Some(Self {
+            full: full?,
+            rect: rect?,
+        })
+    }
+}
 
 /// 解説用の送信画像を組み立てる: 縮小 → 対象範囲へ赤枠描画 → PNG。
 /// 戻り値: (PNGバイト列, 画像ハッシュ)。
-fn build_explain_image(img: &ExplainImage) -> (Vec<u8>, String) {
-    let full = &*img.full;
-    let scale_src = full.width.max(full.height).max(1);
-    let mut prepared = crate::capture::downscale_max(full, EXPLAIN_IMAGE_MAX_DIM);
-    if let Some(r) = img.rect {
-        // 縮小後の座標系へ矩形を変換してから赤枠を描く (先に描くと縮小で枠が痩せるため)
-        let s = prepared.width.max(prepared.height) as f32 / scale_src as f32;
-        let scaled = RECT {
-            left: (r.left as f32 * s) as i32,
-            top: (r.top as f32 * s) as i32,
-            right: (r.right as f32 * s) as i32,
-            bottom: (r.bottom as f32 * s) as i32,
-        };
-        crate::capture::draw_red_frame(&mut prepared, scaled, 3);
-    }
+fn build_prompt_image(img: &PromptImage) -> (Vec<u8>, String) {
+    let prepared =
+        crate::capture::prepare_llm_screenshot(&img.full, img.rect, LLM_SCREENSHOT_MAX_DIM);
     let hash = crate::capture::hash_hex(&prepared);
     (crate::capture::to_png(&prepared), hash)
 }
@@ -1514,14 +1654,25 @@ pub fn explain(
     prompt: String,
     profile: String,
     main: isize,
-    image: Option<ExplainImage>,
+    image: Option<PromptImage>,
     force: bool,
 ) {
     std::thread::spawn(move || {
         init_com();
         // 画像添付時は送信画像を先に確定し、キャッシュキー(input_text)へ画像ハッシュを
         // 含める (SPECv0.5.3: 同一プロンプトでも別画面のキャッシュを誤って流用しないため)。
-        let prepared = image.as_ref().map(build_explain_image);
+        let prepared = if cfg.send_full_screenshot_to_llm {
+            image.as_ref().map(build_prompt_image)
+        } else {
+            None
+        };
+        let prompt = if prepared.is_some() {
+            format!(
+                "{prompt}\n\n## 添付画像について\n添付画像は対象アプリ全体のスクリーンショットです。赤枠で囲まれた箇所を解説対象として、画面全体の文脈も参考にしてください。"
+            )
+        } else {
+            prompt
+        };
         let cache_text = match &prepared {
             Some((_, hash)) => format!("{prompt}\n[添付画像hash: {}]", &hash[..16]),
             None => prompt.clone(),

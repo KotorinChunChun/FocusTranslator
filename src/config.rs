@@ -287,6 +287,9 @@ pub struct Config {
     pub log_enabled: bool,
     /// デバッグモード: OCR時にキャプチャ画像をPNG保存 (既定OFF)
     pub debug_mode: bool,
+    /// LLMへプロンプトを送る際、対象アプリ全体のスクリーンショットに対象箇所を
+    /// 赤枠で示して添付する。プライバシーを優先して既定OFF。
+    pub send_full_screenshot_to_llm: bool,
     /// 領域表示 (キャプチャキー側): キャプチャキー(hold_key)押下中、UIA要素や
     /// キャプチャ範囲を枠表示するデバッグ機能 (既定OFF)
     pub detect_enabled: bool,
@@ -493,6 +496,7 @@ impl Default for Config {
             perf_log: false,
             log_enabled: false,
             debug_mode: false,
+            send_full_screenshot_to_llm: false,
             detect_enabled: false,
             detect_key: "なし".into(),
             preview_detect_enabled: false,
@@ -893,6 +897,13 @@ mod tests {
             crate::util::app_display_name(true),
             crate::util::HIDDEN_BRANDING
         );
+    }
+
+    #[test]
+    fn 全体スクリーンショット送信は新規設定と旧設定の両方で既定off() {
+        assert!(!Config::default().send_full_screenshot_to_llm);
+        let old_config: Config = serde_json::from_str("{}").unwrap();
+        assert!(!old_config.send_full_screenshot_to_llm);
     }
 
     #[test]

@@ -307,6 +307,24 @@ pub fn draw_red_frame(img: &mut Captured, rect: RECT, thickness: i32) {
     }
 }
 
+/// LLMへ送る対象アプリ全体画像を組み立てる。
+///
+/// 長辺を `max_dim` 以下へ縮小してから、同じ比率で変換した対象矩形を赤枠で示す。
+/// 枠を縮小後に描くことで、縮小処理によって枠が細くなったり消えたりするのを防ぐ。
+pub fn prepare_llm_screenshot(full: &Captured, rect: RECT, max_dim: u32) -> Captured {
+    let scale_src = full.width.max(full.height).max(1);
+    let mut prepared = downscale_max(full, max_dim);
+    let scale = prepared.width.max(prepared.height) as f32 / scale_src as f32;
+    let scaled = RECT {
+        left: (rect.left as f32 * scale) as i32,
+        top: (rect.top as f32 * scale) as i32,
+        right: (rect.right as f32 * scale) as i32,
+        bottom: (rect.bottom as f32 * scale) as i32,
+    };
+    draw_red_frame(&mut prepared, scaled, 3);
+    prepared
+}
+
 /// BGRA → PNG エンコード(外部OCR/Gemini送信用)
 pub fn to_png(img: &Captured) -> Vec<u8> {
     let mut rgba = vec![0u8; img.bgra.len()];
@@ -370,5 +388,27 @@ mod tests {
         assert_eq!(px(50, 38), [0, 0, 255], "上枠が赤");
         assert_eq!(px(50, 50), [0, 0, 0], "矩形内部は塗り潰さない");
         assert_eq!(px(10, 10), [0, 0, 0], "枠の外は変更しない");
+    }
+
+    #[test]
+    fn prepare_llm_screenshot_は縮小後の対応位置へ赤枠を描く() {
+        let full = solid(200, 100, [10, 20, 30, 255]);
+        let out = prepare_llm_screenshot(
+            &full,
+            RECT {
+                left: 80,
+                top: 20,
+                right: 120,
+                bottom: 60,
+            },
+            100,
+        );
+        assert_eq!((out.width, out.height), (100, 50));
+        let px = |x: u32, y: u32| {
+            let i = ((y * out.width + x) * 4) as usize;
+            [out.bgra[i], out.bgra[i + 1], out.bgra[i + 2]]
+        };
+        assert_eq!(px(38, 20), [0, 0, 255], "縮小後の左枠が赤");
+        assert_eq!(px(50, 20), [10, 20, 30], "対象内部は元画像のまま");
     }
 }

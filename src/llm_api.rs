@@ -18,7 +18,7 @@ pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434/v1/chat/completions
 /// LM Studioのローカルサーバ (OpenAI互換API)。APIキー不要 (SPECv0.5.5)
 pub const DEFAULT_LMSTUDIO_URL: &str = "http://localhost:1234/v1/chat/completions";
 
-/// LLMへの1リクエスト。画像はOCR統合モードのみ付与する。
+/// LLMへの1リクエスト。画像はOCR・翻訳・解説で必要に応じて付与する。
 pub struct LlmRequest<'a> {
     pub prompt: &'a str,
     /// PNG画像 (base64)
@@ -27,9 +27,10 @@ pub struct LlmRequest<'a> {
     pub json_mode: bool,
 }
 
+#[cfg(test)]
 impl<'a> LlmRequest<'a> {
     pub fn text(prompt: &'a str) -> Self {
-        LlmRequest {
+        Self {
             prompt,
             image_png_b64: None,
             json_mode: false,

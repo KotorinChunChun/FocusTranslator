@@ -113,6 +113,8 @@ const IDC_PROF_CONN_STATUS: i32 = 183;
 const IDC_OCR_PRIORITY_APPS: i32 = 184;
 /// アプリ名・開発者名を空白表示へ切り替えるBossGuard。
 const IDC_BOSS_GUARD: i32 = 185;
+/// LLMプロンプトへ赤枠付きの対象アプリ全体画像を添付する設定。
+const IDC_SEND_FULL_SCREENSHOT_TO_LLM: i32 = 186;
 
 /// エディットコントロールの通知コード (windows クレートに定義がないもの)
 const EN_KILLFOCUS: u32 = 0x0200;
@@ -398,6 +400,16 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             IDC_DEBUG_MODE,
         );
         y += STEP;
+        checkbox(
+            h,
+            inst,
+            "アプリ全体のスクリーンショットをLLMに送信する",
+            lx,
+            y,
+            370,
+            IDC_SEND_FULL_SCREENSHOT_TO_LLM,
+        );
+        y += STEP;
         label(h, inst, "保持上限", lx, y + 2, 60);
         edit(h, inst, lx + 66, y, 70, IDC_LOG_MAX);
         button(
@@ -416,20 +428,19 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         button(
             h,
             inst,
-            "外部送信の同意状態をリセット",
+            "外部送信同意をリセット",
             lx,
             y,
-            220,
+            184,
             IDC_CONSENT_RESET,
         );
-        y += STEP;
         button(
             h,
             inst,
-            "設定をリセット (アプリ再起動)",
-            lx,
+            "設定をリセット (再起動)",
+            lx + 192,
             y,
-            220,
+            184,
             IDC_RESET_SETTINGS,
         );
     }
@@ -994,6 +1005,11 @@ fn populate(h: HWND) {
     check_set(h, IDC_PERFLOG, cfg.perf_log);
     check_set(h, IDC_LOG_ENABLED, cfg.log_enabled);
     check_set(h, IDC_DEBUG_MODE, cfg.debug_mode);
+    check_set(
+        h,
+        IDC_SEND_FULL_SCREENSHOT_TO_LLM,
+        cfg.send_full_screenshot_to_llm,
+    );
     check_set(h, IDC_DETECT_MODE, cfg.detect_enabled);
     combo_fill(
         h,
@@ -2150,6 +2166,7 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.perf_log = check_get(h, IDC_PERFLOG);
     cfg.log_enabled = check_get(h, IDC_LOG_ENABLED);
     cfg.debug_mode = check_get(h, IDC_DEBUG_MODE);
+    cfg.send_full_screenshot_to_llm = check_get(h, IDC_SEND_FULL_SCREENSHOT_TO_LLM);
     cfg.detect_enabled = check_get(h, IDC_DETECT_MODE);
     cfg.detect_key =
         PREVIEW_KEYS[combo_sel(h, IDC_DETECT_KEY).min(PREVIEW_KEYS.len() - 1)].to_string();
@@ -2303,6 +2320,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 | IDC_PERFLOG
                 | IDC_LOG_ENABLED
                 | IDC_DEBUG_MODE
+                | IDC_SEND_FULL_SCREENSHOT_TO_LLM
                 | IDC_DETECT_MODE
                 | IDC_PREVIEW_DETECT_MODE
                 | IDC_LLAMA_AUTOSTART

@@ -27,11 +27,12 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CBS_DROPDOWNLIST, CW_USEDEFAULT, CallWindowProcW, CreateWindowExW, DefWindowProcW,
     DestroyWindow, GWLP_WNDPROC, GetClientRect, GetCursorPos, HMENU, IDC_ARROW, IDC_SIZENS,
-    IDC_SIZEWE, IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW, SW_SHOW,
-    SW_SHOWNORMAL, SendMessageW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR, WM_SIZE, WNDCLASSW,
-    WS_BORDER, WS_CHILD, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    IDC_SIZEWE, IDYES, IsWindow, LoadCursorW, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW,
+    SW_SHOW, SW_SHOWNORMAL, SendMessageW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NOTIFY, WM_SETCURSOR,
+    WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -1624,6 +1625,67 @@ fn rgba_to_captured(iw: u32, ih: u32, rgba: &[u8]) -> crate::capture::Captured {
     }
 }
 
+/// ログに保存された全体画像へ対象矩形の赤枠を描き、LLM送信用画像を作る。
+fn prepare_logged_prompt_image(
+    full_image: Option<(u32, u32, Vec<u8>)>,
+    crop_rect: Option<(i32, i32, i32, i32)>,
+) -> Option<crate::capture::Captured> {
+    let (iw, ih, rgba) = full_image?;
+    let (x, y, w, h) = crop_rect?;
+    let full = rgba_to_captured(iw, ih, &rgba);
+    Some(crate::capture::prepare_llm_screenshot(
+        &full,
+        RECT {
+            left: x,
+            top: y,
+            right: x + w,
+            bottom: y + h,
+        },
+        1600,
+    ))
+}
+
+/// ログビューアから外部LLMへ送る直前に、テキスト・画像の同意状態を確認する。
+fn ensure_logviewer_llm_consent(
+    h: HWND,
+    cfg: &mut crate::config::Config,
+    profile_name: &str,
+    want_image: bool,
+) -> bool {
+    let Some(profile) = cfg.api_profiles.iter().find(|p| p.name == profile_name) else {
+        return true;
+    };
+    if !profile.is_external() {
+        return true;
+    }
+    let need_text = !cfg.consent_text;
+    let need_image = want_image && !cfg.consent_image;
+    if !need_text && !need_image {
+        return true;
+    }
+    let msg = if need_image {
+        w!(
+            "この操作はキャプチャ画像とテキスト・言語設定を外部サービスへ送信します。\n初回のみ確認しています。許可しますか?"
+        )
+    } else {
+        w!(
+            "この操作は読み取ったテキストと関連情報を外部サービスへ送信します。\n初回のみ確認しています。許可しますか?"
+        )
+    };
+    if unsafe { MessageBoxW(Some(h), msg, w!("外部送信の同意"), MB_YESNO) } != IDYES {
+        return false;
+    }
+    if need_text {
+        cfg.consent_text = true;
+    }
+    if need_image {
+        cfg.consent_image = true;
+        cfg.consent_text = true;
+    }
+    cfg.save();
+    true
+}
+
 /// 再処理ボタンを「○○中…」表示にして無効化する (SPECv0.5.4 §14: 連打防止 + 進行中の明示)。
 fn set_reproc_busy(h: HWND, btn_id: i32, busy_label: &str) {
     let btn = crate::ui_helpers::get_dlg_item(h, btn_id);
@@ -1654,11 +1716,17 @@ fn reset_reproc_buttons(h: HWND) {
 fn start_reocr(h: HWND) {
     let sel = STATE.with(|s| {
         let st = s.borrow();
-        st.sel_cap
-            .and_then(|i| st.caps.get(i))
-            .map(|c| (c.id, c.image_path.clone(), prompt_ctx_from_cap(c)))
+        st.sel_cap.and_then(|i| st.caps.get(i)).map(|c| {
+            (
+                c.id,
+                c.image_path.clone(),
+                prompt_ctx_from_cap(c),
+                st.full_image.clone(),
+                st.crop_rect,
+            )
+        })
     });
-    let Some((capture_id, image_path, mut pc)) = sel else {
+    let Some((capture_id, image_path, mut pc, full_image, crop_rect)) = sel else {
         unsafe {
             MessageBoxW(Some(h), w!("入力を選択してください。"), w!("再OCR"), MB_OK);
         }
@@ -1692,21 +1760,52 @@ fn start_reocr(h: HWND) {
                 windows::Win32::System::Com::COINIT_MULTITHREADED,
             );
         }
-        let cfg = crate::config::Config::load();
+        let mut cfg = crate::config::Config::load();
+        if engine == "llm" {
+            let profile_name = cfg.active_api_profile.clone();
+            if !ensure_logviewer_llm_consent(
+                HWND(hwnd_isize as *mut _),
+                &mut cfg,
+                &profile_name,
+                true,
+            ) {
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                        Some(HWND(hwnd_isize as *mut _)),
+                        WM_APP_RELOAD,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+                return;
+            }
+        }
         let path = logdb::logs_dir().join(&rel);
         if let Some((iw, ih, rgba)) = decode_png(&path) {
             let cap = rgba_to_captured(iw, ih, &rgba);
-            let hash = crate::capture::hash_hex(&cap);
+            let prepared = if cfg.send_full_screenshot_to_llm && engine == "llm" {
+                prepare_logged_prompt_image(full_image, crop_rect)
+            } else {
+                None
+            };
+            let request_cap = prepared.as_ref().unwrap_or(&cap);
+            let hash = crate::capture::hash_hex(request_cap);
             // ログビューアの「再OCR」は明示的な手動再実行ボタンのため、キャッシュがあっても
             // 常に実行する(オーバーレイ側の自動再認識とは異なり、都度の確認が目的のため)。
             // ハッシュ自体は後日オーバーレイ側の重複防止に使えるよう記録しておく。
             let t0 = std::time::Instant::now();
             pc.ocr_engine = engine.clone();
-            let (text, err): (Option<String>, Option<String>) =
-                match crate::ocr::run(&engine, &cfg, &cap, crate::ocr::Focus::All, &pc) {
-                    Ok(o) => (Some(o.text), None),
-                    Err(e) => (None, Some(e)),
-                };
+            let (text, err): (Option<String>, Option<String>) = match crate::ocr::run(
+                &engine,
+                &cfg,
+                request_cap,
+                crate::ocr::Focus::All,
+                &pc,
+                prepared.is_some(),
+            ) {
+                Ok(o) => (Some(o.text), None),
+                Err(e) => (None, Some(e)),
+            };
             let ms = t0.elapsed().as_millis();
             // engine="llm"のときはプロファイル名も記録する (SPECv0.5.5: プロファイル別の
             // キャッシュ判定に使うため。worker.rsのllm_profile_of()と同じ規則)
@@ -1754,11 +1853,18 @@ fn start_retranslate(h: HWND) {
             .and_then(|i| st.caps.get(i))
             .map(prompt_ctx_from_cap)
             .unwrap_or_default();
-        st.sel_recog
-            .and_then(|i| st.recogs.get(i))
-            .map(|r| (r.id, r.source_text.clone(), r.engine.clone(), pc))
+        st.sel_recog.and_then(|i| st.recogs.get(i)).map(|r| {
+            (
+                r.id,
+                r.source_text.clone(),
+                r.engine.clone(),
+                pc,
+                st.full_image.clone(),
+                st.crop_rect,
+            )
+        })
     });
-    let Some((recog_id, source, recog_engine, mut pc)) = sel else {
+    let Some((recog_id, source, recog_engine, mut pc, full_image, crop_rect)) = sel else {
         unsafe {
             MessageBoxW(
                 Some(h),
@@ -1797,13 +1903,53 @@ fn start_retranslate(h: HWND) {
                 windows::Win32::System::Com::COINIT_MULTITHREADED,
             );
         }
-        let cfg = crate::config::Config::load();
+        let mut cfg = crate::config::Config::load();
         let t0 = std::time::Instant::now();
         // UIA経路の認識は ocr_engine を空にする (SPECv0.4 §7.1)
         if recog_engine != "uia" {
             pc.ocr_engine = recog_engine.clone();
         }
-        match crate::translate::translate(&engine, &cfg, &source, &pc) {
+        let want_image = cfg.send_full_screenshot_to_llm
+            && engine == "llm"
+            && full_image.is_some()
+            && crop_rect.is_some();
+        if engine == "llm" {
+            let profile_name = cfg.active_api_profile.clone();
+            if !ensure_logviewer_llm_consent(
+                HWND(hwnd_isize as *mut _),
+                &mut cfg,
+                &profile_name,
+                want_image,
+            ) {
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                        Some(HWND(hwnd_isize as *mut _)),
+                        WM_APP_RELOAD,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+                return;
+            }
+        }
+        let prepared = if want_image {
+            prepare_logged_prompt_image(full_image, crop_rect)
+        } else {
+            None
+        };
+        let image_hash = prepared.as_ref().map(crate::capture::hash_hex);
+        let image_b64 = prepared.as_ref().map(|image| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(crate::capture::to_png(image))
+        });
+        match crate::translate::translate(
+            &engine,
+            &cfg,
+            &source,
+            &pc,
+            image_b64.as_deref(),
+            image_hash.as_deref(),
+        ) {
             Ok(t) => {
                 let ms = t0.elapsed().as_millis();
                 let profile = (t.engine == "llm").then(|| cfg.active_api_profile.clone());
@@ -1862,9 +2008,9 @@ fn start_reexplain(h: HWND) {
         let cap = st.sel_cap.and_then(|i| st.caps.get(i)).cloned();
         st.sel_recog
             .and_then(|i| st.recogs.get(i))
-            .map(|r| (r.clone(), cap))
+            .map(|r| (r.clone(), cap, st.full_image.clone(), st.crop_rect))
     });
-    let Some((recog, cap)) = sel else {
+    let Some((recog, cap, full_image, crop_rect)) = sel else {
         unsafe {
             MessageBoxW(
                 Some(h),
@@ -1927,7 +2073,7 @@ fn start_reexplain(h: HWND) {
                 windows::Win32::System::Com::COINIT_MULTITHREADED,
             );
         }
-        let cfg = crate::config::Config::load();
+        let mut cfg = crate::config::Config::load();
         let notify = || unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
                 Some(HWND(hwnd_isize as *mut _)),
@@ -1936,20 +2082,55 @@ fn start_reexplain(h: HWND) {
                 LPARAM(0),
             );
         };
+        let want_image =
+            cfg.send_full_screenshot_to_llm && full_image.is_some() && crop_rect.is_some();
+        if !ensure_logviewer_llm_consent(
+            HWND(hwnd_isize as *mut _),
+            &mut cfg,
+            &profile_name,
+            want_image,
+        ) {
+            notify();
+            return;
+        }
         let Some(prof) = cfg.api_profiles.iter().find(|p| p.name == profile_name) else {
             notify();
             return;
         };
-        let prompt = cfg.fill_prompt(&prof.explain_prompt, &pc);
+        let mut prompt = cfg.fill_prompt(&prof.explain_prompt, &pc);
+        let prepared = if want_image {
+            prepare_logged_prompt_image(full_image, crop_rect)
+        } else {
+            None
+        };
+        if prepared.is_some() {
+            prompt.push_str("\n\n## 添付画像について\n添付画像は対象アプリ全体のスクリーンショットです。赤枠で囲まれた箇所を解説対象として、画面全体の文脈も参考にしてください。");
+        }
+        let image_hash = prepared.as_ref().map(crate::capture::hash_hex);
+        let image_b64 = prepared.as_ref().map(|image| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(crate::capture::to_png(image))
+        });
+        let cache_prompt = image_hash
+            .as_ref()
+            .map(|hash| format!("{prompt}\n[添付画像hash: {}]", &hash[..16]))
+            .unwrap_or_else(|| prompt.clone());
         let t0 = std::time::Instant::now();
-        let result = crate::llm_api::call(prof, &crate::llm_api::LlmRequest::text(&prompt));
+        let result = crate::llm_api::call(
+            prof,
+            &crate::llm_api::LlmRequest {
+                prompt: &prompt,
+                image_png_b64: image_b64.as_deref(),
+                json_mode: false,
+            },
+        );
         let ms = t0.elapsed().as_millis();
         match result {
             Ok(res) => logdb::log_explanation(
                 recog_id,
                 &prof.name,
                 ms,
-                &prompt,
+                &cache_prompt,
                 Some(&res.text),
                 None,
                 res.tokens_in,
@@ -1959,7 +2140,7 @@ fn start_reexplain(h: HWND) {
                 recog_id,
                 &prof.name,
                 ms,
-                &prompt,
+                &cache_prompt,
                 None,
                 Some(&e),
                 None,

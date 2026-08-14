@@ -81,9 +81,11 @@ pub fn run(
     img: &Captured,
     focus: Focus,
     ctx: &crate::config::PromptContext,
+    full_screenshot: bool,
 ) -> Result<OcrOutput, String> {
     // LLM経路のエラーメッセージにAPIキーが混入しても漏れないよう伏字化する (SPECv0.5.3)
-    run_inner(engine, cfg, img, focus, ctx).map_err(|e| crate::translate::mask_keys(cfg, &e))
+    run_inner(engine, cfg, img, focus, ctx, full_screenshot)
+        .map_err(|e| crate::translate::mask_keys(cfg, &e))
 }
 
 fn run_inner(
@@ -92,6 +94,7 @@ fn run_inner(
     img: &Captured,
     focus: Focus,
     ctx: &crate::config::PromptContext,
+    full_screenshot: bool,
 ) -> Result<OcrOutput, String> {
     match engine {
         "oneocr" => crate::oneocr::ocr_oneocr(img, focus).map(|(text, focus_line)| OcrOutput {
@@ -112,7 +115,7 @@ fn run_inner(
                 Err("PaddleOCRのモデルが未導入です。設定画面からインストールしてください".into())
             }
         }
-        "llm" => llm_ocr_translate(cfg, img, focus, ctx),
+        "llm" => llm_ocr_translate(cfg, img, focus, ctx, full_screenshot),
         other => Err(format!("不明なOCRエンジン: {other}")),
     }
 }
@@ -346,6 +349,7 @@ pub fn llm_ocr_translate(
     img: &Captured,
     focus: Focus,
     ctx: &crate::config::PromptContext,
+    full_screenshot: bool,
 ) -> Result<OcrOutput, String> {
     let prof = cfg
         .active_profile()
@@ -359,7 +363,10 @@ pub fn llm_ocr_translate(
     ctx.translated_text.clear();
     ctx.tr_engine.clear();
     ctx.ocr_engine = "llm".into();
-    let prompt = cfg.fill_prompt(&prof.ocr_prompt, &ctx);
+    let mut prompt = cfg.fill_prompt(&prof.ocr_prompt, &ctx);
+    if full_screenshot {
+        prompt.push_str("\n\nThe attached image is a screenshot of the entire target application. Transcribe only the text inside the red frame and translate it using the surrounding screen as context. Keep the requested JSON response format.");
+    }
 
     let res = crate::llm_api::call(
         prof,
