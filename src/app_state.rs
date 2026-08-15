@@ -74,6 +74,8 @@ pub struct App {
     pub target: isize,
     pub source: String,
     pub translation: Option<String>,
+    /// 通常の翻訳以外の変換結果に使う見出し。None のときは翻訳エンジン名を表示する。
+    pub translation_heading: Option<String>,
     pub status: Option<String>,
     pub badge: Option<String>,
     pub cur_ocr: String,
@@ -204,6 +206,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             target: 0,
             source: String::new(),
             translation: None,
+            translation_heading: None,
             status: None,
             badge: None,
             cur_ocr,
@@ -532,6 +535,7 @@ pub fn close_overlay(app: &mut App) {
     app.generation += 1;
     app.source.clear();
     app.translation = None;
+    app.translation_heading = None;
     app.status = None;
     app.badge = None;
     app.error_only = false;
@@ -581,7 +585,7 @@ fn autoload_cached_explanation(app: &mut App) {
         } else {
             app.cur_ocr.clone()
         },
-        tr_engine: if app.translation.is_some() {
+        tr_engine: if app.translation.is_some() && app.translation_heading.is_none() {
             app.cur_tr.clone()
         } else {
             String::new()
@@ -628,6 +632,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                     return;
                 }
                 app.source = text;
+                app.translation_heading = None;
                 app.via_uia = method == "UIA";
                 // クリップボードのテキスト取り込みはOCRを経ていない (SPECv0.5.4 §20)
                 app.via_clipboard = method == "clipboard";
@@ -680,11 +685,13 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
             worker::WorkerMsg::Translation {
                 text,
                 badge,
+                heading,
                 ms,
                 recog_id,
             } => {
                 app.tr_pending = false;
                 app.translation = Some(text);
+                app.translation_heading = heading;
                 app.status = None;
                 app.error_only = false;
                 app.badge = badge;
@@ -698,6 +705,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
             worker::WorkerMsg::TranslationSkipped { msg } => {
                 app.tr_pending = false;
                 app.translation = None;
+                app.translation_heading = None;
                 app.status = Some(msg);
                 app.error_only = false;
                 sync_overlay(app);
@@ -707,6 +715,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 // 見出し・エンジン切替チップは残したいので translation を None にはしない。
                 // 本文だけ空にし、エラー内容はシステムメッセージ行 (status) へ出す。
                 app.translation = Some(String::new());
+                app.translation_heading = None;
                 app.status = Some(msg);
                 sync_overlay(app);
             }
@@ -722,6 +731,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                     // OCRエンジン切替・画像編集後の再認識失敗: 古い認識結果を残さず消す
                     app.source.clear();
                     app.translation = None;
+                    app.translation_heading = None;
                     app.status = Some(msg);
                     app.error_only = false;
                 } else if !app.source.is_empty() || app.last_img.is_some() {
@@ -732,6 +742,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                     app.error_only = false;
                 } else {
                     app.translation = None;
+                    app.translation_heading = None;
                     app.status = Some(msg);
                     app.anchor = anchor;
                     app.error_only = true;
@@ -884,6 +895,7 @@ pub fn sync_overlay(app: &mut App) {
         anchor: app.anchor,
         source: app.source.clone(),
         translation: app.translation.clone(),
+        translation_heading: app.translation_heading.clone(),
         status: app.status.clone(),
         badge: app.badge.clone(),
         pinned: app.mode == Mode::Pinned,
@@ -916,7 +928,9 @@ pub fn sync_overlay(app: &mut App) {
         tr_keys,
         tr_labels,
         tr_enabled,
-        cur_tr_chip_key: if app.cur_tr == "llm" {
+        cur_tr_chip_key: if app.translation_heading.is_some() {
+            String::new()
+        } else if app.cur_tr == "llm" {
             app.cfg.active_api_profile.clone()
         } else {
             app.cur_tr.clone()

@@ -724,13 +724,15 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         };
         if let Some(t) = &translation_body {
             let block_start = y;
-            if !content.source_lang.is_empty() {
+            if content.translation_heading.is_none() && !content.source_lang.is_empty() {
                 let lab = format!("{}→{}", content.source_lang, content.target_lang);
                 let (cw, _) = measure(hdc, &lab, FONT_CHIP, false, 200);
                 need_w = need_w.max(PAD + 200 + cw + 18 + PANEL_MARGIN + 6);
                 swap_btn = Some((lab, cw + 18, 0)); // y will be updated later
             }
-            let heading = if content.cur_tr == "llm" {
+            let heading = if let Some(title) = &content.translation_heading {
+                format!("【{title}】")
+            } else if content.cur_tr == "llm" {
                 if let Some(detail) = &content.tr_engine_detail {
                     format!("【翻訳結果(LLM:{})】", detail)
                 } else {

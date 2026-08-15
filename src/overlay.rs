@@ -170,6 +170,8 @@ pub struct OverlayContent {
     pub anchor: (i32, i32),
     pub source: String,
     pub translation: Option<String>,
+    /// 通常の翻訳結果と異なる見出し。設定時は翻訳エンジンを未選択表示にする。
+    pub translation_heading: Option<String>,
     pub status: Option<String>,
     pub badge: Option<String>,
     pub pinned: bool,

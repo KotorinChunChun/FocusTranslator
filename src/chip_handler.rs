@@ -45,7 +45,7 @@ fn prompt_ctx_from_app(original: &str) -> crate::config::PromptContext {
         } else {
             app.cur_ocr.clone()
         },
-        tr_engine: if app.translation.is_some() {
+        tr_engine: if app.translation.is_some() && app.translation_heading.is_none() {
             app.cur_tr.clone()
         } else {
             String::new()
@@ -67,6 +67,7 @@ fn adopt_text_and_retranslate(text: String, cur_tr: String, recog_id: Option<i64
         app.generation += 1;
         app.mode = Mode::Pinned;
         app.source = text.clone();
+        app.translation_heading = None;
         app.via_uia = true;
         // 翻訳ブロックを消さず「翻訳中」を出すためのフラグ (SPECv0.5.4 §6)
         app.tr_pending = true;
@@ -102,6 +103,7 @@ fn begin_fresh_session(status: &str) -> Option<(u64, String, isize, (i32, i32))>
         // 対象アプリ・UIA・選択・保持画像・ログIDをすべて破棄する
         app.source.clear();
         app.translation = None;
+        app.translation_heading = None;
         app.badge = None;
         app.error_only = false;
         app.app_title = String::new();
@@ -237,6 +239,7 @@ fn commit_edited_image(
             // 再認識→再翻訳のため両ブロックを処理中表示にする (SPECv0.5.4 §6)
             app.ocr_pending = true;
             app.tr_pending = true;
+            app.translation_heading = None;
             app.status = Some("再認識中…".into());
             app.busy = true;
             sync_overlay(app);
@@ -613,6 +616,7 @@ fn chip_edit_source(c: ChipCtx) {
             app.source = new_text.clone();
             app.tr_pending = true;
             app.translation = None;
+            app.translation_heading = None;
             // 読み取り結果(原文)が変わったので解説も破棄する (再度開けば同一なら復元される)
             app.explanation = None;
             app.explain_profile = String::new();
@@ -695,6 +699,7 @@ fn chip_swap_lang(c: ChipCtx) {
         app.mode = Mode::Pinned;
         app.tr_pending = true;
         app.translation = None;
+        app.translation_heading = None;
         let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
         app.status = Some(format!("{} で翻訳中…", engine_name));
         app.busy = true;
@@ -950,6 +955,7 @@ fn switch_ocr_engine(id: usize, c: ChipCtx) {
         // 再認識→再翻訳のため両ブロックを処理中表示にする (SPECv0.5.4 §6)
         app.ocr_pending = true;
         app.tr_pending = true;
+        app.translation_heading = None;
         app.status = Some("再認識中…".into());
         app.busy = true;
         sync_overlay(app);
@@ -1005,6 +1011,7 @@ fn switch_tr_engine(id: usize, c: ChipCtx) {
         app.status = Some(format!("{} で翻訳中…", engine_name));
         app.tr_pending = true;
         app.translation = None;
+        app.translation_heading = None;
         app.busy = true;
         sync_overlay(app);
         app.generation

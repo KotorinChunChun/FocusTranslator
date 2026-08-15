@@ -5,8 +5,10 @@
 // 結果はメモリ内キャッシュ (SPEC: キャッシュヒット時 100〜200ms台)。
 // ログDB用に送受信JSON・トークン・言語・実際に使ったエンジンも返す。
 use crate::config::Config;
+use percent_encoding::percent_decode_str;
+use regex::Regex;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// キャッシュキー: (エンジン, プロファイル, 翻訳元言語, 訳先言語, 原文, 添付画像hash)。
 /// LLM翻訳プロンプトは {{source_lang}} を含むため、元言語もキーに含める
@@ -14,6 +16,25 @@ use std::sync::Mutex;
 type CacheKey = (String, Option<String>, String, String, String, String);
 static CACHE: Mutex<Option<HashMap<CacheKey, String>>> = Mutex::new(None);
 const CACHE_MAX: usize = 500;
+
+/// `%HH` が2組以上連続する箇所を、パーセントエンコーディングされた文字列とみなす。
+/// 単独の `%20` などは通常の文章にも現れうるため対象外とする。
+static PERCENT_ENCODED_RE: OnceLock<Regex> = OnceLock::new();
+
+/// パーセントエンコーディングを含む文字列なら、文字列全体をUTF-8としてデコードする。
+/// 検知条件を満たさない場合や、デコード後が不正なUTF-8になる場合は None を返す。
+pub fn decode_percent_encoded(text: &str) -> Option<String> {
+    let re = PERCENT_ENCODED_RE
+        .get_or_init(|| Regex::new(r"(?:%[0-9A-Fa-f]{2}){2}").expect("固定正規表現は有効"));
+    if !re.is_match(text) {
+        return None;
+    }
+
+    percent_decode_str(text)
+        .decode_utf8()
+        .ok()
+        .map(|decoded| decoded.into_owned())
+}
 
 /// クラウドREST呼び出しの詳細(ログDB用)
 #[derive(Default, Clone)]
@@ -344,7 +365,32 @@ fn translate_llm(
 
 #[cfg(test)]
 mod tests {
-    use super::is_source_lang_text;
+    use super::{decode_percent_encoded, is_source_lang_text};
+
+    #[test]
+    fn 連続したパーセントエンコーディングをデコードする() {
+        assert_eq!(
+            decode_percent_encoded(
+                "docs/%E6%B5%B7%E5%A4%96%E8%A3%BD%E3%82%BD%E3%83%95%E3%83%88%E3%81%AEUI%E3%81%AE%E7%BF%BB%E8%A8%B3%E3%81%8A%E3%82%88%E3%81%B3%E6%A9%9F%E8%83%BD%E8%A7%A3%E8%AA%AC.png"
+            ),
+            Some("docs/海外製ソフトのUIの翻訳および機能解説.png".to_string())
+        );
+    }
+
+    #[test]
+    fn 小文字の16進表記もデコードする() {
+        assert_eq!(decode_percent_encoded("%e3%81%82"), Some("あ".to_string()));
+    }
+
+    #[test]
+    fn 単独のパーセントエンコーディングは検知しない() {
+        assert_eq!(decode_percent_encoded("進捗%20です"), None);
+    }
+
+    #[test]
+    fn 不正なutf8はデコード結果にしない() {
+        assert_eq!(decode_percent_encoded("%FF%FF"), None);
+    }
 
     #[test]
     fn en_通常の英文は翻訳対象() {

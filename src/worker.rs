@@ -40,6 +40,8 @@ pub enum WorkerMsg {
     Translation {
         text: String,
         badge: Option<String>,
+        /// None: 通常の翻訳結果。Some: 翻訳以外の変換結果として表示する見出し。
+        heading: Option<String>,
         ms: u128,
         recog_id: Option<i64>,
     },
@@ -556,6 +558,22 @@ fn dispatch_translation(
     image: Option<PromptImage>,
     t0: &Instant,
 ) {
+    // OCR+翻訳統合モードで訳文が同時に返っていても、原文がパーセントエンコーディング
+    // ならその訳文は採用せず、通常の翻訳経路と同じデコード結果を表示する。
+    if let Some(decoded) = crate::translate::decode_percent_encoded(&o.text) {
+        post(
+            main,
+            generation,
+            WorkerMsg::Translation {
+                text: decoded,
+                badge: None,
+                heading: Some("パーセントデコード結果".to_string()),
+                ms: 0,
+                recog_id,
+            },
+        );
+        return;
+    }
     if let Some(tr) = &o.translation {
         // LLM統合モード: 訳文も同時取得済み
         let tms = t0.elapsed().as_millis();
@@ -566,6 +584,7 @@ fn dispatch_translation(
             WorkerMsg::Translation {
                 text: tr.clone(),
                 badge: Some("LLM統合".into()),
+                heading: None,
                 ms: tms,
                 recog_id,
             },
@@ -1034,6 +1053,21 @@ fn translate(
     image: Option<PromptImage>,
     force: bool,
 ) {
+    // パーセントエンコーディングは翻訳より先に処理し、翻訳エンジンや外部APIへ渡さない。
+    if let Some(decoded) = crate::translate::decode_percent_encoded(&text) {
+        post(
+            main,
+            generation,
+            WorkerMsg::Translation {
+                text: decoded,
+                badge: None,
+                heading: Some("パーセントデコード結果".to_string()),
+                ms: 0,
+                recog_id,
+            },
+        );
+        return;
+    }
     if !force && !crate::translate::is_source_lang_text(&cfg.source_lang, &text) {
         let msg = format!(
             "元言語 ({}) のテキストではないため翻訳をスキップしました。",
@@ -1078,6 +1112,7 @@ fn translate(
                     WorkerMsg::Translation {
                         text: t.text,
                         badge: t.badge,
+                        heading: None,
                         ms,
                         recog_id,
                     },
