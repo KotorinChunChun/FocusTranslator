@@ -11,7 +11,9 @@ OutputDir=Output
 OutputBaseFilename=focus-translator-setup
 Compression=lzma
 SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
+; x64バイナリのため32-bit Windowsを除外し、x64互換環境では64-bitモードで導入する
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\focus-translator.exe
 

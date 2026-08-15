@@ -85,7 +85,7 @@ Codex CLI 0.147.0では `--ask-for-approval never` は `exec` サブコマンド
 
 ### リリース品質ゲート
 
-`dev/scripts/release-FocusTranslator.ps1`はリポジトリルートを基準に、バージョン一致、作業ツリーの清浄性、上流ブランチとの完全同期、fmt、debug/releaseテスト、clippy、releaseビルド、OSV依存監査、Inno Setupによるインストーラー生成を検証する。通常実行はローカル成果物の生成だけで、`-Publish`指定時も既存のリモートタグを検証してGitHubのドラフトリリースを作る。タグを暗黙作成したり即時公開したりしてはならない。
+`dev/scripts/release-FocusTranslator.ps1`はリポジトリルートを基準に、バージョン一致、作業ツリーの清浄性、上流ブランチとの完全同期、fmt、debug/releaseテスト、clippy、releaseビルド、OSV依存監査、Inno Setupによるインストーラー生成を検証する。通常実行はローカル成果物の生成だけで、`-Publish`指定時も既存のリモートタグを検証してGitHubのドラフトリリースを作る。タグを暗黙作成したり即時公開したりしてはならない。`installer.iss`はx64バイナリに合わせ、`ArchitecturesAllowed`と64-bitインストールモードを`x64compatible`へ限定する。
 
 正式リリースでは`FOCUSTRANSLATOR_SIGNING_CERT_THUMBPRINT`または引数でCurrentUser証明書ストアのコード署名証明書を指定し、exeとSetup.exeの署名後にAuthenticodeの`Valid`を再確認する。証明書なしでは停止し、`-AllowUnsigned`はローカルQA成果物を明示的に作る場合だけ使用する。zip、Setup.exe、`SHA256SUMS.txt`を同じ公開ディレクトリへ生成する。
 
