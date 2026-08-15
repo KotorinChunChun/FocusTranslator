@@ -16,7 +16,7 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, IDC_ARROW,
     IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO,
-    MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL,
+    MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
     SetForegroundWindow, SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
     WM_DESTROY, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
 };
@@ -192,7 +192,9 @@ pub fn is_open() -> bool {
 pub fn open(instance: HINSTANCE, _main: HWND) {
     if is_open() {
         unsafe {
-            let _ = SetForegroundWindow(hwnd());
+            let h = hwnd();
+            let _ = ShowWindow(h, SW_RESTORE);
+            let _ = SetForegroundWindow(h);
         }
         return;
     }

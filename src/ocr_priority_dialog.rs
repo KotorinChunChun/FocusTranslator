@@ -26,8 +26,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CBN_SELCHANGE, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     EnumChildWindows, EnumWindows, GA_ROOT, GW_OWNER, GWL_EXSTYLE, GetAncestor, GetCursorPos,
     GetMessageW, GetWindow, GetWindowLongW, GetWindowRect, IDC_ARROW, IsWindow, IsWindowVisible,
-    KillTimer, LoadCursorW, MSG, RegisterClassW, SW_SHOW, SetForegroundWindow, SetTimer,
-    ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSW,
+    KillTimer, LoadCursorW, MSG, RegisterClassW, SW_RESTORE, SW_SHOW, SetForegroundWindow,
+    SetTimer, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_TIMER, WNDCLASSW,
     WS_CAPTION, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUPWINDOW, WS_SYSMENU, WindowFromPoint,
 };
 use windows::core::w;
@@ -355,7 +355,9 @@ fn notify_main_reload() {
 pub fn open(parent: HWND) {
     if is_open() {
         unsafe {
-            let _ = SetForegroundWindow(hwnd());
+            let h = hwnd();
+            let _ = ShowWindow(h, SW_RESTORE);
+            let _ = SetForegroundWindow(h);
         }
         return;
     }
