@@ -1,4 +1,4 @@
-// プレビューウィンドウ: ログビューアから画像をクリックしたときに開く原寸表示ウィンドウ。
+// プレビューウィンドウ: ログビューアやプロンプト編集画面から開く原寸表示ウィンドウ。
 // クリック&ドラッグでパンニング、マウスホイールで拡大縮小(デフォルト100%)、
 // 矢印キーでのスクロールも併用できる。画像範囲外へはパン/スクロールできない。
 use std::cell::RefCell;
@@ -12,7 +12,9 @@ use windows::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, ScreenToClient,
     SelectObject, SetStretchBltMode, StretchDIBits,
 };
-use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::CF_DIB;
 use windows::Win32::UI::Controls::SetScrollInfo;
@@ -21,13 +23,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_RIGHT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetScrollInfo, GetWindowRect,
-    IDC_ARROW, IsWindow, LoadCursorW, RegisterClassW, SB_HORZ, SB_LINEDOWN, SB_LINEUP,
-    SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SCROLLINFO,
-    SIF_ALL, SIF_TRACKPOS, SW_SHOW, SWP_NOACTIVATE, SetForegroundWindow, SetWindowPos,
-    SetWindowTextW, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HSCROLL, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SIZE, WM_VSCROLL,
-    WNDCLASSW, WS_EX_TOPMOST, WS_HSCROLL, WS_OVERLAPPEDWINDOW, WS_VSCROLL,
+    AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
+    GetScrollInfo, GetWindowRect, IDC_ARROW, IsWindow, LoadCursorW, RegisterClassW, SB_HORZ,
+    SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP,
+    SB_VERT, SCROLLINFO, SIF_ALL, SIF_TRACKPOS, SW_SHOW, SWP_NOACTIVATE, SetForegroundWindow,
+    SetWindowPos, SetWindowTextW, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HSCROLL,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SIZE,
+    WM_VSCROLL, WNDCLASSW, WS_EX_TOPMOST, WS_HSCROLL, WS_OVERLAPPEDWINDOW, WS_VSCROLL,
 };
 use windows::core::w;
 
@@ -38,6 +40,8 @@ pub(crate) enum ImgKind {
     Ocr,
     /// 対象アプリ全体画像 (crop_rect があれば赤枠を表示する)
     Full,
+    /// LLMへ実際に添付する加工済み画像 (赤枠は画像へ描画済み)
+    LlmPrompt,
 }
 
 const MIN_ZOOM: f64 = 0.1;
@@ -66,10 +70,30 @@ pub(crate) fn draw_red_box(hdc: HDC, r: RECT, width: i32) {
     unsafe {
         let brush = CreateSolidBrush(COLORREF(0x000000FF));
         let bars = [
-            RECT { left: r.left, top: r.top, right: r.right, bottom: r.top + width },
-            RECT { left: r.left, top: r.bottom - width, right: r.right, bottom: r.bottom },
-            RECT { left: r.left, top: r.top, right: r.left + width, bottom: r.bottom },
-            RECT { left: r.right - width, top: r.top, right: r.right, bottom: r.bottom },
+            RECT {
+                left: r.left,
+                top: r.top,
+                right: r.right,
+                bottom: r.top + width,
+            },
+            RECT {
+                left: r.left,
+                top: r.bottom - width,
+                right: r.right,
+                bottom: r.bottom,
+            },
+            RECT {
+                left: r.left,
+                top: r.top,
+                right: r.left + width,
+                bottom: r.bottom,
+            },
+            RECT {
+                left: r.right - width,
+                top: r.top,
+                right: r.right,
+                bottom: r.bottom,
+            },
         ];
         for bar in bars {
             FillRect(hdc, &bar, brush);
@@ -92,7 +116,10 @@ fn place_beside_parent(parent: HWND, cw: i32, ch: i32) -> (i32, i32) {
         let work = mi.rcWork;
         let space_right = work.right - prect.right;
         let space_left = prect.left - work.left;
-        let y = prect.top.max(work.top).min((work.bottom - ch).max(work.top));
+        let y = prect
+            .top
+            .max(work.top)
+            .min((work.bottom - ch).max(work.top));
         let x = if space_right >= space_left {
             (prect.right).min(work.right - cw).max(work.left)
         } else {
@@ -111,7 +138,12 @@ fn window_outer_size(iw: i32, ih: i32) -> (i32, i32) {
     // クライアント希望サイズ = 画像サイズ (概ね画面に収まる範囲へクランプ)
     let client_w = iw.clamp(1, 1380);
     let client_h = ih.clamp(1, 860);
-    let mut rect = RECT { left: 0, top: 0, right: client_w, bottom: client_h };
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: client_w,
+        bottom: client_h,
+    };
     unsafe {
         // スタイルは CreateWindowExW に渡すものと合わせる。AdjustWindowRectEx は
         // スクロールバー分を加味しないが、画像がクライアントに収まればバーは出ない。
@@ -121,7 +153,10 @@ fn window_outer_size(iw: i32, ih: i32) -> (i32, i32) {
     // 高さに固定マージンを足して確実に画像が収まるようにする (SPECv0.5.4 §13b)。
     // 過剰分は下端の余白になるだけでバーは出ない。
     const HEIGHT_MARGIN: i32 = 20;
-    (rect.right - rect.left, rect.bottom - rect.top + HEIGHT_MARGIN)
+    (
+        rect.right - rect.left,
+        rect.bottom - rect.top + HEIGHT_MARGIN,
+    )
 }
 
 pub(crate) fn open_preview(
@@ -130,15 +165,26 @@ pub(crate) fn open_preview(
     image: Option<(u32, u32, Vec<u8>)>,
     box_rect: Option<(i32, i32, i32, i32)>,
 ) {
-    let Some((iw, ih, _)) = image.as_ref().map(|(a, b, _)| (*a, *b, ())) else { return };
+    let Some((iw, ih, _)) = image.as_ref().map(|(a, b, _)| (*a, *b, ())) else {
+        return;
+    };
     IMG.with(|c| *c.borrow_mut() = image);
     CUR_KIND.with(|c| *c.borrow_mut() = Some(which));
     BOX_RECT.with(|c| *c.borrow_mut() = box_rect);
     SCROLL.with(|c| *c.borrow_mut() = (0, 0));
     ZOOM.with(|c| *c.borrow_mut() = 1.0);
     let title = match which {
-        ImgKind::Ocr => w!("OCR対象画像 (クリック&ドラッグ:パン / ホイール:拡大縮小 / Esc:閉じる / Ctrl+C:コピー)"),
-        ImgKind::Full => w!("全体画像 (クリック&ドラッグ:パン / ホイール:拡大縮小 / Esc:閉じる / Ctrl+C:コピー)"),
+        ImgKind::Ocr => w!(
+            "OCR対象画像 (クリック&ドラッグ:パン / ホイール:拡大縮小 / Esc:閉じる / Ctrl+C:コピー)"
+        ),
+        ImgKind::Full => {
+            w!("全体画像 (クリック&ドラッグ:パン / ホイール:拡大縮小 / Esc:閉じる / Ctrl+C:コピー)")
+        }
+        ImgKind::LlmPrompt => {
+            w!(
+                "LLM送信画像 (クリック&ドラッグ:パン / ホイール:拡大縮小 / Esc:閉じる / Ctrl+C:コピー)"
+            )
+        }
     };
 
     // 既存のプレビューウィンドウがあれば再利用する(2つ以上開かない)
@@ -231,18 +277,20 @@ pub(crate) fn refresh_if_open(
         Some(ImgKind::Full) if full_image.is_some() => {
             open_preview(parent, ImgKind::Full, full_image, box_rect);
         }
+        Some(ImgKind::LlmPrompt) => {}
         _ => {}
     }
 }
 
 fn scaled_size() -> Option<(i32, i32)> {
-    IMG.with(|c| c.borrow().as_ref().map(|(w, hh, _)| (*w, *hh))).map(|(iw, ih)| {
-        let z = ZOOM.with(|z| *z.borrow());
-        (
-            ((iw as f64 * z).round() as i32).max(1),
-            ((ih as f64 * z).round() as i32).max(1),
-        )
-    })
+    IMG.with(|c| c.borrow().as_ref().map(|(w, hh, _)| (*w, *hh)))
+        .map(|(iw, ih)| {
+            let z = ZOOM.with(|z| *z.borrow());
+            (
+                ((iw as f64 * z).round() as i32).max(1),
+                ((ih as f64 * z).round() as i32).max(1),
+            )
+        })
 }
 
 fn client_size(h: HWND) -> (i32, i32) {
@@ -255,7 +303,9 @@ fn client_size(h: HWND) -> (i32, i32) {
 
 /// スクロール量を画像範囲内にクランプして保存し、変化があれば再描画・スクロールバー更新する。
 fn set_scroll_clamped(h: HWND, x: i32, y: i32) {
-    let Some((sw, sh)) = scaled_size() else { return };
+    let Some((sw, sh)) = scaled_size() else {
+        return;
+    };
     let (cw, ch) = client_size(h);
     let max_x = (sw - cw).max(0);
     let max_y = (sh - ch).max(0);
@@ -309,7 +359,9 @@ fn zoom_at(h: HWND, cx: i32, cy: i32, wheel_delta: i32) {
 }
 
 fn update_scrollbars(h: HWND) {
-    let Some((sw, sh)) = scaled_size() else { return };
+    let Some((sw, sh)) = scaled_size() else {
+        return;
+    };
     let (cw, ch) = client_size(h);
     let (sx, sy) = SCROLL.with(|c| *c.borrow());
     unsafe {
@@ -333,7 +385,9 @@ fn update_scrollbars(h: HWND) {
 /// WM_HSCROLL / WM_VSCROLL (スクロールバーのクリック・ドラッグ操作) を処理する。
 fn handle_scroll_msg(h: HWND, wparam: WPARAM, horizontal: bool) {
     let code = (wparam.0 & 0xFFFF) as i32;
-    let Some((sw, sh)) = scaled_size() else { return };
+    let Some((sw, sh)) = scaled_size() else {
+        return;
+    };
     let (cw, ch) = client_size(h);
     let (max, page, cur) = if horizontal {
         (sw, cw, SCROLL.with(|c| c.borrow().0))
@@ -418,7 +472,11 @@ fn copy_to_clipboard(h: HWND) {
             let ptr = GlobalLock(hmem);
             let mut ok = false;
             if !ptr.is_null() {
-                std::ptr::copy_nonoverlapping(header_bytes.as_ptr(), ptr as *mut u8, header_bytes.len());
+                std::ptr::copy_nonoverlapping(
+                    header_bytes.as_ptr(),
+                    ptr as *mut u8,
+                    header_bytes.len(),
+                );
                 std::ptr::copy_nonoverlapping(
                     pixels.as_ptr(),
                     (ptr as *mut u8).add(header_bytes.len()),
@@ -481,9 +539,18 @@ fn paint(h: HWND) {
                 let dh = ((*ih as f64 * zoom).round() as i32).max(1);
                 SetStretchBltMode(mem, HALFTONE);
                 StretchDIBits(
-                    mem, -sx, -sy, dw, dh,
-                    0, 0, *iw as i32, *ih as i32,
-                    Some(bgra.as_ptr() as *const _), &bmi, DIB_RGB_COLORS,
+                    mem,
+                    -sx,
+                    -sy,
+                    dw,
+                    dh,
+                    0,
+                    0,
+                    *iw as i32,
+                    *ih as i32,
+                    Some(bgra.as_ptr() as *const _),
+                    &bmi,
+                    DIB_RGB_COLORS,
                     windows::Win32::Graphics::Gdi::SRCCOPY,
                 );
                 // 全体画像表示時はOCR抽出範囲を赤枠で示す (SPECv0.5.2追補)
@@ -500,7 +567,15 @@ fn paint(h: HWND) {
         });
 
         let _ = windows::Win32::Graphics::Gdi::BitBlt(
-            hdc, 0, 0, w, ht, Some(mem), 0, 0, windows::Win32::Graphics::Gdi::SRCCOPY,
+            hdc,
+            0,
+            0,
+            w,
+            ht,
+            Some(mem),
+            0,
+            0,
+            windows::Win32::Graphics::Gdi::SRCCOPY,
         );
 
         SelectObject(mem, oldbmp);
@@ -511,7 +586,12 @@ fn paint(h: HWND) {
     }
 }
 
-unsafe extern "system" fn preview_wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn preview_wndproc(
+    h: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         // ダブルバッファで領域全体を毎回塗りつぶし切るため、既定の背景消去は無効化する
         // (スクロール・ズーム時の点滅を防ぐ)。

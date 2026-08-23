@@ -1,22 +1,24 @@
+use crate::util::to_wide;
 use std::cell::RefCell;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    COLOR_BTNFACE, CreateFontW, DEFAULT_CHARSET, FW_NORMAL, OUT_DEFAULT_PRECIS,
-    CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH,
+    CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
+    DEFAULT_QUALITY, FW_NORMAL, OUT_DEFAULT_PRECIS,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsWindow, LoadCursorW, RegisterClassW,
-    SetForegroundWindow, SetWindowTextW, ShowWindow, TranslateMessage, MSG, WINDOW_STYLE,
-    WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST,
-    WS_POPUPWINDOW, WS_SYSMENU, WS_VISIBLE, WS_BORDER, WS_VSCROLL, IDC_ARROW,
-    SW_SHOW, ES_MULTILINE, ES_AUTOVSCROLL, GetDlgItem, HMENU, SendMessageW, WM_KEYDOWN
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_RETURN,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_RETURN, VK_ESCAPE};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_AUTOVSCROLL, ES_MULTILINE,
+    GetDlgItem, GetMessageW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW,
+    IsWindow, LoadCursorW, MSG, RegisterClassW, SW_SHOW, SendMessageW, SetForegroundWindow,
+    SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_KEYDOWN, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST,
+    WS_POPUPWINDOW, WS_SYSMENU, WS_VISIBLE, WS_VSCROLL,
+};
 use windows::core::{PCWSTR, w};
-use crate::util::to_wide;
 
 const IDC_EDIT: i32 = 101;
 const IDC_SAVE: i32 = 102;
@@ -47,12 +49,14 @@ pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
     unsafe {
         let instance = GetModuleHandleW(None).unwrap_or_default();
         let class_name = w!("FocusTranslatorInputClass");
-        
+
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH((COLOR_BTNFACE.0 + 1) as usize as *mut _),
+            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
+                (COLOR_BTNFACE.0 + 1) as usize as *mut _,
+            ),
             lpszClassName: class_name,
             ..Default::default()
         };
@@ -94,23 +98,48 @@ pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
             let _ = EnableWindow(parent, false);
 
             let font = CreateFontW(
-                20, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH.0 as u32, w!("Meiryo"),
+                20,
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY,
+                DEFAULT_PITCH.0 as u32,
+                w!("Meiryo"),
             );
 
             let h_edit = CreateWindowExW(
                 windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE::default(),
                 w!("EDIT"),
                 PCWSTR::null(),
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | WINDOW_STYLE((ES_MULTILINE as u32) | (ES_AUTOVSCROLL as u32)),
-                10, 10, 560, 290,
+                WS_CHILD
+                    | WS_VISIBLE
+                    | WS_BORDER
+                    | WS_VSCROLL
+                    | WINDOW_STYLE((ES_MULTILINE as u32) | (ES_AUTOVSCROLL as u32)),
+                10,
+                10,
+                560,
+                290,
                 Some(hwnd),
                 Some(HMENU(IDC_EDIT as *mut _)),
                 Some(instance.into()),
                 None,
-            ).unwrap();
-            let _ = SendMessageW(h_edit, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(0)));
-            
+            )
+            .unwrap();
+            let _ = SendMessageW(
+                h_edit,
+                WM_SETFONT,
+                Some(WPARAM(font.0 as usize)),
+                Some(LPARAM(0)),
+            );
+
             let wide_initial = to_wide(&initial_text.replace("\n", "\r\n"));
             let _ = SetWindowTextW(h_edit, PCWSTR(wide_initial.as_ptr()));
 
@@ -119,32 +148,52 @@ pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
                 w!("BUTTON"),
                 w!("保存"),
                 WS_CHILD | WS_VISIBLE,
-                350, 315, 100, 35,
+                350,
+                315,
+                100,
+                35,
                 Some(hwnd),
                 Some(HMENU(IDC_SAVE as *mut _)),
                 Some(instance.into()),
                 None,
-            ).unwrap();
-            let _ = SendMessageW(h_save, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(0)));
+            )
+            .unwrap();
+            let _ = SendMessageW(
+                h_save,
+                WM_SETFONT,
+                Some(WPARAM(font.0 as usize)),
+                Some(LPARAM(0)),
+            );
 
             let h_cancel = CreateWindowExW(
                 windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE::default(),
                 w!("BUTTON"),
                 w!("キャンセル"),
                 WS_CHILD | WS_VISIBLE,
-                460, 315, 100, 35,
+                460,
+                315,
+                100,
+                35,
                 Some(hwnd),
                 Some(HMENU(IDC_CANCEL as *mut _)),
                 Some(instance.into()),
                 None,
-            ).unwrap();
-            let _ = SendMessageW(h_cancel, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(0)));
+            )
+            .unwrap();
+            let _ = SendMessageW(
+                h_cancel,
+                WM_SETFONT,
+                Some(WPARAM(font.0 as usize)),
+                Some(LPARAM(0)),
+            );
 
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
 
             let mut msg = MSG::default();
-            while windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool() && GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            while windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool()
+                && GetMessageW(&mut msg, None, 0, 0).as_bool()
+            {
                 if msg.message == WM_DESTROY && msg.hwnd == hwnd {
                     break;
                 }
@@ -153,18 +202,28 @@ pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
                     if key == VK_RETURN.0 {
                         let ctrl = GetAsyncKeyState(VK_CONTROL.0 as i32);
                         if ctrl < 0 {
-                            let _ = SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(IDC_SAVE as usize)), Some(LPARAM(0)));
+                            let _ = SendMessageW(
+                                hwnd,
+                                WM_COMMAND,
+                                Some(WPARAM(IDC_SAVE as usize)),
+                                Some(LPARAM(0)),
+                            );
                             continue;
                         }
                     } else if key == VK_ESCAPE.0 {
-                        let _ = SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(IDC_CANCEL as usize)), Some(LPARAM(0)));
+                        let _ = SendMessageW(
+                            hwnd,
+                            WM_COMMAND,
+                            Some(WPARAM(IDC_CANCEL as usize)),
+                            Some(LPARAM(0)),
+                        );
                         continue;
                     }
                 }
-                
+
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
-                
+
                 if HAS_RESULT.with(|r| *r.borrow()) {
                     let _ = DestroyWindow(hwnd);
                     HAS_RESULT.with(|r| *r.borrow_mut() = false);
@@ -198,12 +257,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 return LRESULT(0);
             } else if id == IDC_CANCEL {
-                unsafe { let _ = DestroyWindow(hwnd); }
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
+                }
                 return LRESULT(0);
             }
         }
         WM_CLOSE => {
-            unsafe { let _ = DestroyWindow(hwnd); }
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
             return LRESULT(0);
         }
         _ => {}

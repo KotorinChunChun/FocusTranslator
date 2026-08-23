@@ -1,7 +1,7 @@
 // チップ操作ハンドラ (SPEC v0.3 §8)
 // オーバーレイのチップボタン押下時の処理をまとめたモジュール。
 // app_state.rs から分離して可読性を向上させる。
-use crate::app_state::{self, Mode, with_app, main_hwnd, sync_overlay};
+use crate::app_state::{self, Mode, main_hwnd, sync_overlay, with_app};
 use crate::config::Config;
 use crate::engine;
 use crate::overlay;
@@ -40,10 +40,24 @@ fn prompt_ctx_from_app(original: &str) -> crate::config::PromptContext {
         app_exe: app.app_exe.clone(),
         uia_path: app.uia_path.clone(),
         uia_detail: app.uia_json.clone(),
-        ocr_engine: if app.via_uia { String::new() } else { app.cur_ocr.clone() },
-        tr_engine: if app.translation.is_some() { app.cur_tr.clone() } else { String::new() },
+        ocr_engine: if app.via_uia {
+            String::new()
+        } else {
+            app.cur_ocr.clone()
+        },
+        tr_engine: if app.translation.is_some() && app.translation_heading.is_none() {
+            app.cur_tr.clone()
+        } else {
+            String::new()
+        },
     })
     .unwrap_or_default()
+}
+
+/// 現在保持している対象アプリ全体画像と対象矩形をLLM添付用にまとめる。
+fn current_prompt_image() -> Option<crate::worker::PromptImage> {
+    with_app(|app| crate::worker::PromptImage::new(app.last_full_img.clone(), app.last_crop_rect))
+        .flatten()
 }
 
 /// テキストを原文として採用し再翻訳する共通処理。UIAパスノードチップと「選択中の文字列」
@@ -53,6 +67,7 @@ fn adopt_text_and_retranslate(text: String, cur_tr: String, recog_id: Option<i64
         app.generation += 1;
         app.mode = Mode::Pinned;
         app.source = text.clone();
+        app.translation_heading = None;
         app.via_uia = true;
         // 翻訳ブロックを消さず「翻訳中」を出すためのフラグ (SPECv0.5.4 §6)
         app.tr_pending = true;
@@ -66,7 +81,16 @@ fn adopt_text_and_retranslate(text: String, cur_tr: String, recog_id: Option<i64
     .unwrap_or(0);
     let cfg2 = Config::load();
     let pc = prompt_ctx_from_app(&text);
-    crate::worker::retranslate(new_gen, cur_tr, cfg2, text, main, recog_id, pc);
+    crate::worker::retranslate(
+        new_gen,
+        cur_tr,
+        cfg2,
+        text,
+        main,
+        recog_id,
+        pc,
+        current_prompt_image(),
+    );
 }
 
 /// 直前のキャプチャで得た環境情報を破棄して、新しい入力セッションを開始する
@@ -79,6 +103,7 @@ fn begin_fresh_session(status: &str) -> Option<(u64, String, isize, (i32, i32))>
         // 対象アプリ・UIA・選択・保持画像・ログIDをすべて破棄する
         app.source.clear();
         app.translation = None;
+        app.translation_heading = None;
         app.badge = None;
         app.error_only = false;
         app.app_title = String::new();
@@ -106,7 +131,12 @@ fn begin_fresh_session(status: &str) -> Option<(u64, String, isize, (i32, i32))>
         app.status = Some(status.to_string());
         app.busy = true;
         sync_overlay(app);
-        (app.generation, app.cur_tr.clone(), app.main.0 as isize, app.anchor)
+        (
+            app.generation,
+            app.cur_tr.clone(),
+            app.main.0 as isize,
+            app.anchor,
+        )
     })
 }
 
@@ -115,9 +145,8 @@ fn begin_fresh_session(status: &str) -> Option<(u64, String, isize, (i32, i32))>
 fn chip_clipboard(c: ChipCtx) {
     match crate::util::clipboard_kind() {
         crate::util::ClipboardKind::Text => {
-            let text = crate::util::get_clipboard_text(main_hwnd())
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty());
+            let text =
+                crate::util::get_clipboard_text(main_hwnd()).filter(|t| !t.trim().is_empty());
             let Some(text) = text else {
                 with_app(|app| {
                     app.badge = Some("クリップボードのテキストを取得できませんでした".into());
@@ -197,7 +226,10 @@ fn chip_clipboard(c: ChipCtx) {
 /// 「選択範囲を残す/消す」「元に戻す」は編集セッション内(overlay.rs)で完結し、
 /// OCR/翻訳の再実行はここ(編集終了時)でのみ行う。
 /// final_rect: 全体画像内での最終画像の位置 (SPECv0.5.2追補。全体画像が無いセッションは None)。
-fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>, final_rect: Option<RECT>) {
+fn commit_edited_image(
+    new_img: std::sync::Arc<crate::capture::Captured>,
+    final_rect: Option<RECT>,
+) {
     let Some((cap_id, ocr_engine, cur_tr2, cfg2, main2, anchor2, held_ctx, full_img)) =
         with_app(|app| {
             app.last_img = Some(new_img.clone());
@@ -207,6 +239,7 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>, final_
             // 再認識→再翻訳のため両ブロックを処理中表示にする (SPECv0.5.4 §6)
             app.ocr_pending = true;
             app.tr_pending = true;
+            app.translation_heading = None;
             app.status = Some("再認識中…".into());
             app.busy = true;
             sync_overlay(app);
@@ -224,7 +257,8 @@ fn commit_edited_image(new_img: std::sync::Arc<crate::capture::Captured>, final_
     else {
         return;
     };
-    if cfg2.log_enabled && cfg2.debug_mode
+    if cfg2.log_enabled
+        && cfg2.debug_mode
         && let Some(cid) = cap_id
     {
         let rect_tuple = final_rect.map(|r| (r.left, r.top, r.right - r.left, r.bottom - r.top));
@@ -324,7 +358,9 @@ pub fn handle_chip(id: usize) {
     match id {
         overlay::CHIP_COPY => {
             // 解説コピー: 解説文をコピーする (ボタンは解説表示中のみ出る)
-            let text = with_app(|app| app.explanation.clone()).flatten().unwrap_or_default();
+            let text = with_app(|app| app.explanation.clone())
+                .flatten()
+                .unwrap_or_default();
             if !text.is_empty() {
                 util::set_clipboard_text(main_hwnd(), &text);
                 with_app(|app| {
@@ -424,7 +460,13 @@ pub fn handle_chip(id: usize) {
             }
             // キャプチャ画像のインライン編集モードを開始する (SPECv0.4 §1-§2)
             // 編集中はホールドキーを離してもオーバーレイが閉じないよう、ピン留め状態へ移行する。
-            let img = with_app(|app| (app.last_img.clone(), app.last_full_img.clone(), app.last_crop_rect));
+            let img = with_app(|app| {
+                (
+                    app.last_img.clone(),
+                    app.last_full_img.clone(),
+                    app.last_crop_rect,
+                )
+            });
             if let Some((Some(i), full, rect)) = img {
                 overlay::enter_edit_mode(i, full, rect);
                 with_app(|app| {
@@ -480,7 +522,7 @@ pub fn handle_chip(id: usize) {
             perform_edit_undo();
             return;
         }
-        
+
         // テキスト編集ポップアップ
         overlay::CHIP_EDIT_SRC => {
             chip_edit_source(c);
@@ -525,8 +567,13 @@ pub fn handle_chip(id: usize) {
     } else if (overlay::CHIP_EXPLAIN_BASE..overlay::CHIP_UIA_NODE_BASE).contains(&id) {
         // 解説チップ: クリックしたプロファイルの既定解説プロンプトをそのまま送信 (SPECv0.5.2追補)
         let idx = id - overlay::CHIP_EXPLAIN_BASE;
-        let Some(profile) = with_app(|app| app.cfg.ready_api_profiles().nth(idx).map(|p| p.name.clone())).flatten()
-        else {
+        let Some(profile) = with_app(|app| {
+            app.cfg
+                .ready_api_profiles()
+                .nth(idx)
+                .map(|p| p.name.clone())
+        })
+        .flatten() else {
             return;
         };
         chip_explain_with_profile(c, profile);
@@ -569,6 +616,7 @@ fn chip_edit_source(c: ChipCtx) {
             app.source = new_text.clone();
             app.tr_pending = true;
             app.translation = None;
+            app.translation_heading = None;
             // 読み取り結果(原文)が変わったので解説も破棄する (再度開けば同一なら復元される)
             app.explanation = None;
             app.explain_profile = String::new();
@@ -579,19 +627,32 @@ fn chip_edit_source(c: ChipCtx) {
             sync_overlay(app);
             app.generation += 1;
             app.generation
-        }).unwrap_or(0);
+        })
+        .unwrap_or(0);
 
         let cfg2 = Config::load();
         let pc = prompt_ctx_from_app(&new_text);
-        crate::worker::retranslate(new_gen, c.cur_tr, cfg2, new_text, c.main, c.recog_id, pc);
+        crate::worker::retranslate(
+            new_gen,
+            c.cur_tr,
+            cfg2,
+            new_text,
+            c.main,
+            c.recog_id,
+            pc,
+            crate::worker::PromptImage::new(c.last_full_img, c.last_crop_rect),
+        );
     }
 }
 
 /// 翻訳結果の編集ダイアログ (CHIP_EDIT_TR): 確定した訳文をDB・Appへ反映する
 fn chip_edit_translation(recog_id: Option<i64>) {
-    let (hwnd, text) = with_app(|app| (app.overlay, app.translation.clone().unwrap_or_default())).unwrap();
+    let (hwnd, text) =
+        with_app(|app| (app.overlay, app.translation.clone().unwrap_or_default())).unwrap();
     if let Some(new_text) = crate::input_dialog::show(hwnd, "翻訳結果を編集", &text) {
-        let prev_tr = with_app(|app| app.translation.clone()).flatten().unwrap_or_default();
+        let prev_tr = with_app(|app| app.translation.clone())
+            .flatten()
+            .unwrap_or_default();
         if !new_text.is_empty() && new_text != prev_tr {
             if let Some(rid) = recog_id {
                 crate::logdb::update_trans_text(rid, &new_text);
@@ -607,9 +668,12 @@ fn chip_edit_translation(recog_id: Option<i64>) {
 
 /// 解説の編集ダイアログ (CHIP_EDIT_EXP): 確定した解説をDB・Appへ反映する
 fn chip_edit_explanation(recog_id: Option<i64>) {
-    let (hwnd, text) = with_app(|app| (app.overlay, app.explanation.clone().unwrap_or_default())).unwrap();
+    let (hwnd, text) =
+        with_app(|app| (app.overlay, app.explanation.clone().unwrap_or_default())).unwrap();
     if let Some(new_text) = crate::input_dialog::show(hwnd, "解説を編集", &text) {
-        let prev_exp = with_app(|app| app.explanation.clone()).flatten().unwrap_or_default();
+        let prev_exp = with_app(|app| app.explanation.clone())
+            .flatten()
+            .unwrap_or_default();
         if !new_text.is_empty() && new_text != prev_exp {
             if let Some(rid) = recog_id {
                 crate::logdb::update_explain_text(rid, &new_text);
@@ -635,6 +699,7 @@ fn chip_swap_lang(c: ChipCtx) {
         app.mode = Mode::Pinned;
         app.tr_pending = true;
         app.translation = None;
+        app.translation_heading = None;
         let engine_name = engine::tr_display_name(&app.cur_tr, &app.cfg);
         app.status = Some(format!("{} で翻訳中…", engine_name));
         app.busy = true;
@@ -644,7 +709,16 @@ fn chip_swap_lang(c: ChipCtx) {
     .unwrap_or(0);
     let cfg2 = Config::load();
     let pc = prompt_ctx_from_app(&c.source);
-    crate::worker::retranslate(new_gen, c.cur_tr, cfg2, c.source, c.main, c.recog_id, pc);
+    crate::worker::retranslate(
+        new_gen,
+        c.cur_tr,
+        cfg2,
+        c.source,
+        c.main,
+        c.recog_id,
+        pc,
+        crate::worker::PromptImage::new(c.last_full_img, c.last_crop_rect),
+    );
 }
 
 /// 解説(プロファイル別ボタン, SPECv0.5.2追補): OCR/翻訳のエンジンチップと同様、クリックした
@@ -662,7 +736,9 @@ fn chip_explain_with_profile(c: ChipCtx, profile: String) {
     // キャッシュ済み解説の即時表示は §2 の自動表示が担い、ここでは行わない。
     // 外部プロファイルへの解説依頼は同意を確認する (SPECv0.5.3)。
     // 全体キャプチャがあれば赤枠付きで画像も送るため、画像送信の同意も対象。
-    let with_image = c.last_full_img.is_some();
+    let with_image = c.cfg.send_full_screenshot_to_llm
+        && c.last_full_img.is_some()
+        && c.last_crop_rect.is_some();
     if !ensure_consent_profile(&profile, with_image, &c.cfg) {
         return;
     }
@@ -687,10 +763,7 @@ fn chip_explain_with_profile(c: ChipCtx, profile: String) {
     .unwrap_or(0);
     let cfg2 = Config::load();
     // 全体キャプチャがあれば赤枠付きで添付する (SPECv0.5.3)
-    let image = c.last_full_img.clone().map(|full| crate::worker::ExplainImage {
-        full,
-        rect: c.last_crop_rect,
-    });
+    let image = crate::worker::PromptImage::new(c.last_full_img.clone(), c.last_crop_rect);
     // 手動クリックのため常にLLMへ問い合わせる (SPECv0.5.4 §3)
     crate::worker::explain(new_gen, r_id, cfg2, prompt, profile, c.main, image, true);
 }
@@ -714,7 +787,8 @@ fn chip_explain(c: ChipCtx) {
         .unwrap_or_default();
 
         // 全プロファイルの解説テンプレートを渡す (テンプレート/送信内容の分離編集)
-        let profiles: Vec<crate::prompt_edit::ProfilePrompt> = c.cfg
+        let profiles: Vec<crate::prompt_edit::ProfilePrompt> = c
+            .cfg
             .api_profiles
             .iter()
             .map(|p| crate::prompt_edit::ProfilePrompt {
@@ -729,7 +803,8 @@ fn chip_explain(c: ChipCtx) {
             });
             return;
         }
-        let active_idx = c.cfg
+        let active_idx = c
+            .cfg
             .api_profiles
             .iter()
             .position(|p| p.name == c.cfg.active_api_profile)
@@ -740,6 +815,11 @@ fn chip_explain(c: ChipCtx) {
         // 送信時に赤枠付き全体キャプチャを添付するため、閉包へ引き渡す (SPECv0.5.3)
         let full_img = c.last_full_img.clone();
         let crop_rect = c.last_crop_rect;
+        let prompt_image = if c.cfg.send_full_screenshot_to_llm {
+            crate::worker::PromptImage::new(full_img.clone(), crop_rect)
+        } else {
+            None
+        };
         let inst = with_app(|app| app.instance).unwrap_or_default();
         crate::prompt_edit::open(
             inst,
@@ -749,6 +829,7 @@ fn chip_explain(c: ChipCtx) {
             profiles,
             active_idx,
             Some(pc),
+            prompt_image,
             Box::new(|name, tmpl| {
                 crate::prompt_edit::save_prompt_to_config(
                     crate::prompt_edit::PromptKind::Explain,
@@ -760,7 +841,10 @@ fn chip_explain(c: ChipCtx) {
                 // プロンプト編集ウィンドウからの送信も、外部プロファイルなら同意を確認する
                 // (SPECv0.5.3)。プロファイルはウィンドウ内で切替できるため送信時点で判定する。
                 let cfg_now = Config::load();
-                if !ensure_consent_profile(&profile, full_img.is_some(), &cfg_now) {
+                let with_image = cfg_now.send_full_screenshot_to_llm
+                    && full_img.is_some()
+                    && crop_rect.is_some();
+                if !ensure_consent_profile(&profile, with_image, &cfg_now) {
                     return;
                 }
                 let new_gen = with_app(|app| {
@@ -775,12 +859,18 @@ fn chip_explain(c: ChipCtx) {
                 .unwrap_or(0);
                 let cfg2 = Config::load();
                 // 全体キャプチャがあれば赤枠付きで添付する (SPECv0.5.3)
-                let image = full_img.clone().map(|full| crate::worker::ExplainImage {
-                    full,
-                    rect: crop_rect,
-                });
+                let image = crate::worker::PromptImage::new(full_img.clone(), crop_rect);
                 // プロンプト編集からの送信も手動操作のため常に問い合わせる (SPECv0.5.4 §3)
-                crate::worker::explain(new_gen, r_id, cfg2, edited_prompt, profile, main_hwnd_val, image, true);
+                crate::worker::explain(
+                    new_gen,
+                    r_id,
+                    cfg2,
+                    edited_prompt,
+                    profile,
+                    main_hwnd_val,
+                    image,
+                    true,
+                );
             })),
         );
     }
@@ -807,12 +897,19 @@ fn resolve_engine_chip(
     }
     let selected_key = keys.get(idx)?.clone();
     let is_fixed = fixed_keys.iter().any(|k| *k == selected_key && *k != "llm");
-    let target = if is_fixed { selected_key.clone() } else { "llm".to_string() };
+    let target = if is_fixed {
+        selected_key.clone()
+    } else {
+        "llm".to_string()
+    };
 
     let available = if is_fixed {
         cfg.engine_available(&selected_key)
     } else {
-        cfg.api_profiles.iter().find(|p| p.name == selected_key).is_some_and(|p| p.is_ready())
+        cfg.api_profiles
+            .iter()
+            .find(|p| p.name == selected_key)
+            .is_some_and(|p| p.is_ready())
     };
     if !available {
         with_app(|app| {
@@ -840,7 +937,8 @@ fn resolve_engine_chip(
 /// OCRエンジン切替チップ: 保持画像で再認識→現行エンジンで再翻訳 (SPEC §8)
 fn switch_ocr_engine(id: usize, c: ChipCtx) {
     let idx = id - overlay::CHIP_OCR_BASE;
-    let Some((selected_key, is_fixed, target_ocr)) = resolve_engine_chip(idx, &engine::OCR_KEYS, &c.cfg, true)
+    let Some((selected_key, is_fixed, target_ocr)) =
+        resolve_engine_chip(idx, &engine::OCR_KEYS, &c.cfg, true)
     else {
         return;
     };
@@ -857,6 +955,7 @@ fn switch_ocr_engine(id: usize, c: ChipCtx) {
         // 再認識→再翻訳のため両ブロックを処理中表示にする (SPECv0.5.4 §6)
         app.ocr_pending = true;
         app.tr_pending = true;
+        app.translation_heading = None;
         app.status = Some("再認識中…".into());
         app.busy = true;
         sync_overlay(app);
@@ -893,7 +992,8 @@ fn switch_tr_engine(id: usize, c: ChipCtx) {
         return;
     }
     let idx = id - overlay::CHIP_TR_BASE;
-    let Some((selected_key, is_fixed, target_tr)) = resolve_engine_chip(idx, &engine::TR_KEYS, &c.cfg, false)
+    let Some((selected_key, is_fixed, target_tr)) =
+        resolve_engine_chip(idx, &engine::TR_KEYS, &c.cfg, false)
     else {
         return;
     };
@@ -911,6 +1011,7 @@ fn switch_tr_engine(id: usize, c: ChipCtx) {
         app.status = Some(format!("{} で翻訳中…", engine_name));
         app.tr_pending = true;
         app.translation = None;
+        app.translation_heading = None;
         app.busy = true;
         sync_overlay(app);
         app.generation
@@ -918,7 +1019,16 @@ fn switch_tr_engine(id: usize, c: ChipCtx) {
     .unwrap_or(0);
     let cfg2 = Config::load();
     let pc = prompt_ctx_from_app(&c.source);
-    crate::worker::retranslate(new_gen, target_tr, cfg2, c.source, c.main, c.recog_id, pc);
+    crate::worker::retranslate(
+        new_gen,
+        target_tr,
+        cfg2,
+        c.source,
+        c.main,
+        c.recog_id,
+        pc,
+        crate::worker::PromptImage::new(c.last_full_img, c.last_crop_rect),
+    );
 }
 
 fn engine_unavailable_msg(key: &str) -> String {

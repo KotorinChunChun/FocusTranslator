@@ -16,9 +16,9 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, IDC_ARROW,
     IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO,
-    MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_SHOW, SW_SHOWNORMAL,
-    SetForegroundWindow, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_DESTROY,
-    WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
+    MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
+    SetForegroundWindow, SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_DESTROY, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
 };
 use windows::core::{PCWSTR, w};
 
@@ -106,16 +106,20 @@ const IDC_PROF_KEY_URL: i32 = 179;
 const IDC_LLAMA_VARIANT_STATUS: i32 = 180;
 /// 導入済みllama.cppを停止して削除するボタン (SPECv0.5.5)
 const IDC_LLAMA_BIN_DELETE: i32 = 181;
-/// LLMプロファイルの疎通確認ボタン・結果表示 (SPECv0.5.5: Ollama/LM Studio等ローカルサーバの
-/// モデル名調査・接続状態確認用。OpenAI互換の `/v1/models` を使うためGemini/Claudeは対象外)
+/// LLMプロファイルのモデル取得ボタン・結果表示。API/CLI種別ごとの方法で候補を取得する。
 const IDC_PROF_TEST_CONN: i32 = 182;
 const IDC_PROF_CONN_STATUS: i32 = 183;
 /// アプリ別の動作設定 (OCR優先/実行しない) ダイアログを開くボタン (SPECv0.5.5 §2)
 const IDC_OCR_PRIORITY_APPS: i32 = 184;
+/// アプリ名・開発者名を空白表示へ切り替えるBossGuard。
+const IDC_BOSS_GUARD: i32 = 185;
+/// LLMプロンプトへ赤枠付きの対象アプリ全体画像を添付する設定。
+const IDC_SEND_FULL_SCREENSHOT_TO_LLM: i32 = 186;
 
 /// エディットコントロールの通知コード (windows クレートに定義がないもの)
 const EN_KILLFOCUS: u32 = 0x0200;
 const BN_CLICKED: u32 = 0;
+const CBN_KILLFOCUS: u32 = 4;
 
 /// インストールスレッドからの完了通知 (settings ウィンドウ限定のメッセージ)
 const WM_PADDLE_DONE: u32 = WM_APP + 10;
@@ -139,8 +143,7 @@ const WM_PROF_CONN_RESULT: u32 = WM_APP + 20;
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
 /// 左下欄外のバージョン情報 (SPECv0.5.2追補)。アプリ名は正式名に統一 (SPECv0.5.4 §17)。
-const APP_VERSION_LABEL: &str = crate::util::APP_DISPLAY_NAME;
-const APP_UPDATE_DATE: &str = "2026/8/1";
+const APP_UPDATE_DATE: &str = "2026/8/23";
 /// 開発者名 (SPECv0.5.4 §17)
 const APP_DEVELOPER: &str = "Kotorichun";
 /// 「使い方」ボタンで開くリポジトリルート (README表示。SPECv0.5.4 §11)
@@ -151,6 +154,7 @@ const GITHUB_RELEASES_PAGE_URL: &str =
     "https://github.com/KotorinChunChun/FocusTranslator/releases";
 
 const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
+const PREVIEW_KEYS: [&str; 6] = ["なし", "RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
 const OCR_KEYS: [&str; 4] = ["oneocr", "win", "paddle", "llm"];
 const OCR_DISP: [&str; 4] = [
     "OneOCR (oneocr.dll)",
@@ -188,7 +192,9 @@ pub fn is_open() -> bool {
 pub fn open(instance: HINSTANCE, _main: HWND) {
     if is_open() {
         unsafe {
-            let _ = SetForegroundWindow(hwnd());
+            let h = hwnd();
+            let _ = ShowWindow(h, SW_RESTORE);
+            let _ = SetForegroundWindow(h);
         }
         return;
     }
@@ -228,7 +234,11 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
         let win_y = 10;
         let win_h = win_h.min(screen_h - 40);
-        let title_w = crate::util::to_wide(&format!("{} 設定", crate::util::APP_DISPLAY_NAME));
+        let boss_guard = Config::load().boss_guard;
+        let title_w = crate::util::to_wide(&format!(
+            "{} 設定",
+            crate::util::app_display_name(boss_guard)
+        ));
         if let Ok(h) = CreateWindowExW(
             ex_style,
             class,
@@ -365,6 +375,16 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         checkbox(
             h,
             inst,
+            "BossGuard（アプリ名・開発者名を隠す）",
+            lx,
+            y,
+            320,
+            IDC_BOSS_GUARD,
+        );
+        y += STEP;
+        checkbox(
+            h,
+            inst,
             "実行ログを記録 (原文/訳文を平文保存)",
             lx,
             y,
@@ -380,6 +400,16 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             y,
             280,
             IDC_DEBUG_MODE,
+        );
+        y += STEP;
+        checkbox(
+            h,
+            inst,
+            "アプリ全体のスクリーンショットをLLMに送信する",
+            lx,
+            y,
+            370,
+            IDC_SEND_FULL_SCREENSHOT_TO_LLM,
         );
         y += STEP;
         label(h, inst, "保持上限", lx, y + 2, 60);
@@ -400,20 +430,19 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         button(
             h,
             inst,
-            "外部送信の同意状態をリセット",
+            "外部送信同意をリセット",
             lx,
             y,
-            220,
+            184,
             IDC_CONSENT_RESET,
         );
-        y += STEP;
         button(
             h,
             inst,
-            "設定をリセット (アプリ再起動)",
-            lx,
+            "設定をリセット (再起動)",
+            lx + 192,
             y,
-            220,
+            184,
             IDC_RESET_SETTINGS,
         );
     }
@@ -612,10 +641,10 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         // 種別名(「GitHub Models」等)が閉じた表示幅より長いため、ドロップダウン一覧の幅だけ広げる
         combo_set_dropped_width(combo(h, inst, cx + 188, y, 100, IDC_PROF_TYPE), 160);
         y += STEP;
-        label(h, inst, "API URL", lx, y + 2, 84);
+        label(h, inst, "接続先 / CLI", lx, y + 2, 84);
         edit(h, inst, cx, y, 288, IDC_PROF_URL);
         y += STEP;
-        label(h, inst, "APIキー", lx, y + 2, 84);
+        label(h, inst, "APIキー/認証", lx, y + 2, 84);
         // 「モデル名」の入力欄と幅を揃える
         password_edit(h, inst, cx, y, 174, IDC_PROF_KEY);
         // 「種別」コンボ・「解説プロンプト」ボタンと右端(cx+288)を揃える
@@ -630,7 +659,7 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         );
         y += STEP;
         label(h, inst, "モデル名", lx, y + 2, 84);
-        edit(h, inst, cx, y, 174, IDC_PROF_MODEL);
+        combo_set_dropped_width(editable_combo(h, inst, cx, y, 174, IDC_PROF_MODEL), 330);
         // 応答の最大トークン数 (SPECv0.5.3: 長い解説が途中で切れる場合に引き上げる)
         label(h, inst, "最大Token", cx + 180, y + 2, 60);
         edit(h, inst, cx + 240, y, 48, IDC_PROF_MAXTOK);
@@ -650,7 +679,15 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             20,
             IDC_PROF_CONN_STATUS,
         );
-        button(h, inst, "接続確認", cx + 196, y - 2, 90, IDC_PROF_TEST_CONN);
+        button(
+            h,
+            inst,
+            "モデル取得",
+            cx + 196,
+            y - 2,
+            90,
+            IDC_PROF_TEST_CONN,
+        );
         y += STEP;
         // プロンプトは専用の編集ウィンドウで編集する (SPECv0.4.7 §1)
         label(h, inst, "プロンプト編集", lx, y + 4, 84);
@@ -819,10 +856,7 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
     button(h, inst, "閉じる", right - 86, LAYOUT_BTN_Y, 80, IDC_CLOSE);
 
     // ---- 左下欄外: バージョン情報 (SPECv0.5.2追補。開発者名を併記: SPECv0.5.4 §17) ----
-    let version_text = format!(
-        "{APP_VERSION_LABEL}  v{}  (更新日: {APP_UPDATE_DATE})  開発: {APP_DEVELOPER}",
-        env!("CARGO_PKG_VERSION")
-    );
+    let version_text = version_info_text(Config::load().boss_guard);
     ctl(
         h,
         inst,
@@ -864,6 +898,27 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             LPARAM(font.0 as isize),
         );
     }
+}
+
+fn version_info_text(boss_guard: bool) -> String {
+    let developer = if boss_guard {
+        crate::util::HIDDEN_BRANDING
+    } else {
+        APP_DEVELOPER
+    };
+    format!(
+        "{}  v{}  (更新日: {APP_UPDATE_DATE})  開発: {developer}",
+        crate::util::app_display_name(boss_guard),
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn apply_boss_guard(h: HWND, enabled: bool) {
+    let title = to_wide(&format!("{} 設定", crate::util::app_display_name(enabled)));
+    unsafe {
+        let _ = SetWindowTextW(h, PCWSTR(title.as_ptr()));
+    }
+    set_ctl_text(h, IDC_VERSION_INFO, &version_info_text(enabled));
 }
 
 fn populate(h: HWND) {
@@ -948,18 +1003,24 @@ fn populate(h: HWND) {
     load_profile_to_ui(h, sel);
     update_prof_default_btn(h);
     check_set(h, IDC_AUTOSTART, cfg.autostart);
+    check_set(h, IDC_BOSS_GUARD, cfg.boss_guard);
     check_set(h, IDC_PERFLOG, cfg.perf_log);
     check_set(h, IDC_LOG_ENABLED, cfg.log_enabled);
     check_set(h, IDC_DEBUG_MODE, cfg.debug_mode);
+    check_set(
+        h,
+        IDC_SEND_FULL_SCREENSHOT_TO_LLM,
+        cfg.send_full_screenshot_to_llm,
+    );
     check_set(h, IDC_DETECT_MODE, cfg.detect_enabled);
     combo_fill(
         h,
         IDC_DETECT_KEY,
-        &HOLD_KEYS,
-        HOLD_KEYS
+        &PREVIEW_KEYS,
+        PREVIEW_KEYS
             .iter()
             .position(|k| *k == cfg.detect_key)
-            .unwrap_or(1), // 既定 LCtrl
+            .unwrap_or(0), // 既定「なし」
     );
     check_set(h, IDC_PREVIEW_DETECT_MODE, cfg.preview_detect_enabled);
     combo_fill(
@@ -1062,6 +1123,7 @@ fn ensure_local_llm_profile_if_ready(h: HWND) {
         model_name: crate::config::ApiType::LlamaCpp.default_model().into(),
         api_url: format!("http://localhost:{port}/v1/chat/completions"),
         api_key_enc: String::new(),
+        cli_path: String::new(),
         ocr_prompt: crate::config::DEFAULT_GEMINI_OCR_PROMPT.into(),
         translate_prompt: crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT.into(),
         explain_prompt: crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT.into(),
@@ -1241,7 +1303,7 @@ fn update_explanations(h: HWND) {
 }
 
 /// APIプロファイル種別のコンボ表示順 (IDC_PROF_TYPE の選択indexと対応)
-const API_TYPE_ORDER: [crate::config::ApiType; 10] = [
+const API_TYPE_ORDER: [crate::config::ApiType; 15] = [
     crate::config::ApiType::Gemini,
     crate::config::ApiType::OpenAI,
     crate::config::ApiType::Claude,
@@ -1252,8 +1314,13 @@ const API_TYPE_ORDER: [crate::config::ApiType; 10] = [
     crate::config::ApiType::NvidiaNim,
     crate::config::ApiType::Ollama,
     crate::config::ApiType::LmStudio,
+    crate::config::ApiType::CodexCli,
+    crate::config::ApiType::ClaudeCli,
+    crate::config::ApiType::CopilotCli,
+    crate::config::ApiType::GeminiCli,
+    crate::config::ApiType::KimiCli,
 ];
-const API_TYPE_DISP: [&str; 10] = [
+const API_TYPE_DISP: [&str; 15] = [
     "Gemini",
     "OpenAI",
     "Claude",
@@ -1264,6 +1331,11 @@ const API_TYPE_DISP: [&str; 10] = [
     "NVIDIA NIM",
     "Ollama",
     "LM Studio",
+    "Codex CLI",
+    "Claude CLI",
+    "GitHub Copilot CLI",
+    "Gemini CLI",
+    "Kimi Code CLI",
 ];
 
 fn api_type_index(t: &crate::config::ApiType) -> usize {
@@ -1318,12 +1390,115 @@ fn load_profile_to_ui(h: HWND, idx: usize) {
         if let Some(prof) = profiles.get(idx) {
             set_ctl_text(h, IDC_PROF_NAME, &prof.name);
             combo_select(h, IDC_PROF_TYPE, api_type_index(&prof.api_type));
-            set_ctl_text(h, IDC_PROF_MODEL, &prof.model_name);
-            set_ctl_text(h, IDC_PROF_URL, &prof.api_url);
+            refill_model_combo(h, &prof.api_type, &[], &prof.model_name);
+            set_ctl_text(
+                h,
+                IDC_PROF_URL,
+                if prof.api_type.is_cli() {
+                    &prof.cli_path
+                } else {
+                    &prof.api_url
+                },
+            );
             set_ctl_text(h, IDC_PROF_KEY, &prof.get_key());
             set_ctl_text(h, IDC_PROF_MAXTOK, &prof.max_tokens.to_string());
+            update_profile_kind_controls(h, &prof.api_type);
         }
     });
+}
+
+/// モデル候補を更新する。現在の自由入力値は候補に存在しなくても保持する。
+fn refill_model_combo(
+    h: HWND,
+    api_type: &crate::config::ApiType,
+    discovered: &[String],
+    current: &str,
+) {
+    let mut models = if discovered.is_empty() && api_type.is_cli() {
+        crate::llm_cli::fallback_models(api_type)
+    } else {
+        discovered.to_vec()
+    };
+    let default = api_type.default_model();
+    if !default.is_empty() && !models.iter().any(|m| m.eq_ignore_ascii_case(default)) {
+        models.insert(0, default.to_string());
+    }
+    if !current.trim().is_empty()
+        && !models
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(current.trim()))
+    {
+        models.push(current.trim().to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    models.retain(|model| seen.insert(model.to_ascii_lowercase()));
+    combo_reset(h, IDC_PROF_MODEL);
+    let refs: Vec<&str> = models.iter().map(String::as_str).collect();
+    combo_fill(h, IDC_PROF_MODEL, &refs, 0);
+    set_ctl_text(
+        h,
+        IDC_PROF_MODEL,
+        if current.trim().is_empty() {
+            default
+        } else {
+            current.trim()
+        },
+    );
+}
+
+/// API種別ではURL/キー、CLI種別では実行ファイル/外部ログインを使うため入力欄の意味と
+/// 有効状態を切り替える。接続先欄は共用し、CLI時は空欄ならPATH自動検出とする。
+fn update_profile_kind_controls(h: HWND, api_type: &crate::config::ApiType) {
+    let is_cli = api_type.is_cli();
+    let uses_api_key = !is_cli
+        && !matches!(
+            api_type,
+            crate::config::ApiType::LlamaCpp
+                | crate::config::ApiType::Ollama
+                | crate::config::ApiType::LmStudio
+        );
+    unsafe {
+        for (id, enabled) in [
+            (IDC_PROF_KEY, uses_api_key),
+            (IDC_PROF_MAXTOK, !is_cli),
+            (IDC_PROF_KEY_URL, !api_type.key_url().is_empty()),
+        ] {
+            let _ = EnableWindow(
+                windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), id)
+                    .unwrap_or_default(),
+                enabled,
+            );
+        }
+    }
+    set_ctl_text(
+        h,
+        IDC_PROF_KEY_URL,
+        if is_cli {
+            "導入案内"
+        } else {
+            "キーを入手"
+        },
+    );
+    if is_cli {
+        let status = PROFILES.with(|p| {
+            let sel = combo_sel(h, IDC_PROF_LIST);
+            p.borrow()
+                .get(sel)
+                .and_then(|prof| crate::llm_cli::resolve_executable(prof).ok())
+                .map(|path| {
+                    format!(
+                        "検出済み: {}",
+                        path.file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy()
+                    )
+                })
+                .unwrap_or_else(|| "CLI未検出".into())
+        });
+        set_ctl_text(h, IDC_PROF_CONN_STATUS, &status);
+    } else {
+        set_ctl_text(h, IDC_PROF_CONN_STATUS, "");
+    }
 }
 
 /// GGUFファイル選択ダイアログを開く (SPECv0.5.2追補: LM Studio等で導入済みのモデルを
@@ -1621,9 +1796,8 @@ fn start_mmproj_install(h: HWND) {
     });
 }
 
-/// プロファイルの疎通確認ボタン押下時の処理 (SPECv0.5.5)。結果はWM_PROF_CONN_RESULTで
-/// 通知する。成功時、モデル名欄が空欄なら応答の先頭モデルidを自動入力する目印として
-/// (メッセージ, 埋め込むモデル名) のタプルをlparamに載せる。
+/// プロファイルのモデル取得ボタン押下時の処理。結果はWM_PROF_CONN_RESULTで通知し、
+/// (プロファイル名, メッセージ, モデル候補一覧) のタプルをlparamに載せる。
 fn start_profile_test_connection(h: HWND) {
     let sel = combo_sel(h, IDC_PROF_LIST);
     let Some(prof) = PROFILES.with(|p| p.borrow().get(sel).cloned()) else {
@@ -1638,20 +1812,24 @@ fn start_profile_test_connection(h: HWND) {
     }
     set_ctl_text(h, IDC_PROF_CONN_STATUS, "確認中…");
     let hwnd_isize = h.0 as isize;
+    let profile_name = prof.name.clone();
     std::thread::spawn(move || {
         let result = crate::llm_api::check_connection(&prof);
-        let (w, msg, fill): (usize, String, Option<String>) = match result {
-            Ok(r) if r.model_ids.is_empty() => {
-                (1, "接続成功 (モデル一覧は空でした)".to_string(), None)
-            }
+        let (w, msg, models): (usize, String, Vec<String>) = match result {
+            Ok(r) if r.model_ids.is_empty() => (
+                1,
+                r.detail
+                    .unwrap_or_else(|| "接続成功 (モデル一覧は空でした)".to_string()),
+                Vec::new(),
+            ),
             Ok(r) => (
                 1,
-                format!("接続成功 ({}個のモデル)", r.model_ids.len()),
-                Some(r.model_ids[0].clone()),
+                format!("取得成功 ({}モデル)", r.model_ids.len()),
+                r.model_ids,
             ),
-            Err(e) => (0, e, None),
+            Err(e) => (0, e, Vec::new()),
         };
-        let l = Box::into_raw(Box::new((msg, fill))) as isize;
+        let l = Box::into_raw(Box::new((profile_name, msg, models))) as isize;
         unsafe {
             let _ = PostMessageW(
                 Some(HWND(hwnd_isize as *mut _)),
@@ -1789,6 +1967,7 @@ fn create_new_profile(h: HWND) {
             name,
             api_type,
             api_key_enc: String::new(),
+            cli_path: String::new(),
             ocr_prompt: crate::config::DEFAULT_GEMINI_OCR_PROMPT.to_string(),
             translate_prompt: crate::config::DEFAULT_GEMINI_TRANSLATE_PROMPT.to_string(),
             explain_prompt: crate::config::DEFAULT_GEMINI_EXPLAIN_PROMPT.to_string(),
@@ -1849,11 +2028,20 @@ fn commit_profile_edit(h: HWND) {
         };
         let prof = &mut profiles[sel];
         prof.name = final_name.clone();
-        prof.api_type =
+        let api_type =
             API_TYPE_ORDER[combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)].clone();
+        prof.api_type = api_type.clone();
         prof.model_name = get_ctl_text(h, IDC_PROF_MODEL).trim().to_string();
-        prof.api_url = get_ctl_text(h, IDC_PROF_URL).trim().to_string();
-        prof.set_key(get_ctl_text(h, IDC_PROF_KEY).trim());
+        let location = get_ctl_text(h, IDC_PROF_URL).trim().to_string();
+        if api_type.is_cli() {
+            prof.cli_path = location;
+            prof.api_url.clear();
+            prof.set_key("");
+        } else {
+            prof.api_url = location;
+            prof.cli_path.clear();
+            prof.set_key(get_ctl_text(h, IDC_PROF_KEY).trim());
+        }
         prof.max_tokens = parse_max_tokens(h);
         Some((outcome, old_name, final_name))
     });
@@ -1923,6 +2111,7 @@ fn open_prompt_editor(h: HWND, kind: crate::prompt_edit::PromptKind) {
         profiles,
         active_idx,
         None,
+        None,
         Box::new(move |n, t| crate::prompt_edit::save_prompt_to_config(kind, n, t)),
         None,
     );
@@ -1976,11 +2165,14 @@ fn save(h: HWND, ask_consent: bool) {
     }
 
     cfg.autostart = check_get(h, IDC_AUTOSTART);
+    cfg.boss_guard = check_get(h, IDC_BOSS_GUARD);
     cfg.perf_log = check_get(h, IDC_PERFLOG);
     cfg.log_enabled = check_get(h, IDC_LOG_ENABLED);
     cfg.debug_mode = check_get(h, IDC_DEBUG_MODE);
+    cfg.send_full_screenshot_to_llm = check_get(h, IDC_SEND_FULL_SCREENSHOT_TO_LLM);
     cfg.detect_enabled = check_get(h, IDC_DETECT_MODE);
-    cfg.detect_key = HOLD_KEYS[combo_sel(h, IDC_DETECT_KEY).min(HOLD_KEYS.len() - 1)].to_string();
+    cfg.detect_key =
+        PREVIEW_KEYS[combo_sel(h, IDC_DETECT_KEY).min(PREVIEW_KEYS.len() - 1)].to_string();
     cfg.preview_detect_enabled = check_get(h, IDC_PREVIEW_DETECT_MODE);
     cfg.overlay_theme =
         THEME_KEYS[combo_sel(h, IDC_OVERLAY_THEME).min(THEME_KEYS.len() - 1)].to_string();
@@ -2081,7 +2273,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 {
                     // キャプチャキーとプレビューキーの重複ガード (SPECv0.5.3):
                     // 同じキーだと挙動が未定義になるため、警告して変更前の値へ戻す。
-                    if combo_sel(h, IDC_HOLDKEY) == combo_sel(h, IDC_DETECT_KEY) {
+                    let hold_key = HOLD_KEYS[combo_sel(h, IDC_HOLDKEY).min(HOLD_KEYS.len() - 1)];
+                    let preview_key =
+                        PREVIEW_KEYS[combo_sel(h, IDC_DETECT_KEY).min(PREVIEW_KEYS.len() - 1)];
+                    if preview_key != "なし" && hold_key == preview_key {
                         unsafe {
                             MessageBoxW(
                                 Some(h),
@@ -2102,10 +2297,10 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         combo_select(
                             h,
                             IDC_DETECT_KEY,
-                            HOLD_KEYS
+                            PREVIEW_KEYS
                                 .iter()
                                 .position(|k| *k == cfg.detect_key)
-                                .unwrap_or(1),
+                                .unwrap_or(0),
                         );
                     } else {
                         auto_save(h, false);
@@ -2124,15 +2319,20 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     update_explanations(h);
                 }
                 IDC_AUTOSTART
+                | IDC_BOSS_GUARD
                 | IDC_PERFLOG
                 | IDC_LOG_ENABLED
                 | IDC_DEBUG_MODE
+                | IDC_SEND_FULL_SCREENSHOT_TO_LLM
                 | IDC_DETECT_MODE
                 | IDC_PREVIEW_DETECT_MODE
                 | IDC_LLAMA_AUTOSTART
                     if notif == BN_CLICKED =>
                 {
                     auto_save(h, false);
+                    if id == IDC_BOSS_GUARD {
+                        apply_boss_guard(h, check_get(h, IDC_BOSS_GUARD));
+                    }
                 }
                 IDC_POLL | IDC_PIN_HOLD | IDC_HOTKEY | IDC_DEEPL | IDC_GOOGLE | IDC_LOG_MAX
                     if notif == EN_KILLFOCUS =>
@@ -2381,13 +2581,23 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             // 種別切替: モデル名・URLをその種別の既定値に置き換え、選択中の行へ自動保存する
                             let t = &API_TYPE_ORDER
                                 [combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)];
-                            set_ctl_text(h, IDC_PROF_MODEL, t.default_model());
+                            refill_model_combo(h, t, &[], t.default_model());
                             set_ctl_text(h, IDC_PROF_URL, t.default_url());
+                            if t.is_cli() {
+                                set_ctl_text(h, IDC_PROF_KEY, "");
+                            }
                             commit_profile_edit(h);
+                            update_profile_kind_controls(h, t);
                         }
                     }
                 }
-                IDC_PROF_NAME | IDC_PROF_URL | IDC_PROF_KEY | IDC_PROF_MODEL | IDC_PROF_MAXTOK
+                IDC_PROF_MODEL
+                    if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE
+                        || notif == CBN_KILLFOCUS =>
+                {
+                    commit_profile_edit(h);
+                }
+                IDC_PROF_NAME | IDC_PROF_URL | IDC_PROF_KEY | IDC_PROF_MAXTOK
                     if notif == EN_KILLFOCUS =>
                 {
                     commit_profile_edit(h);
@@ -2596,8 +2806,8 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             LRESULT(0)
         }
         WM_PROF_CONN_RESULT => {
-            let (msg, fill_model) =
-                unsafe { *Box::from_raw(lparam.0 as *mut (String, Option<String>)) };
+            let (profile_name, msg, models) =
+                unsafe { *Box::from_raw(lparam.0 as *mut (String, String, Vec<String>)) };
             unsafe {
                 let _ = EnableWindow(
                     windows::Win32::UI::WindowsAndMessaging::GetDlgItem(
@@ -2608,12 +2818,24 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     true,
                 );
             }
-            if wparam.0 == 1
-                && let Some(model) = fill_model
-                && get_ctl_text(h, IDC_PROF_MODEL).trim().is_empty()
-            {
-                set_ctl_text(h, IDC_PROF_MODEL, &model);
-                commit_profile_edit(h);
+            let selected_profile_name = PROFILES.with(|profiles| {
+                profiles
+                    .borrow()
+                    .get(combo_sel(h, IDC_PROF_LIST))
+                    .map(|profile| profile.name.clone())
+            });
+            if selected_profile_name.as_deref() != Some(profile_name.as_str()) {
+                return LRESULT(0);
+            }
+            if wparam.0 == 1 && !models.is_empty() {
+                let current = get_ctl_text(h, IDC_PROF_MODEL);
+                let api_type = API_TYPE_ORDER
+                    [combo_sel(h, IDC_PROF_TYPE).min(API_TYPE_ORDER.len() - 1)]
+                .clone();
+                refill_model_combo(h, &api_type, &models, &current);
+                if current.trim().is_empty() {
+                    commit_profile_edit(h);
+                }
             }
             set_ctl_text(h, IDC_PROF_CONN_STATUS, &msg);
             LRESULT(0)

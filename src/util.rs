@@ -2,18 +2,26 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use std::path::PathBuf;
+use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HLOCAL, HWND, LocalFree};
 use windows::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    SetClipboardData,
+    RegisterClipboardFormatW, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
-use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
-use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindow, GW_OWNER, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId};
-use windows::Win32::Foundation::{CloseHandle, MAX_PATH};
+use windows::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GW_OWNER, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId,
+};
+use windows::core::w;
 
 pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -27,11 +35,37 @@ pub const APP_DISPLAY_NAME: &str = "なにこれ？（Focus Translator）";
 /// タイトルとして使う (括弧書きの英語名までは表示しない)。
 pub const APP_SHORT_NAME: &str = "なにこれ？";
 
+/// BossGuard有効時にアプリ名・開発者名の代わりに表示する空白文字。
+pub const HIDDEN_BRANDING: &str = "　";
+
+pub fn app_display_name(boss_guard: bool) -> &'static str {
+    if boss_guard {
+        HIDDEN_BRANDING
+    } else {
+        APP_DISPLAY_NAME
+    }
+}
+
+pub fn app_short_name(boss_guard: bool) -> &'static str {
+    if boss_guard {
+        HIDDEN_BRANDING
+    } else {
+        APP_SHORT_NAME
+    }
+}
+
 static DISPLAY_NAME_W: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+static HIDDEN_BRANDING_W: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
 
 /// 表示名の PCWSTR。静的領域を指すのでそのまま API に渡してよい。
 pub fn display_name_pcwstr() -> windows::core::PCWSTR {
-    windows::core::PCWSTR(DISPLAY_NAME_W.get_or_init(|| to_wide(APP_DISPLAY_NAME)).as_ptr())
+    let boss_guard = crate::config::Config::load().boss_guard;
+    let wide = if boss_guard {
+        HIDDEN_BRANDING_W.get_or_init(|| to_wide(HIDDEN_BRANDING))
+    } else {
+        DISPLAY_NAME_W.get_or_init(|| to_wide(APP_DISPLAY_NAME))
+    };
+    windows::core::PCWSTR(wide.as_ptr())
 }
 
 /// テスト用の直列化ロック。FOCUSTRANSLATOR_DATA_DIR を切り替えるテスト(logdb)と、
@@ -94,11 +128,24 @@ pub enum ClipboardKind {
 const CF_UNICODETEXT: u32 = 13;
 const CF_DIB: u32 = 8;
 
+fn html_clipboard_format() -> u32 {
+    static FORMAT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *FORMAT.get_or_init(|| unsafe { RegisterClipboardFormatW(w!("HTML Format")) })
+}
+
+fn rtf_clipboard_format() -> u32 {
+    static FORMAT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *FORMAT.get_or_init(|| unsafe { RegisterClipboardFormatW(w!("Rich Text Format")) })
+}
+
 /// クリップボードの内容種別を判定する (SPECv0.5.4 §20)。OpenClipboard 不要で軽量なため
 /// オーバーレイ同期毎に呼べる。テキストを画像より優先する。
 pub fn clipboard_kind() -> ClipboardKind {
     unsafe {
-        if IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok() {
+        if IsClipboardFormatAvailable(html_clipboard_format()).is_ok()
+            || IsClipboardFormatAvailable(rtf_clipboard_format()).is_ok()
+            || IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok()
+        {
             ClipboardKind::Text
         } else if IsClipboardFormatAvailable(CF_DIB).is_ok() {
             ClipboardKind::Image
@@ -108,25 +155,49 @@ pub fn clipboard_kind() -> ClipboardKind {
     }
 }
 
-/// クリップボードのテキスト (CF_UNICODETEXT) を取得する (SPECv0.5.4 §20)。
+/// OpenClipboard中の指定形式を、GlobalSizeで境界を確認しながらコピーする。
+unsafe fn clipboard_bytes(format: u32) -> Option<Vec<u8>> {
+    let h = unsafe { GetClipboardData(format).ok()? };
+    let hg = HGLOBAL(h.0);
+    let ptr = unsafe { GlobalLock(hg) } as *const u8;
+    if ptr.is_null() {
+        return None;
+    }
+    let size = unsafe { GlobalSize(hg) };
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+    let _ = unsafe { GlobalUnlock(hg) };
+    Some(bytes)
+}
+
+/// クリップボードのテキストを取得する。HTML/RTFはMarkdownへ変換し、どちらも無い場合は
+/// CF_UNICODETEXTを取得時の空白・改行を変えずに返す。
 pub fn get_clipboard_text(hwnd: HWND) -> Option<String> {
     unsafe {
         if OpenClipboard(Some(hwnd)).is_err() {
             return None;
         }
         let result = (|| {
-            let h = GetClipboardData(CF_UNICODETEXT).ok()?;
-            let ptr = GlobalLock(HGLOBAL(h.0)) as *const u16;
-            if ptr.is_null() {
-                return None;
+            let html_format = html_clipboard_format();
+            if IsClipboardFormatAvailable(html_format).is_ok()
+                && let Some(bytes) = clipboard_bytes(html_format)
+                && let Some(markdown) = crate::clipboard_text::html_to_markdown(&bytes)
+            {
+                return Some(markdown);
             }
-            let mut len = 0usize;
-            while *ptr.add(len) != 0 {
-                len += 1;
+            let rtf_format = rtf_clipboard_format();
+            if IsClipboardFormatAvailable(rtf_format).is_ok()
+                && let Some(bytes) = clipboard_bytes(rtf_format)
+                && let Some(markdown) = crate::clipboard_text::rtf_to_markdown(&bytes)
+            {
+                return Some(markdown);
             }
-            let s = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
-            let _ = GlobalUnlock(HGLOBAL(h.0));
-            Some(s)
+            let bytes = clipboard_bytes(CF_UNICODETEXT)?;
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .take_while(|unit| *unit != 0)
+                .collect();
+            Some(String::from_utf16_lossy(&units))
         })();
         let _ = CloseClipboard();
         result
@@ -164,8 +235,10 @@ fn parse_dib(data: &[u8]) -> Option<crate::capture::Captured> {
     if data.len() < 40 {
         return None;
     }
-    let rd_u32 = |off: usize| u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
-    let rd_i32 = |off: usize| i32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+    let rd_u32 =
+        |off: usize| u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+    let rd_i32 =
+        |off: usize| i32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
     let rd_u16 = |off: usize| u16::from_le_bytes([data[off], data[off + 1]]);
 
     let bi_size = rd_u32(0) as usize;
@@ -193,7 +266,11 @@ fn parse_dib(data: &[u8]) -> Option<crate::capture::Captured> {
     // ピクセルデータ開始オフセット = ヘッダ + カラーマスク + カラーパレット。
     // BI_BITFIELDS かつ BITMAPINFOHEADER(40) のときは、ヘッダ直後に12バイトのマスクが入る
     // (BITMAPV4/V5HEADER ではマスクはヘッダ内に含まれるため加算しない)。
-    let mask_bytes = if compression == 3 && bi_size == 40 { 12 } else { 0 };
+    let mask_bytes = if compression == 3 && bi_size == 40 {
+        12
+    } else {
+        0
+    };
     let palette_bytes = clr_used * 4;
     let pixel_off = bi_size + mask_bytes + palette_bytes;
     let bytes_per_px = (bit_count / 8) as usize;
@@ -323,7 +400,11 @@ pub fn perf_log(enabled: bool, line: &str) {
     }
     use std::io::Write;
     let path = config_dir().join("perf.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -336,7 +417,11 @@ pub fn perf_log(enabled: bool, line: &str) {
 pub fn app_log(line: &str) {
     use std::io::Write;
     let path = config_dir().join("app.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -369,9 +454,19 @@ pub fn get_window_context(hwnd: HWND) -> (Option<String>, Option<String>) {
         {
             let mut path = vec![0u16; MAX_PATH as usize];
             let mut size = MAX_PATH;
-            if QueryFullProcessImageNameW(hprocess, windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0), windows::core::PWSTR(path.as_mut_ptr()), &mut size).is_ok() {
+            if QueryFullProcessImageNameW(
+                hprocess,
+                windows::Win32::System::Threading::PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(path.as_mut_ptr()),
+                &mut size,
+            )
+            .is_ok()
+            {
                 let full_path = String::from_utf16_lossy(&path[..size as usize]);
-                if let Some(file_name) = std::path::Path::new(&full_path).file_name().and_then(|n| n.to_str()) {
+                if let Some(file_name) = std::path::Path::new(&full_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                {
                     exe = Some(file_name.to_string());
                 }
             }

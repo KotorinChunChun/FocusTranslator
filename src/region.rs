@@ -6,13 +6,15 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, EndPaint, FillRect, FrameRect, HGDIOBJ, InvalidateRect,
     PAINTSTRUCT,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, ReleaseCapture, SetCapture, VK_ESCAPE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, IDC_CROSS,
-    LWA_ALPHA, LoadCursorW, PostMessageW, RegisterClassW, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SetForegroundWindow,
-    SetLayeredWindowAttributes, ShowWindow, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, IDC_CROSS, IsWindow,
+    LWA_ALPHA, LoadCursorW, PostMessageW, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, SW_SHOW, SetForegroundWindow,
+    SetLayeredWindowAttributes, ShowWindow, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_NCDESTROY, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::w;
 
@@ -27,11 +29,44 @@ struct SelState {
 thread_local! {
     static STATE: RefCell<Option<SelState>> = const { RefCell::new(None) };
     static REGISTERED: RefCell<bool> = const { RefCell::new(false) };
+    static WND: RefCell<isize> = const { RefCell::new(0) };
+}
+
+fn hwnd() -> HWND {
+    HWND(WND.with(|w| *w.borrow()) as *mut _)
+}
+
+pub fn is_open() -> bool {
+    let h = hwnd();
+    !h.is_invalid() && unsafe { IsWindow(Some(h)).as_bool() }
+}
+
+/// 起動済みの範囲選択を閉じる。既に閉じている場合はfalse。
+pub fn cancel() -> bool {
+    if !is_open() {
+        return false;
+    }
+    unsafe {
+        let _ = DestroyWindow(hwnd());
+    }
+    true
+}
+
+/// 範囲選択ウィンドウがフォーカスを得られなかった場合にもESCで終了できるよう、
+/// メインウィンドウの周期処理から呼ぶ。
+pub fn cancel_if_escape_pressed() -> bool {
+    is_open() && unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 } && cancel()
 }
 
 /// 範囲指定オーバーレイを開始する
 pub fn start(instance: HINSTANCE, main_hwnd: HWND) {
     unsafe {
+        if is_open() {
+            let h = hwnd();
+            let _ = ShowWindow(h, SW_RESTORE);
+            let _ = SetForegroundWindow(h);
+            return;
+        }
         let class = w!("FocusTranslatorRegion");
         REGISTERED.with(|r| {
             if !*r.borrow() {
@@ -76,9 +111,12 @@ pub fn start(instance: HINSTANCE, main_hwnd: HWND) {
             Some(instance),
             None,
         ) {
+            WND.with(|w| *w.borrow_mut() = hwnd.0 as isize);
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 70, LWA_ALPHA);
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
+        } else {
+            STATE.with(|s| *s.borrow_mut() = None);
         }
     }
 }
@@ -105,10 +143,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             let dragging = STATE.with(|s| {
                 if let Some(st) = s.borrow_mut().as_mut()
-                    && st.dragging {
-                        st.cur = POINT { x, y };
-                        return true;
-                    }
+                    && st.dragging
+                {
+                    st.cur = POINT { x, y };
+                    return true;
+                }
                 false
             });
             if dragging {
@@ -127,35 +166,43 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = DestroyWindow(hwnd);
             }
             if let Some(st) = info
-                && st.dragging {
-                    let x = (lparam.0 & 0xFFFF) as i16 as i32;
-                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                    let left = st.start.x.min(x) + st.origin.0;
-                    let top = st.start.y.min(y) + st.origin.1;
-                    let right = st.start.x.max(x) + st.origin.0;
-                    let bottom = st.start.y.max(y) + st.origin.1;
-                    if right - left >= 8 && bottom - top >= 8 {
-                        let rect = Box::new(RECT { left, top, right, bottom });
-                        unsafe {
-                            let _ = PostMessageW(
-                                Some(HWND(st.main_hwnd as *mut _)),
-                                crate::app_state::WM_APP_REGION,
-                                WPARAM(0),
-                                LPARAM(Box::into_raw(rect) as isize),
-                            );
-                        }
+                && st.dragging
+            {
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let left = st.start.x.min(x) + st.origin.0;
+                let top = st.start.y.min(y) + st.origin.1;
+                let right = st.start.x.max(x) + st.origin.0;
+                let bottom = st.start.y.max(y) + st.origin.1;
+                if right - left >= 8 && bottom - top >= 8 {
+                    let rect = Box::new(RECT {
+                        left,
+                        top,
+                        right,
+                        bottom,
+                    });
+                    unsafe {
+                        let _ = PostMessageW(
+                            Some(HWND(st.main_hwnd as *mut _)),
+                            crate::app_state::WM_APP_REGION,
+                            WPARAM(0),
+                            LPARAM(Box::into_raw(rect) as isize),
+                        );
                     }
                 }
+            }
             LRESULT(0)
         }
         WM_KEYDOWN => {
             if wparam.0 == VK_ESCAPE.0 as usize {
-                STATE.with(|s| *s.borrow_mut() = None);
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
+                cancel();
             }
             LRESULT(0)
+        }
+        WM_NCDESTROY => {
+            STATE.with(|s| *s.borrow_mut() = None);
+            WND.with(|w| *w.borrow_mut() = 0);
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_PAINT => {
             unsafe {
@@ -166,24 +213,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = windows::Win32::Graphics::Gdi::DeleteObject(HGDIOBJ(bg.0));
                 STATE.with(|s| {
                     if let Some(st) = s.borrow().as_ref()
-                        && st.dragging {
-                            let r = RECT {
-                                left: st.start.x.min(st.cur.x),
-                                top: st.start.y.min(st.cur.y),
-                                right: st.start.x.max(st.cur.x),
-                                bottom: st.start.y.max(st.cur.y),
-                            };
-                            let sel = CreateSolidBrush(COLORREF(0x00E0B060));
-                            FrameRect(hdc, &r, sel);
-                            let inner = RECT {
-                                left: r.left + 1,
-                                top: r.top + 1,
-                                right: r.right - 1,
-                                bottom: r.bottom - 1,
-                            };
-                            FrameRect(hdc, &inner, sel);
-                            let _ = windows::Win32::Graphics::Gdi::DeleteObject(HGDIOBJ(sel.0));
-                        }
+                        && st.dragging
+                    {
+                        let r = RECT {
+                            left: st.start.x.min(st.cur.x),
+                            top: st.start.y.min(st.cur.y),
+                            right: st.start.x.max(st.cur.x),
+                            bottom: st.start.y.max(st.cur.y),
+                        };
+                        let sel = CreateSolidBrush(COLORREF(0x00E0B060));
+                        FrameRect(hdc, &r, sel);
+                        let inner = RECT {
+                            left: r.left + 1,
+                            top: r.top + 1,
+                            right: r.right - 1,
+                            bottom: r.bottom - 1,
+                        };
+                        FrameRect(hdc, &inner, sel);
+                        let _ = windows::Win32::Graphics::Gdi::DeleteObject(HGDIOBJ(sel.0));
+                    }
                 });
                 let _ = EndPaint(hwnd, &ps);
             }

@@ -30,6 +30,16 @@ pub enum ApiType {
     /// LM Studio (ローカルサーバ, OpenAI互換API `/v1/chat/completions`)。APIキー不要。
     /// モデル名は読み込み済みモデルのidに依存するため既定値は空欄 (SPECv0.5.5)。
     LmStudio,
+    /// ログイン済みのCodex CLIを非対話モードで呼び出す。
+    CodexCli,
+    /// ログイン済みのClaude Code CLIを非対話モードで呼び出す。
+    ClaudeCli,
+    /// ログイン済みのGitHub Copilot CLIを非対話モードで呼び出す。
+    CopilotCli,
+    /// ログイン済みのGemini CLIを非対話モードで呼び出す。
+    GeminiCli,
+    /// ログイン済みのKimi CLIを非対話モードで呼び出す。既定モデルはKimi K3。
+    KimiCli,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -40,6 +50,9 @@ pub struct ApiProfile {
     pub model_name: String,
     pub api_url: String,
     pub api_key_enc: String,
+    /// CLI種別の実行ファイル。空欄なら種別ごとのコマンド名をPATHから自動検出する。
+    /// API種別では使用しない。
+    pub cli_path: String,
     pub ocr_prompt: String,
     pub translate_prompt: String,
     pub explain_prompt: String,
@@ -110,6 +123,9 @@ impl ApiProfile {
     /// API URL/モデル名が未設定なら必ず失敗する。APIキーの空欄自体は許容するが、
     /// Gemini/Claude/ChatGPTの主要な公式URLではAPIキーが無いと必ず失敗するため許容しない。
     pub fn is_ready(&self) -> bool {
+        if self.api_type.is_cli() {
+            return crate::llm_cli::resolve_executable(self).is_ok();
+        }
         if self.api_url.trim().is_empty() || self.model_name.trim().is_empty() {
             return false;
         }
@@ -122,6 +138,28 @@ impl ApiProfile {
 
 /// プロバイダ種別ごとの既定モデル名と既定URL (設定UIの種別切替・マイグレーションで共用)
 impl ApiType {
+    pub fn is_cli(&self) -> bool {
+        matches!(
+            self,
+            ApiType::CodexCli
+                | ApiType::ClaudeCli
+                | ApiType::CopilotCli
+                | ApiType::GeminiCli
+                | ApiType::KimiCli
+        )
+    }
+
+    pub fn cli_command(&self) -> Option<&'static str> {
+        match self {
+            ApiType::CodexCli => Some("codex"),
+            ApiType::ClaudeCli => Some("claude"),
+            ApiType::CopilotCli => Some("copilot"),
+            ApiType::GeminiCli => Some("gemini"),
+            ApiType::KimiCli => Some("kimi"),
+            _ => None,
+        }
+    }
+
     pub fn default_model(&self) -> &'static str {
         match self {
             ApiType::Gemini => "gemini-3.6-flash",
@@ -135,6 +173,12 @@ impl ApiType {
             // ローカルサーバは導入済みモデルに依存するため既定値を決め打てない。空欄のまま
             // 「接続確認」ボタンで実際に導入されているモデルを調べてから入力してもらう。
             ApiType::Ollama | ApiType::LmStudio => "",
+            // CLIはOCR・翻訳の応答速度と定額枠の節約を優先し、公式に軽量とされる候補を使う。
+            ApiType::CodexCli => "gpt-5.6-luna",
+            ApiType::ClaudeCli => "haiku",
+            ApiType::CopilotCli => "claude-haiku-4.5",
+            ApiType::GeminiCli => "gemini-2.5-flash-lite",
+            ApiType::KimiCli => "k3-256k",
         }
     }
     pub fn default_url(&self) -> &'static str {
@@ -149,6 +193,11 @@ impl ApiType {
             ApiType::NvidiaNim => crate::llm_api::DEFAULT_NVIDIA_NIM_URL,
             ApiType::Ollama => crate::llm_api::DEFAULT_OLLAMA_URL,
             ApiType::LmStudio => crate::llm_api::DEFAULT_LMSTUDIO_URL,
+            ApiType::CodexCli
+            | ApiType::ClaudeCli
+            | ApiType::CopilotCli
+            | ApiType::GeminiCli
+            | ApiType::KimiCli => "",
         }
     }
 
@@ -165,6 +214,13 @@ impl ApiType {
             ApiType::GitHubModels => "https://github.com/settings/tokens",
             ApiType::NvidiaNim => "https://build.nvidia.com",
             ApiType::Ollama | ApiType::LmStudio => "",
+            ApiType::CodexCli => "https://developers.openai.com/codex/cli/",
+            ApiType::ClaudeCli => "https://code.claude.com/docs/en/overview",
+            ApiType::CopilotCli => {
+                "https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli"
+            }
+            ApiType::GeminiCli => "https://github.com/google-gemini/gemini-cli",
+            ApiType::KimiCli => "https://www.kimi.com/help/kimi-code/cli-getting-started",
         }
     }
 }
@@ -190,9 +246,11 @@ pub struct Config {
     pub source_lang: String,
     pub deepl_key_enc: String,
     pub google_key_enc: String,
-    
+
     // API Profile設定
     pub api_profiles: Vec<ApiProfile>,
+    /// v0.5.6のCLI既定プロファイルを一度だけ追加済みか。削除後に復活させないための印。
+    pub cli_profiles_seeded: bool,
     /// セッション中に実際に使用中のLLMプロファイル (チップ切替やキャプチャ開始で変わる)。
     pub active_api_profile: String,
     /// 既定LLMプロファイル (設定画面でのみ変更)。右Ctrl起動時に active_api_profile の初期値となる。
@@ -229,14 +287,21 @@ pub struct Config {
     pub log_enabled: bool,
     /// デバッグモード: OCR時にキャプチャ画像をPNG保存 (既定OFF)
     pub debug_mode: bool,
+    /// LLMへプロンプトを送る際、対象アプリ全体のスクリーンショットに対象箇所を
+    /// 赤枠で示して添付する。プライバシーを優先して既定OFF。
+    pub send_full_screenshot_to_llm: bool,
     /// 領域表示 (キャプチャキー側): キャプチャキー(hold_key)押下中、UIA要素や
     /// キャプチャ範囲を枠表示するデバッグ機能 (既定OFF)
     pub detect_enabled: bool,
     /// プレビューキー: 実際の翻訳は行わず、検出範囲の枠表示だけを確認できるキー
-    /// (hold_key と同じ表記、既定 LCtrl)
+    /// (hold_key と同じ表記に「なし」を加えたもの、既定は「なし」)
     pub detect_key: String,
     /// 領域表示 (プレビューキー側): プレビューキー(detect_key)押下中も枠表示するか (既定OFF)
     pub preview_detect_enabled: bool,
+    /// 旧既定LCtrlから「なし」への一度限りの移行を適用済みか。
+    /// フィールド欠落時だけfalseにするため、Config::defaultのtrueとは別指定する。
+    #[serde(default = "preview_key_none_not_migrated")]
+    pub preview_key_none_migrated: bool,
     /// 認識ログの保持上限件数
     pub log_max_records: u32,
     /// 初回起動時のセットアップ提案ダイアログを表示済みか
@@ -267,28 +332,31 @@ pub struct Config {
     /// 大文字小文字は区別しない。既定は空(誰も除外しない)。
     #[serde(default)]
     pub disabled_apps: Vec<String>,
+    /// アプリ自身の表示名・開発者名を画面上で空白化するBossGuard。
+    #[serde(default)]
+    pub boss_guard: bool,
 }
 
 fn default_ocr_priority_apps() -> Vec<String> {
     vec!["TeamViewer.exe".to_string()]
 }
 
+fn preview_key_none_not_migrated() -> bool {
+    false
+}
+
 /// 翻訳プロンプトの既定値 (SPECv0.5.3: 既に訳先言語ならそのまま返す指示を追加)
-pub const DEFAULT_GEMINI_TRANSLATE_PROMPT: &str =
-    "Translate the following text from {{source_lang}} to {{target_lang}}. If the text is already in {{target_lang}}, output it unchanged. Output only the translation.\n\n{{original_text}}";
+pub const DEFAULT_GEMINI_TRANSLATE_PROMPT: &str = "Translate the following text from {{source_lang}} to {{target_lang}}. If the text is already in {{target_lang}}, output it unchanged. Output only the translation.\n\n{{original_text}}";
 /// v0.5.2 までの翻訳プロンプト既定値 (SPECv0.5.3でテンプレートを変更したため移行判定用)
-const OLD_TRANSLATE_PROMPT_V52: &str =
-    "Translate the following text from {{source_lang}} to {{target_lang}}. Output only the translation.\n\n{{original_text}}";
+const OLD_TRANSLATE_PROMPT_V52: &str = "Translate the following text from {{source_lang}} to {{target_lang}}. Output only the translation.\n\n{{original_text}}";
 /// OCR+翻訳統合プロンプトの既定値
-pub const DEFAULT_GEMINI_OCR_PROMPT: &str =
-    "Extract the text in this image and translate it from {{source_lang}} to {{target_lang}}. Respond with JSON only: {\"source\": \"<extracted text>\", \"translation\": \"<translation>\"}";
+pub const DEFAULT_GEMINI_OCR_PROMPT: &str = "Extract the text in this image and translate it from {{source_lang}} to {{target_lang}}. Respond with JSON only: {\"source\": \"<extracted text>\", \"translation\": \"<translation>\"}";
 /// 解説プロンプトの既定値 (SPECv0.5.4: UIAパス → UIAノード詳細 {{uia_detail}} へ差し替え)
 pub const DEFAULT_GEMINI_EXPLAIN_PROMPT: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n画像が添付されている場合、それは対象アプリ全体のスクリーンショットで、赤枠で囲んだ箇所が解説対象の表示位置です。画面全体の文脈も参考にしてください。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAノード詳細\n{{uia_detail}}";
 /// v0.5.3 の解説プロンプト既定値 (SPECv0.5.4でテンプレートを変更したため、移行判定用に保持する)
 const OLD_EXPLAIN_PROMPT_V53: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n画像が添付されている場合、それは対象アプリ全体のスクリーンショットで、赤枠で囲んだ箇所が解説対象の表示位置です。画面全体の文脈も参考にしてください。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
 /// v0.3 までの解説プロンプト既定値 (設定移行の判定用。当時の文言そのままで比較する)
-const OLD_EXPLAIN_PROMPT: &str =
-    "Explain the grammar, nuances, and background of the following text in {{target_lang}}.\n{{glossary}}\n\n{{original_text}}";
+const OLD_EXPLAIN_PROMPT: &str = "Explain the grammar, nuances, and background of the following text in {{target_lang}}.\n{{glossary}}\n\n{{original_text}}";
 /// v0.4〜v0.5.1 までの解説プロンプト既定値 (SPECv0.5.2でテンプレートを変更したため、
 /// 移行判定用にこの文言のまま保持する)
 const OLD_EXPLAIN_PROMPT_V4: &str = "以下は、{{app_title}} というタイトルのWindowsアプリケーションの中で表示されているテキストです。\nこれが何か{{target_lang}}で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 実行ファイル名\n{{app_exe}}\n\n## UIAパス\n{{uia_path}}\n\n## 表示テキスト\n{{original_text}}";
@@ -297,22 +365,69 @@ const OLD_EXPLAIN_PROMPT_V4: &str = "以下は、{{app_title}} というタイ�
 const OLD_EXPLAIN_PROMPT_V52: &str = "以下は、Windowsアプリケーションの中で表示されているテキストです。\nこれが何か {{target_lang}} で説明してください。\nアプリのUIなら機能や用途の解説を、コンテンツなら意味の解説をお願いします。\n\n## 解説をして欲しい表示テキスト\n{{original_text}}\n\n## 参考情報\n\n### 上記テキストが表示されてている実行ファイル名\n{{app_exe}}\n\n### 上記テキストが表示されてているウィンドウタイトル\n{{app_title}}\n\n### 上記テキストが表示されているコントロールのUIAパス\n{{uia_path}}";
 
 /// 初回起動時・マイグレーション時に生成する既定LLMプロファイルの名前一覧
-pub const DEFAULT_PROFILE_NAMES: [&str; 4] =
-    ["Gemini", "GPT", "Claude", "LocalLLM"];
+pub const DEFAULT_PROFILE_NAMES: [&str; 4] = ["Gemini", "GPT", "Claude", "LocalLLM"];
+pub const DEFAULT_CLI_PROFILE_NAMES: [&str; 5] = [
+    "Codex CLI",
+    "Claude CLI",
+    "GitHub Copilot CLI",
+    "Gemini CLI",
+    "Kimi Code CLI",
+];
 
 /// 既定LLMプロファイルをその名前から新規生成する (設定に同名プロファイルが無いときの
 /// 初期値/バックフィル用)。
 fn seed_profile(name: &str) -> ApiProfile {
     let (api_type, model_name, api_url): (ApiType, String, String) = match name {
-        "Gemini" => (ApiType::Gemini, ApiType::Gemini.default_model().into(), ApiType::Gemini.default_url().into()),
-        "GPT" => (ApiType::OpenAI, ApiType::OpenAI.default_model().into(), ApiType::OpenAI.default_url().into()),
-        "Claude" => (ApiType::Claude, ApiType::Claude.default_model().into(), ApiType::Claude.default_url().into()),
+        "Gemini" => (
+            ApiType::Gemini,
+            ApiType::Gemini.default_model().into(),
+            ApiType::Gemini.default_url().into(),
+        ),
+        "GPT" => (
+            ApiType::OpenAI,
+            ApiType::OpenAI.default_model().into(),
+            ApiType::OpenAI.default_url().into(),
+        ),
+        "Claude" => (
+            ApiType::Claude,
+            ApiType::Claude.default_model().into(),
+            ApiType::Claude.default_url().into(),
+        ),
         "LocalLLM" => (
             ApiType::LlamaCpp,
             ApiType::LlamaCpp.default_model().into(),
             ApiType::LlamaCpp.default_url().into(),
         ),
-        _ => (ApiType::Gemini, ApiType::Gemini.default_model().into(), ApiType::Gemini.default_url().into()),
+        "Codex CLI" => (
+            ApiType::CodexCli,
+            ApiType::CodexCli.default_model().into(),
+            String::new(),
+        ),
+        "Claude CLI" => (
+            ApiType::ClaudeCli,
+            ApiType::ClaudeCli.default_model().into(),
+            String::new(),
+        ),
+        "GitHub Copilot CLI" => (
+            ApiType::CopilotCli,
+            ApiType::CopilotCli.default_model().into(),
+            String::new(),
+        ),
+        "Gemini CLI" => (
+            ApiType::GeminiCli,
+            ApiType::GeminiCli.default_model().into(),
+            String::new(),
+        ),
+        "Kimi Code CLI" => (
+            ApiType::KimiCli,
+            ApiType::KimiCli.default_model().into(),
+            String::new(),
+        ),
+        _ => (
+            ApiType::Gemini,
+            ApiType::Gemini.default_model().into(),
+            ApiType::Gemini.default_url().into(),
+        ),
     };
     ApiProfile {
         name: name.into(),
@@ -320,6 +435,7 @@ fn seed_profile(name: &str) -> ApiProfile {
         model_name,
         api_url,
         api_key_enc: String::new(),
+        cli_path: String::new(),
         ocr_prompt: DEFAULT_GEMINI_OCR_PROMPT.into(),
         translate_prompt: DEFAULT_GEMINI_TRANSLATE_PROMPT.into(),
         explain_prompt: DEFAULT_GEMINI_EXPLAIN_PROMPT.into(),
@@ -363,6 +479,7 @@ impl Default for Config {
             deepl_key_enc: String::new(),
             google_key_enc: String::new(),
             api_profiles: Vec::new(),
+            cli_profiles_seeded: false,
             active_api_profile: "Gemini".into(),
             default_api_profile: "Gemini".into(),
             gemini_key_enc: String::new(),
@@ -379,9 +496,11 @@ impl Default for Config {
             perf_log: false,
             log_enabled: false,
             debug_mode: false,
+            send_full_screenshot_to_llm: false,
             detect_enabled: false,
-            detect_key: "LCtrl".into(),
+            detect_key: "なし".into(),
             preview_detect_enabled: false,
+            preview_key_none_migrated: true,
             log_max_records: 5000,
             first_launch_done: false,
             overlay_theme: "system".into(),
@@ -391,6 +510,7 @@ impl Default for Config {
             llama_mmproj_path: String::new(),
             ocr_priority_apps: default_ocr_priority_apps(),
             disabled_apps: Vec::new(),
+            boss_guard: false,
         }
     }
 }
@@ -414,13 +534,20 @@ impl Config {
         // マイグレーション (旧設定からプロファイルへ)
         if cfg.api_profiles.is_empty() {
             fn pick(v: &str, default: &str) -> String {
-                if v.is_empty() { default.into() } else { v.into() }
+                if v.is_empty() {
+                    default.into()
+                } else {
+                    v.into()
+                }
             }
             let mut gemini = seed_profile("Gemini");
             gemini.model_name = pick(&cfg.gemini_model, ApiType::Gemini.default_model());
             gemini.api_key_enc = cfg.gemini_key_enc.clone();
             gemini.ocr_prompt = pick(&cfg.gemini_ocr_prompt, DEFAULT_GEMINI_OCR_PROMPT);
-            gemini.translate_prompt = pick(&cfg.gemini_translate_prompt, DEFAULT_GEMINI_TRANSLATE_PROMPT);
+            gemini.translate_prompt = pick(
+                &cfg.gemini_translate_prompt,
+                DEFAULT_GEMINI_TRANSLATE_PROMPT,
+            );
             gemini.explain_prompt = pick(&cfg.gemini_explain_prompt, DEFAULT_GEMINI_EXPLAIN_PROMPT);
             cfg.api_profiles.push(gemini);
 
@@ -447,20 +574,68 @@ impl Config {
                 }
             }
         }
+        // v0.5.6導入時にCLIプロファイルを一度だけ追加する。フラグを保存した後は、利用者が
+        // 削除したCLIプロファイルを次回起動で復活させない。
+        if !cfg.cli_profiles_seeded {
+            for name in DEFAULT_CLI_PROFILE_NAMES {
+                if !cfg.api_profiles.iter().any(|p| p.name == name) {
+                    cfg.api_profiles.push(seed_profile(name));
+                }
+            }
+            cfg.cli_profiles_seeded = true;
+            migrated = true;
+        }
         // プレースホルダ移行 (SPECv0.4 §7.1): 旧 {{text}} を {{original_text}} へ一度きりで書き換える。
         // 旧既定の解説プロンプトのままなら、新しい既定テンプレートへ差し替える。
         // default_api_profile 未設定の旧構成は、当時の active をコピーして確定・永続化する。
         // (以後 active はセッション用に変動するため、ここで既定を固定しておく)
         if cfg.default_api_profile.is_empty() {
             cfg.default_api_profile = if cfg.active_api_profile.is_empty() {
-                cfg.api_profiles.first().map(|p| p.name.clone()).unwrap_or_default()
+                cfg.api_profiles
+                    .first()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default()
             } else {
                 cfg.active_api_profile.clone()
             };
             migrated = true;
         }
+        // v0.5.6追加要望: 無効のまま保存されていた旧既定LCtrlだけを一度「なし」へ移す。
+        // プレビュー表示を有効にしている設定と、移行後の手動選択は変更しない。
+        if !cfg.preview_key_none_migrated {
+            if !cfg.preview_detect_enabled && cfg.detect_key == "LCtrl" {
+                cfg.detect_key = "なし".into();
+            }
+            cfg.preview_key_none_migrated = true;
+            migrated = true;
+        }
+        // 初期CLI統合時の既定名を、公式製品名「Kimi Code CLI」へ移行する。
+        if !cfg.api_profiles.iter().any(|p| p.name == "Kimi Code CLI")
+            && let Some(profile) = cfg
+                .api_profiles
+                .iter_mut()
+                .find(|p| p.name == "Kimi K3" && p.api_type == ApiType::KimiCli)
+        {
+            profile.name = "Kimi Code CLI".into();
+            if cfg.active_api_profile == "Kimi K3" {
+                cfg.active_api_profile = profile.name.clone();
+            }
+            if cfg.default_api_profile == "Kimi K3" {
+                cfg.default_api_profile = profile.name.clone();
+            }
+            migrated = true;
+        }
         for p in &mut cfg.api_profiles {
-            for prompt in [&mut p.ocr_prompt, &mut p.translate_prompt, &mut p.explain_prompt] {
+            // v0.5.6追加要望: 旧CLIプロファイルの空欄を軽量既定モデルへ移行する。
+            if p.api_type.is_cli() && p.model_name.trim().is_empty() {
+                p.model_name = p.api_type.default_model().to_string();
+                migrated = true;
+            }
+            for prompt in [
+                &mut p.ocr_prompt,
+                &mut p.translate_prompt,
+                &mut p.explain_prompt,
+            ] {
                 if prompt.contains("{{text}}") {
                     *prompt = prompt.replace("{{text}}", "{{original_text}}");
                     migrated = true;
@@ -493,7 +668,7 @@ impl Config {
             // 旧バージョンは Gemini の api_url を空欄のまま保存していた。
             // 実行時は url_or() が既定URLへ解決するため動作に支障は無いが、設定画面の
             // 表示が空欄のままになるので、ここで種別の既定URLへ補完しておく。
-            if p.api_url.is_empty() {
+            if !p.api_type.is_cli() && p.api_url.is_empty() {
                 p.api_url = p.api_type.default_url().into();
                 migrated = true;
             }
@@ -518,7 +693,9 @@ impl Config {
     }
 
     pub fn active_profile(&self) -> Option<&ApiProfile> {
-        self.api_profiles.iter().find(|p| p.name == self.active_api_profile)
+        self.api_profiles
+            .iter()
+            .find(|p| p.name == self.active_api_profile)
     }
 
     /// オーバーレイのOCR/翻訳チップに出すプロファイル一覧。呼び出しても必ず失敗すると
@@ -575,18 +752,23 @@ impl Config {
 
     /// 指定exeがUIA優先度制御(常にOCRを優先)の対象アプリか (SPECv0.5.5)。大文字小文字を区別しない。
     pub fn is_ocr_priority_app(&self, exe: &str) -> bool {
-        self.ocr_priority_apps.iter().any(|e| e.eq_ignore_ascii_case(exe))
+        self.ocr_priority_apps
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(exe))
     }
 
     /// 指定exeが「実行しないアプリ」(認識自体を行わない対象)か (SPECv0.5.5)。大文字小文字を区別しない。
     pub fn is_disabled_app(&self, exe: &str) -> bool {
-        self.disabled_apps.iter().any(|e| e.eq_ignore_ascii_case(exe))
+        self.disabled_apps
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(exe))
     }
 }
 
 /// キー名(ホールドキー/検出キー共通の表記) → 仮想キーコード
 fn key_vk(name: &str) -> i32 {
     match name {
+        "なし" => 0,
         "LCtrl" => 0xA2,
         "RShift" => 0xA1,
         "RAlt" => 0xA5,
@@ -615,13 +797,18 @@ pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
                 if ch.len() == 1 && ch[0].is_ascii_alphanumeric() {
                     vk = ch[0].to_ascii_uppercase() as u32;
                 } else if let Some(n) = other.strip_prefix('f').and_then(|n| n.parse::<u32>().ok())
-                    && (1..=24).contains(&n) {
-                        vk = 0x70 + n - 1;
-                    }
+                    && (1..=24).contains(&n)
+                {
+                    vk = 0x70 + n - 1;
+                }
             }
         }
     }
-    if vk != 0 && mods != 0 { Some((mods, vk)) } else { None }
+    if vk != 0 && mods != 0 {
+        Some((mods, vk))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -637,12 +824,116 @@ mod tests {
             ("http://127.0.0.1:8080/v1/chat/completions", false),
             ("http://[::1]:8080/v1", false),
             ("https://api.openai.com/v1/chat/completions", true),
-            ("https://generativelanguage.googleapis.com/v1beta/models", true),
+            (
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                true,
+            ),
             ("http://192.168.1.10:11434/v1/chat/completions", true),
             ("", true),
         ] {
             p.api_url = url.into();
             assert_eq!(p.is_external(), expect, "url={url}");
+        }
+    }
+
+    #[test]
+    fn cli既定モデルは軽量候補で空欄ではない() {
+        for (api_type, expected) in [
+            (ApiType::CodexCli, "gpt-5.6-luna"),
+            (ApiType::ClaudeCli, "haiku"),
+            (ApiType::CopilotCli, "claude-haiku-4.5"),
+            (ApiType::GeminiCli, "gemini-2.5-flash-lite"),
+            (ApiType::KimiCli, "k3-256k"),
+        ] {
+            assert_eq!(api_type.default_model(), expected);
+        }
+    }
+
+    #[test]
+    fn プレビューキーは既定で無効() {
+        let cfg = Config::default();
+        assert_eq!(cfg.detect_key, "なし");
+        assert_eq!(cfg.detect_vk(), 0);
+        assert!(!cfg.preview_detect_enabled);
+        assert!(cfg.preview_key_none_migrated);
+    }
+
+    #[test]
+    fn 無効な旧既定lctrlを一度だけなしへ移行する() {
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("ft_preview_key_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::set_var("FOCUSTRANSLATOR_DATA_DIR", &tmp);
+        }
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            Config::path(),
+            r#"{"detect_key":"LCtrl","preview_detect_enabled":false}"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load();
+        assert_eq!(cfg.detect_key, "なし");
+        assert!(cfg.preview_key_none_migrated);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::remove_var("FOCUSTRANSLATOR_DATA_DIR");
+        }
+    }
+
+    #[test]
+    fn boss_guardは既定で無効() {
+        let cfg = Config::default();
+        assert!(!cfg.boss_guard);
+        assert_eq!(
+            crate::util::app_display_name(false),
+            crate::util::APP_DISPLAY_NAME
+        );
+        assert_eq!(
+            crate::util::app_display_name(true),
+            crate::util::HIDDEN_BRANDING
+        );
+    }
+
+    #[test]
+    fn 全体スクリーンショット送信は新規設定と旧設定の両方で既定off() {
+        assert!(!Config::default().send_full_screenshot_to_llm);
+        let old_config: Config = serde_json::from_str("{}").unwrap();
+        assert!(!old_config.send_full_screenshot_to_llm);
+    }
+
+    #[test]
+    fn kimi旧既定プロファイル名を公式名へ移行する() {
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("ft_kimi_name_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::set_var("FOCUSTRANSLATOR_DATA_DIR", &tmp);
+        }
+        let json = r#"{
+            "api_profiles": [{"name":"Kimi K3","api_type":"KimiCli","model_name":"k3"}],
+            "active_api_profile":"Kimi K3",
+            "default_api_profile":"Kimi K3",
+            "cli_profiles_seeded":true
+        }"#;
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(Config::path(), json).unwrap();
+
+        let cfg = Config::load();
+        assert!(cfg.api_profiles.iter().any(|p| p.name == "Kimi Code CLI"));
+        assert!(!cfg.api_profiles.iter().any(|p| p.name == "Kimi K3"));
+        assert_eq!(cfg.active_api_profile, "Kimi Code CLI");
+        assert_eq!(cfg.default_api_profile, "Kimi Code CLI");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::remove_var("FOCUSTRANSLATOR_DATA_DIR");
         }
     }
 
@@ -652,7 +943,9 @@ mod tests {
     /// 補完され、default_api_profile が確定することを確認する。
     #[test]
     fn load_backfills_missing_default_profiles_and_gemini_url() {
-        let _guard = crate::util::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("ft_config_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe {
@@ -679,13 +972,37 @@ mod tests {
 
         let cfg = Config::load();
 
-        assert_eq!(cfg.api_profiles.len(), 4, "不足していた既定プロファイルが補われる");
+        assert_eq!(
+            cfg.api_profiles.len(),
+            9,
+            "API/CLIの既定プロファイルが補われる"
+        );
         for name in DEFAULT_PROFILE_NAMES {
-            assert!(cfg.api_profiles.iter().any(|p| p.name == name), "{name} が存在する");
+            assert!(
+                cfg.api_profiles.iter().any(|p| p.name == name),
+                "{name} が存在する"
+            );
         }
-        let gemini = cfg.api_profiles.iter().find(|p| p.name == "Gemini").unwrap();
-        assert_eq!(gemini.api_url, ApiType::Gemini.default_url(), "既存プロファイルのURL空欄が補完される");
-        assert_eq!(cfg.default_api_profile, "Gemini", "旧 active を引き継いで既定が確定する");
+        for name in DEFAULT_CLI_PROFILE_NAMES {
+            assert!(
+                cfg.api_profiles.iter().any(|p| p.name == name),
+                "{name} が存在する"
+            );
+        }
+        let gemini = cfg
+            .api_profiles
+            .iter()
+            .find(|p| p.name == "Gemini")
+            .unwrap();
+        assert_eq!(
+            gemini.api_url,
+            ApiType::Gemini.default_url(),
+            "既存プロファイルのURL空欄が補完される"
+        );
+        assert_eq!(
+            cfg.default_api_profile, "Gemini",
+            "旧 active を引き継いで既定が確定する"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe {
@@ -698,7 +1015,9 @@ mod tests {
     /// 不足分補充ロジックによって復活しないことを確認する (設定画面の削除ボタンの前提)。
     #[test]
     fn load_does_not_resurrect_deleted_default_named_profile_once_migrated() {
-        let _guard = crate::util::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("ft_config_test2_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe {
@@ -728,9 +1047,23 @@ mod tests {
 
         let cfg = Config::load();
 
-        assert_eq!(cfg.api_profiles.len(), 3, "削除済みプロファイルは復活しない");
-        assert!(!cfg.api_profiles.iter().any(|p| p.name == "Gemini"), "Gemini は復活しない");
+        assert_eq!(
+            cfg.api_profiles.len(),
+            8,
+            "API削除状態を保ちつつCLI既定値を一度追加する"
+        );
+        assert!(
+            !cfg.api_profiles.iter().any(|p| p.name == "Gemini"),
+            "Gemini は復活しない"
+        );
         assert_eq!(cfg.default_api_profile, "GPT", "既定は変更されない");
+        assert!(cfg.cli_profiles_seeded);
+        let cfg2 = Config::load();
+        assert_eq!(
+            cfg2.api_profiles.len(),
+            8,
+            "CLIプロファイルは二重追加されない"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe {

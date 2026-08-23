@@ -30,9 +30,12 @@ struct Engine {
 static ENGINE: Mutex<Option<Arc<Engine>>> = Mutex::new(None);
 
 fn load_dict(path: &Path) -> Result<Vec<String>, String> {
-    let content = std::fs::read_to_string(path).map_err(|e| format!("文字辞書の読込に失敗しました: {e}"))?;
-    let mut dict: Vec<String> =
-        content.lines().map(|l| l.trim_end_matches('\r').to_string()).collect();
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("文字辞書の読込に失敗しました: {e}"))?;
+    let mut dict: Vec<String> = content
+        .lines()
+        .map(|l| l.trim_end_matches('\r').to_string())
+        .collect();
     dict.push(" ".to_string());
     Ok(dict)
 }
@@ -46,11 +49,17 @@ fn load_engine() -> Result<Engine, String> {
         .and_then(|mut b| b.commit_from_file(dir.join("rec.onnx")))
         .map_err(|e| format!("PaddleOCR認識モデルの読込に失敗しました: {e}"))?;
     let dict = load_dict(&dir.join("dict.txt"))?;
-    Ok(Engine { det: Mutex::new(det), rec: Mutex::new(rec), dict })
+    Ok(Engine {
+        det: Mutex::new(det),
+        rec: Mutex::new(rec),
+        dict,
+    })
 }
 
 fn engine() -> Result<Arc<Engine>, String> {
-    let mut guard = ENGINE.lock().map_err(|_| "PaddleOCRエンジンのロックに失敗しました".to_string())?;
+    let mut guard = ENGINE
+        .lock()
+        .map_err(|_| "PaddleOCRエンジンのロックに失敗しました".to_string())?;
     if let Some(e) = guard.as_ref() {
         return Ok(e.clone());
     }
@@ -89,7 +98,13 @@ fn sample_bgr(img: &Captured, x: f32, y: f32) -> [f32; 3] {
 }
 
 /// 画像全体を (w,h) にリサイズし、CHW配列(mean/std正規化済み)を作る
-fn resize_normalize_full(img: &Captured, w: u32, h: u32, mean: &[f32; 3], std: &[f32; 3]) -> Vec<f32> {
+fn resize_normalize_full(
+    img: &Captured,
+    w: u32,
+    h: u32,
+    mean: &[f32; 3],
+    std: &[f32; 3],
+) -> Vec<f32> {
     let mut out = vec![0f32; 3 * (w * h) as usize];
     let sx = img.width as f32 / w as f32;
     let sy = img.height as f32 / h as f32;
@@ -111,7 +126,11 @@ fn resize_normalize_full(img: &Captured, w: u32, h: u32, mean: &[f32; 3], std: &
 /// 検出モデルの入力サイズ: 長辺を960以下に収め、各辺を32の倍数に丸める
 fn det_target_size(w: u32, h: u32) -> (u32, u32) {
     let max_side = w.max(h) as f32;
-    let ratio = if max_side > DET_LIMIT_SIDE as f32 { DET_LIMIT_SIDE as f32 / max_side } else { 1.0 };
+    let ratio = if max_side > DET_LIMIT_SIDE as f32 {
+        DET_LIMIT_SIDE as f32 / max_side
+    } else {
+        1.0
+    };
     let rh = (((h as f32 * ratio / 32.0).round() as u32) * 32).max(32);
     let rw = (((w as f32 * ratio / 32.0).round() as u32) * 32).max(32);
     (rw, rh)
@@ -132,12 +151,18 @@ fn run_det(eng: &Engine, img: &Captured) -> Result<Vec<TextBox>, String> {
     let ratio_w = rw as f32 / img.width as f32;
     let ratio_h = rh as f32 / img.height as f32;
 
-    let mut det = eng.det.lock().map_err(|_| "検出モデルのロックに失敗しました".to_string())?;
+    let mut det = eng
+        .det
+        .lock()
+        .map_err(|_| "検出モデルのロックに失敗しました".to_string())?;
     let input_name = det.inputs()[0].name().to_string();
     let tensor = TensorRef::from_array_view((vec![1i64, 3, rh as i64, rw as i64], chw.as_slice()))
         .map_err(|e| format!("検出入力テンソルの作成に失敗しました: {e}"))?;
     let outputs = det
-        .run(vec![(std::borrow::Cow::Borrowed(input_name.as_str()), SessionInputValue::from(tensor))])
+        .run(vec![(
+            std::borrow::Cow::Borrowed(input_name.as_str()),
+            SessionInputValue::from(tensor),
+        )])
         .map_err(|e| format!("検出モデルの実行に失敗しました: {e}"))?;
     let (shape, data) = outputs[0]
         .try_extract_tensor::<f32>()
@@ -249,12 +274,19 @@ fn crop_resize_rec(img: &Captured, b: &TextBox) -> (Vec<f32>, u32) {
 /// CTC greedy decode: 連続重複を1つに畳み込み、blank(index 0)を除去する
 fn run_rec(eng: &Engine, img: &Captured, b: &TextBox) -> Result<String, String> {
     let (chw, w) = crop_resize_rec(img, b);
-    let mut rec = eng.rec.lock().map_err(|_| "認識モデルのロックに失敗しました".to_string())?;
+    let mut rec = eng
+        .rec
+        .lock()
+        .map_err(|_| "認識モデルのロックに失敗しました".to_string())?;
     let input_name = rec.inputs()[0].name().to_string();
-    let tensor = TensorRef::from_array_view((vec![1i64, 3, REC_IMG_H as i64, w as i64], chw.as_slice()))
-        .map_err(|e| format!("認識入力テンソルの作成に失敗しました: {e}"))?;
+    let tensor =
+        TensorRef::from_array_view((vec![1i64, 3, REC_IMG_H as i64, w as i64], chw.as_slice()))
+            .map_err(|e| format!("認識入力テンソルの作成に失敗しました: {e}"))?;
     let outputs = rec
-        .run(vec![(std::borrow::Cow::Borrowed(input_name.as_str()), SessionInputValue::from(tensor))])
+        .run(vec![(
+            std::borrow::Cow::Borrowed(input_name.as_str()),
+            SessionInputValue::from(tensor),
+        )])
         .map_err(|e| format!("認識モデルの実行に失敗しました: {e}"))?;
     let (shape, data) = outputs[0]
         .try_extract_tensor::<f32>()
@@ -274,7 +306,10 @@ fn run_rec(eng: &Engine, img: &Captured, b: &TextBox) -> Result<String, String> 
                 best_i = i;
             }
         }
-        if best_i != 0 && best_i as i64 != last_idx && let Some(ch) = eng.dict.get(best_i - 1) {
+        if best_i != 0
+            && best_i as i64 != last_idx
+            && let Some(ch) = eng.dict.get(best_i - 1)
+        {
             text.push_str(ch);
         }
         last_idx = best_i as i64;

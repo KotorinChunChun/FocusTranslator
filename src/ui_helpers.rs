@@ -4,15 +4,13 @@ use windows::Win32::Graphics::Gdi::{
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
     FONT_OUTPUT_PRECISION, FW_BOLD, FW_NORMAL, HFONT,
 };
+use windows::Win32::UI::Controls::EM_SETPASSWORDCHAR;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetDlgItem, GetWindowTextLengthW, GetWindowTextW, HMENU, SetWindowTextW,
-    WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
-    SendMessageW, BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, CBS_DROPDOWNLIST,
-    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
-    CB_SETDROPPEDWIDTH, WM_SETFONT,
-};
-use windows::Win32::UI::Controls::{
-    EM_SETPASSWORDCHAR,
+    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, CB_ADDSTRING, CB_GETCURSEL, CB_GETLBTEXT,
+    CB_GETLBTEXTLEN, CB_RESETCONTENT, CB_SETCURSEL, CB_SETDROPPEDWIDTH, CBS_DROPDOWN,
+    CBS_DROPDOWNLIST, CreateWindowExW, GetDlgItem, GetWindowTextLengthW, GetWindowTextW, HMENU,
+    SendMessageW, SetWindowTextW, WINDOW_STYLE, WM_SETFONT, WS_BORDER, WS_CHILD, WS_TABSTOP,
+    WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
@@ -54,7 +52,18 @@ pub fn ctl(
 }
 
 pub fn label(parent: HWND, instance: HINSTANCE, text: &str, x: i32, y: i32, w: i32) {
-    ctl(parent, instance, w!("STATIC"), text, WINDOW_STYLE(0), x, y, w, 20, 0);
+    ctl(
+        parent,
+        instance,
+        w!("STATIC"),
+        text,
+        WINDOW_STYLE(0),
+        x,
+        y,
+        w,
+        20,
+        0,
+    );
 }
 
 pub fn edit(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32) -> HWND {
@@ -86,7 +95,12 @@ pub fn password_edit(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, 
         id,
     );
     unsafe {
-        SendMessageW(h, EM_SETPASSWORDCHAR, Some(WPARAM(PASSWORD_CHAR)), Some(LPARAM(0)));
+        SendMessageW(
+            h,
+            EM_SETPASSWORDCHAR,
+            Some(WPARAM(PASSWORD_CHAR)),
+            Some(LPARAM(0)),
+        );
     }
     h
 }
@@ -95,10 +109,34 @@ pub fn combo(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32)
     combo_h(parent, instance, x, y, w, 200, id)
 }
 
+/// 候補選択と任意文字列の直接入力を両立する編集可能コンボボックス。
+pub fn editable_combo(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, id: i32) -> HWND {
+    ctl(
+        parent,
+        instance,
+        w!("COMBOBOX"),
+        "",
+        WS_TABSTOP | WINDOW_STYLE(CBS_DROPDOWN as u32),
+        x,
+        y,
+        w,
+        240,
+        id,
+    )
+}
+
 /// ドロップダウン部分の最大表示高さ(px)を指定できるコンボボックス。既定の`combo()`が使う
 /// 200pxでは項目数が多い一覧(起動中のアプリ等)で数件しか一度に見えずスクロールが必須に
 /// なるため、より多くの項目を一覧できるようにしたい場合はこちらを使う。
-pub fn combo_h(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, dropdown_h: i32, id: i32) -> HWND {
+pub fn combo_h(
+    parent: HWND,
+    instance: HINSTANCE,
+    x: i32,
+    y: i32,
+    w: i32,
+    dropdown_h: i32,
+    id: i32,
+) -> HWND {
     ctl(
         parent,
         instance,
@@ -117,12 +155,36 @@ pub fn combo_h(parent: HWND, instance: HINSTANCE, x: i32, y: i32, w: i32, dropdo
 /// コンボ本体を狭く保ちたいが、項目名が長く一覧では読みやすくしたい場合に使う。
 pub fn combo_set_dropped_width(h: HWND, w: i32) {
     unsafe {
-        SendMessageW(h, CB_SETDROPPEDWIDTH, Some(WPARAM(w as usize)), Some(LPARAM(0)));
+        SendMessageW(
+            h,
+            CB_SETDROPPEDWIDTH,
+            Some(WPARAM(w as usize)),
+            Some(LPARAM(0)),
+        );
     }
 }
 
-pub fn button(parent: HWND, instance: HINSTANCE, text: &str, x: i32, y: i32, w: i32, id: i32) -> HWND {
-    ctl(parent, instance, w!("BUTTON"), text, WS_TABSTOP, x, y, w, 26, id)
+pub fn button(
+    parent: HWND,
+    instance: HINSTANCE,
+    text: &str,
+    x: i32,
+    y: i32,
+    w: i32,
+    id: i32,
+) -> HWND {
+    ctl(
+        parent,
+        instance,
+        w!("BUTTON"),
+        text,
+        WS_TABSTOP,
+        x,
+        y,
+        w,
+        26,
+        id,
+    )
 }
 
 /// 子コントロールへテキストを設定する
@@ -159,7 +221,15 @@ pub fn get_multiline_text(parent: HWND, id: i32) -> String {
     get_ctl_text(parent, id).replace("\r\n", "\n")
 }
 
-pub fn checkbox(parent: HWND, instance: HINSTANCE, text: &str, x: i32, y: i32, w: i32, id: i32) -> HWND {
+pub fn checkbox(
+    parent: HWND,
+    instance: HINSTANCE,
+    text: &str,
+    x: i32,
+    y: i32,
+    w: i32,
+    id: i32,
+) -> HWND {
     ctl(
         parent,
         instance,
@@ -176,17 +246,19 @@ pub fn checkbox(parent: HWND, instance: HINSTANCE, text: &str, x: i32, y: i32, w
 
 /// 指定IDの子コントロールHWNDを取得する
 pub fn get_dlg_item(parent: HWND, id: i32) -> HWND {
-    unsafe {
-        GetDlgItem(Some(parent), id).unwrap_or_default()
-    }
+    unsafe { GetDlgItem(Some(parent), id).unwrap_or_default() }
 }
-
 
 /// コンボボックスに項目を追加する
 pub fn combo_add_item(cb: HWND, text: &str) {
     unsafe {
         let wide = to_wide(text);
-        SendMessageW(cb, CB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide.as_ptr() as isize)));
+        SendMessageW(
+            cb,
+            CB_ADDSTRING,
+            Some(WPARAM(0)),
+            Some(LPARAM(wide.as_ptr() as isize)),
+        );
     }
 }
 
@@ -263,7 +335,12 @@ pub fn listbox_reset(lb: HWND) {
 pub fn listbox_add_item(lb: HWND, text: &str) {
     unsafe {
         let wide = to_wide(text);
-        SendMessageW(lb, LB_ADDSTRING, Some(WPARAM(0)), Some(LPARAM(wide.as_ptr() as isize)));
+        SendMessageW(
+            lb,
+            LB_ADDSTRING,
+            Some(WPARAM(0)),
+            Some(LPARAM(wide.as_ptr() as isize)),
+        );
     }
 }
 
@@ -285,7 +362,14 @@ pub fn listbox_set_sel(lb: HWND, idx: usize) {
 /// EnumChildWindows で使われるフォント設定用コールバック (UIフォントを適用する)
 pub unsafe extern "system" fn set_font_proc(child: HWND, lparam: LPARAM) -> windows::core::BOOL {
     let hfont = HFONT(lparam.0 as *mut _);
-    unsafe { SendMessageW(child, WM_SETFONT, Some(WPARAM(hfont.0 as usize)), Some(LPARAM(1))); }
+    unsafe {
+        SendMessageW(
+            child,
+            WM_SETFONT,
+            Some(WPARAM(hfont.0 as usize)),
+            Some(LPARAM(1)),
+        );
+    }
     windows::core::BOOL(1)
 }
 
@@ -298,7 +382,11 @@ pub fn make_font(size: i32, bold: bool) -> HFONT {
             0,
             0,
             0,
-            if bold { FW_BOLD.0 as i32 } else { FW_NORMAL.0 as i32 },
+            if bold {
+                FW_BOLD.0 as i32
+            } else {
+                FW_NORMAL.0 as i32
+            },
             0,
             0,
             0,
@@ -320,7 +408,11 @@ pub fn make_mono_font(size: i32, bold: bool) -> HFONT {
             0,
             0,
             0,
-            if bold { FW_BOLD.0 as i32 } else { FW_NORMAL.0 as i32 },
+            if bold {
+                FW_BOLD.0 as i32
+            } else {
+                FW_NORMAL.0 as i32
+            },
             0,
             0,
             0,
@@ -338,7 +430,12 @@ pub fn make_mono_font(size: i32, bold: bool) -> HFONT {
 pub fn check_set(parent: HWND, id: i32, checked: bool) {
     unsafe {
         let ctl = get_dlg_item(parent, id);
-        SendMessageW(ctl, BM_SETCHECK, Some(WPARAM(if checked { 1 } else { 0 })), Some(LPARAM(0)));
+        SendMessageW(
+            ctl,
+            BM_SETCHECK,
+            Some(WPARAM(if checked { 1 } else { 0 })),
+            Some(LPARAM(0)),
+        );
     }
 }
 

@@ -99,7 +99,12 @@ fn pad_clamp(r: &RECT, win: &RECT) -> RECT {
         top -= bottom - win.bottom;
         bottom = win.bottom;
     }
-    RECT { left: padded.left, top: top.max(win.top), right: padded.right, bottom: bottom.min(win.bottom) }
+    RECT {
+        left: padded.left,
+        top: top.max(win.top),
+        right: padded.right,
+        bottom: bottom.min(win.bottom),
+    }
 }
 
 /// UIA検出結果からキャプチャすべきスクリーン矩形を決める。
@@ -116,25 +121,32 @@ pub fn plan_capture_rect(p: &uia::UiaProbe, win: &RECT, x: i32, y: i32) -> (RECT
     }
     // 緑: TextPattern が見つかった要素
     if let Some(r) = &p.element_rect
-        && rect_valid(r) && v_dist(r, y) < NEAR_Y_PX {
-            return (pad_clamp(r, win), CapKind::Element);
-        }
+        && rect_valid(r)
+        && v_dist(r, y) < NEAR_Y_PX
+    {
+        return (pad_clamp(r, win), CapKind::Element);
+    }
     // 紫: 直下要素。高すぎる場合はカーソル位置の段落を狙った帯へ切り替える
     if let Some(r) = &p.hover_rect
-        && rect_valid(r) && v_dist(r, y) < NEAR_Y_PX {
-            if r.bottom - r.top > HOVER_MAX_H {
-                let band = RECT {
-                    left: r.left,
-                    top: (y - PARA_BAND_H / 2).max(r.top),
-                    right: r.right,
-                    bottom: (y + PARA_BAND_H / 2).min(r.bottom),
-                };
-                return (pad_clamp(&band, win), CapKind::HoverBand);
-            }
-            return (pad_clamp(r, win), CapKind::Hover);
+        && rect_valid(r)
+        && v_dist(r, y) < NEAR_Y_PX
+    {
+        if r.bottom - r.top > HOVER_MAX_H {
+            let band = RECT {
+                left: r.left,
+                top: (y - PARA_BAND_H / 2).max(r.top),
+                right: r.right,
+                bottom: (y + PARA_BAND_H / 2).min(r.bottom),
+            };
+            return (pad_clamp(&band, win), CapKind::HoverBand);
         }
+        return (pad_clamp(r, win), CapKind::Hover);
+    }
     // 橙: 既定のカーソル中心帯
-    (capture::band_screen_rect(win, x, y, BAND_W, BAND_H), CapKind::Band)
+    (
+        capture::band_screen_rect(win, x, y, BAND_W, BAND_H),
+        CapKind::Band,
+    )
 }
 
 /// キャプチャ由来に応じたOCRの行選択モード
@@ -177,7 +189,12 @@ pub fn capture_screen_rect(target: isize, sr: &RECT, y: i32) -> Result<Band, Str
     let (band, rect) =
         capture::crop_with_rect(&full, left, top, w, h).ok_or("このウィンドウは取得できません")?;
     let focus_y = ((y - sr.top.max(r.top)) as f32 * scale_y).max(0.0);
-    Ok(Band { img: band, focus_y, full, rect })
+    Ok(Band {
+        img: band,
+        focus_y,
+        full,
+        rect,
+    })
 }
 
 /// ポインタ直下ウィンドウをキャプチャし、カーソル周辺の帯を切り出す (SPEC §6.3)
@@ -188,7 +205,12 @@ pub fn capture_band(x: i32, y: i32, target: isize, bw: i32, bh: i32) -> Result<B
 }
 
 /// UIA検出結果に基づいてキャプチャ領域を決めて切り出す (黄/緑/紫 → 既定帯の順)
-pub fn capture_probe(x: i32, y: i32, target: isize, probe: &uia::UiaProbe) -> Result<(Band, CapKind), String> {
+pub fn capture_probe(
+    x: i32,
+    y: i32,
+    target: isize,
+    probe: &uia::UiaProbe,
+) -> Result<(Band, CapKind), String> {
     let win = capture::window_frame_rect(HWND(target as *mut _));
     let (rect, kind) = plan_capture_rect(probe, &win, x, y);
     capture_screen_rect(target, &rect, y).map(|b| (b, kind))

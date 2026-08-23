@@ -5,8 +5,8 @@ use crate::capture;
 use crate::config::Config;
 use crate::detect;
 use crate::engine;
-use crate::overlay;
 use crate::logviewer;
+use crate::overlay;
 use crate::region;
 use crate::settings;
 use crate::tray;
@@ -16,24 +16,27 @@ use crate::worker;
 use overlay::OverlayContent;
 use std::cell::RefCell;
 use std::sync::Arc;
-use windows::Win32::Foundation::{
-    HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GetAncestor, GetCursorPos, GetForegroundWindow, MessageBoxW,
-    WindowFromPoint, KillTimer, SetTimer, MB_OK, MB_ICONWARNING,
-};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, HOT_KEY_MODIFIERS, RegisterHotKey, UnregisterHotKey, VK_ESCAPE,
 };
-use windows::core::{w, PCWSTR};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GA_ROOT, GetAncestor, GetCursorPos, KillTimer, MB_ICONWARNING, MB_OK, MessageBoxW,
+    SetForegroundWindow, SetTimer, SetWindowTextW, WindowFromPoint,
+};
+use windows::core::{PCWSTR, w};
 
 /// 埋め込みリソース(build.rs で ID "1" として同梱)からアプリアイコンを取得する。
 #[allow(clippy::manual_dangling_ptr)]
 pub fn app_icon() -> windows::Win32::UI::WindowsAndMessaging::HICON {
     unsafe {
-        let inst = HINSTANCE(windows::Win32::System::LibraryLoader::GetModuleHandleW(None).map(|m| m.0).unwrap_or(std::ptr::null_mut()));
-        windows::Win32::UI::WindowsAndMessaging::LoadIconW(Some(inst), PCWSTR(1usize as *const u16)).unwrap_or_default()
+        let inst = HINSTANCE(
+            windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                .map(|m| m.0)
+                .unwrap_or(std::ptr::null_mut()),
+        );
+        windows::Win32::UI::WindowsAndMessaging::LoadIconW(Some(inst), PCWSTR(1usize as *const u16))
+            .unwrap_or_default()
     }
 }
 
@@ -47,6 +50,7 @@ pub const WM_APP_DETECT: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP +
 
 pub const TIMER_POLL: usize = 1;
 pub const HOTKEY_REGION: i32 = 1;
+pub const MOD_NOREPEAT_VALUE: u32 = 0x4000;
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum Mode {
@@ -70,6 +74,8 @@ pub struct App {
     pub target: isize,
     pub source: String,
     pub translation: Option<String>,
+    /// 通常の翻訳以外の変換結果に使う見出し。None のときは翻訳エンジン名を表示する。
+    pub translation_heading: Option<String>,
     pub status: Option<String>,
     pub badge: Option<String>,
     pub cur_ocr: String,
@@ -132,7 +138,11 @@ impl App {
     /// (再認識ジョブへ渡す用。exe は空文字を None として扱う)。
     pub fn held_ctx(&self) -> worker::AppContext {
         worker::AppContext {
-            exe: if self.app_exe.is_empty() { None } else { Some(self.app_exe.clone()) },
+            exe: if self.app_exe.is_empty() {
+                None
+            } else {
+                Some(self.app_exe.clone())
+            },
             title: self.app_title.clone(),
             uia_path: self.uia_path.clone(),
             uia_json: self.uia_json.clone(),
@@ -161,6 +171,23 @@ pub fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
     })
 }
 
+/// オーバーレイ表示の起点として保存した対象アプリを前面に戻す。
+/// オーバーレイ自身は WS_EX_NOACTIVATE のままなので、クリックを受けた時点で明示的に呼ぶ。
+pub fn activate_overlay_target() -> bool {
+    let Some(target) = with_app(|app| app.target) else {
+        return false;
+    };
+    if target == 0 {
+        return false;
+    }
+    unsafe {
+        let target = HWND(target as *mut _);
+        let root = GetAncestor(target, GA_ROOT);
+        let target = if root.is_invalid() { target } else { root };
+        !target.is_invalid() && SetForegroundWindow(target).as_bool()
+    }
+}
+
 pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
     MAIN_HWND.with(|h| *h.borrow_mut() = main.0 as isize);
     let cur_ocr = cfg.default_ocr.clone();
@@ -179,6 +206,7 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
             target: 0,
             source: String::new(),
             translation: None,
+            translation_heading: None,
             status: None,
             badge: None,
             cur_ocr,
@@ -216,7 +244,12 @@ pub fn init(cfg: Config, instance: HINSTANCE, main: HWND, overlay: HWND) {
 }
 
 #[allow(clippy::missing_safety_doc)]
-pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+pub unsafe extern "system" fn wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match msg {
         windows::Win32::UI::WindowsAndMessaging::WM_TIMER if wparam.0 == TIMER_POLL => {
             tick();
@@ -272,7 +305,9 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                     overlay::refresh(app.overlay);
                 }
             });
-            unsafe { windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam) }
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
         }
         WM_APP_DETECT => {
             let info = unsafe { Box::from_raw(lparam.0 as *mut detect::DetectInfo) };
@@ -289,13 +324,18 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         windows::Win32::UI::WindowsAndMessaging::WM_DESTROY => {
             tray::remove_icon(hwnd);
             unsafe {
-                let _ = windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(Some(hwnd), HOTKEY_REGION);
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey(
+                    Some(hwnd),
+                    HOTKEY_REGION,
+                );
                 let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(Some(hwnd), TIMER_POLL);
                 windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
             }
             LRESULT(0)
         }
-        _ => unsafe { windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam) },
+        _ => unsafe {
+            windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
+        },
     }
 }
 
@@ -347,19 +387,18 @@ fn tick_edit_undo_hotkey() {
 
 /// 100ms周期のポーリング (SPEC §4)
 pub fn tick() {
+    // 範囲選択ウィンドウが前面化できなかった場合もESCを取りこぼさない。
+    // このtickでは続けてピン留めオーバーレイまで閉じないよう、閉じた時点で戻る。
+    if region::cancel_if_escape_pressed() {
+        return;
+    }
     tick_edit_undo_hotkey();
     let action = with_app(|app| {
         let down = unsafe { (GetAsyncKeyState(app.cfg.hold_vk()) as u16 & 0x8000) != 0 };
         let esc = unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 };
 
-        // ピン留め中のESCは、翻訳対象アプリが前面のときに加えて、オーバーレイ自身に
-        // フォーカスがある場合も受け付ける (SPECv0.5.5 §3: 以前は対象アプリ前面時のみで、
-        // オーバーレイをクリックして操作した後はESCで閉じられなかった)。
-        let fg = unsafe { GetForegroundWindow() };
-        let target_active = fg == HWND(app.target as *mut _);
-        let overlay_active = !app.overlay.is_invalid()
-            && unsafe { GetAncestor(fg, GA_ROOT) } == app.overlay;
-        if app.mode == Mode::Pinned && esc && (target_active || overlay_active) {
+        // ピン留め中は前面ウィンドウに依存せずESCで閉じる。
+        if app.mode == Mode::Pinned && esc {
             close_overlay(app);
             app.hold = down;
             return None;
@@ -404,10 +443,12 @@ pub fn tick() {
 /// 領域検出モード (デバッグ) のポーリング
 fn tick_detect() {
     let action = with_app(|app| {
+        let preview_vk = app.cfg.detect_vk();
         let down = unsafe {
             (app.cfg.detect_enabled && (GetAsyncKeyState(app.cfg.hold_vk()) as u16 & 0x8000) != 0)
                 || (app.cfg.preview_detect_enabled
-                    && (GetAsyncKeyState(app.cfg.detect_vk()) as u16 & 0x8000) != 0)
+                    && preview_vk != 0
+                    && (GetAsyncKeyState(preview_vk) as u16 & 0x8000) != 0)
         };
         if !down {
             if app.detect_on {
@@ -478,7 +519,14 @@ fn start_cycle_params(app: &mut App) -> Option<(u64, i32, i32, isize, Config, is
     app.cur_ocr = app.cfg.default_ocr.clone();
     app.cur_tr = app.cfg.default_translator.clone();
     app.cfg.active_api_profile = app.cfg.default_api_profile.clone();
-    Some((app.generation, pt.x, pt.y, target, app.cfg.clone(), app.main.0 as isize))
+    Some((
+        app.generation,
+        pt.x,
+        pt.y,
+        target,
+        app.cfg.clone(),
+        app.main.0 as isize,
+    ))
 }
 
 pub fn close_overlay(app: &mut App) {
@@ -487,6 +535,7 @@ pub fn close_overlay(app: &mut App) {
     app.generation += 1;
     app.source.clear();
     app.translation = None;
+    app.translation_heading = None;
     app.status = None;
     app.badge = None;
     app.error_only = false;
@@ -531,8 +580,16 @@ fn autoload_cached_explanation(app: &mut App) {
         app_exe: app.app_exe.clone(),
         uia_path: app.uia_path.clone(),
         uia_detail: app.uia_json.clone(),
-        ocr_engine: if app.via_uia { String::new() } else { app.cur_ocr.clone() },
-        tr_engine: if app.translation.is_some() { app.cur_tr.clone() } else { String::new() },
+        ocr_engine: if app.via_uia {
+            String::new()
+        } else {
+            app.cur_ocr.clone()
+        },
+        tr_engine: if app.translation.is_some() && app.translation_heading.is_none() {
+            app.cur_tr.clone()
+        } else {
+            String::new()
+        },
     };
     let Some(prompt) = crate::worker::build_explain_prompt_for(&app.cfg, &profile, &pc) else {
         return;
@@ -554,15 +611,28 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
         match msg {
             worker::WorkerMsg::Source(src) => {
                 let worker::SourceMsg {
-                    text, method, engine, img, pin, anchor, focus, ms, capture_id, recog_id, ctx,
-                    full_img, crop_rect,
+                    text,
+                    method,
+                    engine,
+                    img,
+                    pin,
+                    anchor,
+                    focus,
+                    ms,
+                    capture_id,
+                    recog_id,
+                    ctx,
+                    full_img,
+                    crop_rect,
                 } = *src;
                 // OCR結果が届いたので読み取り中表示を解除する (SPECv0.5.4 §6)
                 app.ocr_pending = false;
-                if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source {
+                if !app.error_only && app.status.is_none() && !text.is_empty() && text == app.source
+                {
                     return;
                 }
                 app.source = text;
+                app.translation_heading = None;
                 app.via_uia = method == "UIA";
                 // クリップボードのテキスト取り込みはOCRを経ていない (SPECv0.5.4 §20)
                 app.via_clipboard = method == "clipboard";
@@ -606,12 +676,22 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 } else if app.mode == Mode::Recognizing {
                     app.mode = Mode::ShowingHold;
                 }
-                util::perf_log(app.cfg.perf_log, &format!("show-source {method} total={ms}ms"));
+                util::perf_log(
+                    app.cfg.perf_log,
+                    &format!("show-source {method} total={ms}ms"),
+                );
                 sync_overlay(app);
             }
-            worker::WorkerMsg::Translation { text, badge, ms, recog_id } => {
+            worker::WorkerMsg::Translation {
+                text,
+                badge,
+                heading,
+                ms,
+                recog_id,
+            } => {
                 app.tr_pending = false;
                 app.translation = Some(text);
+                app.translation_heading = heading;
                 app.status = None;
                 app.error_only = false;
                 app.badge = badge;
@@ -625,6 +705,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
             worker::WorkerMsg::TranslationSkipped { msg } => {
                 app.tr_pending = false;
                 app.translation = None;
+                app.translation_heading = None;
                 app.status = Some(msg);
                 app.error_only = false;
                 sync_overlay(app);
@@ -634,10 +715,15 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                 // 見出し・エンジン切替チップは残したいので translation を None にはしない。
                 // 本文だけ空にし、エラー内容はシステムメッセージ行 (status) へ出す。
                 app.translation = Some(String::new());
+                app.translation_heading = None;
                 app.status = Some(msg);
                 sync_overlay(app);
             }
-            worker::WorkerMsg::Error { msg, anchor, clear_source } => {
+            worker::WorkerMsg::Error {
+                msg,
+                anchor,
+                clear_source,
+            } => {
                 app.explaining = false;
                 app.ocr_pending = false;
                 app.tr_pending = false;
@@ -645,6 +731,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                     // OCRエンジン切替・画像編集後の再認識失敗: 古い認識結果を残さず消す
                     app.source.clear();
                     app.translation = None;
+                    app.translation_heading = None;
                     app.status = Some(msg);
                     app.error_only = false;
                 } else if !app.source.is_empty() || app.last_img.is_some() {
@@ -655,6 +742,7 @@ pub fn handle_worker(generation: u64, lparam: LPARAM) {
                     app.error_only = false;
                 } else {
                     app.translation = None;
+                    app.translation_heading = None;
                     app.status = Some(msg);
                     app.anchor = anchor;
                     app.error_only = true;
@@ -682,11 +770,26 @@ pub fn handle_region(rect: RECT) {
     // 画像編集画面を開いたまま範囲指定した場合も、ホールドキー起動時と同様に
     // 古い編集セッションを破棄してから開始する (展開したまま前の画像が残るのを防ぐ)。
     overlay::exit_edit_mode();
+    // 前回の結果オーバーレイが選択矩形中央に残っていても、起点アプリとして誤採用しない。
+    with_app(|app| overlay::hide(app.overlay));
+    let center = POINT {
+        x: (rect.left + rect.right) / 2,
+        y: (rect.top + rect.bottom) / 2,
+    };
+    let target = unsafe {
+        let root = GetAncestor(WindowFromPoint(center), GA_ROOT);
+        if root.is_invalid() {
+            0
+        } else {
+            root.0 as isize
+        }
+    };
     let Some((generation, cfg, main)) = with_app(|app| {
         overlay::hide(app.overlay);
         app.generation += 1;
         app.mode = Mode::Recognizing;
-        app.origin = POINT { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 };
+        app.origin = center;
+        app.target = target;
         // 範囲指定も起動経路なので、既定エンジン/プロファイルをこの時点で適用する。
         app.cur_ocr = app.cfg.default_ocr.clone();
         app.cur_tr = app.cfg.default_translator.clone();
@@ -708,12 +811,25 @@ pub fn reload_config(hwnd: HWND) {
         app.cfg.active_api_profile = keep_profile;
         // オーバーレイのテーマ設定を反映する (sync_overlay の再描画で配色が切り替わる)
         crate::overlay_layout::apply_theme(&app.cfg.overlay_theme);
+        let main_title = crate::util::to_wide(crate::util::app_display_name(app.cfg.boss_guard));
+        unsafe {
+            let _ = SetWindowTextW(hwnd, PCWSTR(main_title.as_ptr()));
+        }
+        crate::overlay::apply_boss_guard(app.overlay, app.cfg.boss_guard);
+        crate::logviewer::apply_boss_guard(app.cfg.boss_guard);
         unsafe {
             let _ = KillTimer(Some(hwnd), TIMER_POLL);
             SetTimer(Some(hwnd), TIMER_POLL, app.cfg.poll_ms, None);
             let _ = UnregisterHotKey(Some(hwnd), HOTKEY_REGION);
             let (mods, vk) = app.cfg.region_hotkey_parsed();
-            if RegisterHotKey(Some(hwnd), HOTKEY_REGION, HOT_KEY_MODIFIERS(mods), vk).is_err() {
+            if RegisterHotKey(
+                Some(hwnd),
+                HOTKEY_REGION,
+                HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT_VALUE),
+                vk,
+            )
+            .is_err()
+            {
                 MessageBoxW(
                     Some(hwnd),
                     w!("範囲指定ホットキーを登録できませんでした。他のアプリと衝突しています。"),
@@ -726,7 +842,9 @@ pub fn reload_config(hwnd: HWND) {
         // 無条件に ShowWindow するため、設定変更のたびに非表示のオーバーレイが
         // 画面へ出現してしまうのを防ぐ (SPECv0.5.4 §1)。表示中の設定 (テーマ等) は
         // 次回表示時の sync_overlay で反映される。
-        if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(app.overlay) }.as_bool() {
+        if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(app.overlay) }
+            .as_bool()
+        {
             sync_overlay(app);
         }
     });
@@ -764,14 +882,20 @@ pub fn sync_overlay(app: &mut App) {
         tr_labels.push(prof.name.clone());
         tr_enabled.push(true);
     }
-    let explain_keys: Vec<String> = app.cfg.ready_api_profiles().map(|p| p.name.clone()).collect();
+    let explain_keys: Vec<String> = app
+        .cfg
+        .ready_api_profiles()
+        .map(|p| p.name.clone())
+        .collect();
     let explain_labels = explain_keys.clone();
     let explain_enabled = vec![true; explain_keys.len()];
     let content = OverlayContent {
         main_hwnd: app.main.0 as isize,
+        boss_guard: app.cfg.boss_guard,
         anchor: app.anchor,
         source: app.source.clone(),
         translation: app.translation.clone(),
+        translation_heading: app.translation_heading.clone(),
         status: app.status.clone(),
         badge: app.badge.clone(),
         pinned: app.mode == Mode::Pinned,
@@ -780,7 +904,9 @@ pub fn sync_overlay(app: &mut App) {
         source_lang: app.cfg.source_lang.clone(),
         target_lang: app.cfg.target_lang.clone(),
         tr_engine_detail: if app.cur_tr == "llm" {
-            app.cfg.active_profile().map(|p| format!("{} {}", p.name, p.model_name))
+            app.cfg
+                .active_profile()
+                .map(|p| format!("{} {}", p.name, p.model_name))
         } else {
             None
         },
@@ -794,11 +920,21 @@ pub fn sync_overlay(app: &mut App) {
         ocr_keys,
         ocr_labels,
         ocr_enabled,
-        cur_ocr_chip_key: if app.cur_ocr == "llm" { app.cfg.active_api_profile.clone() } else { app.cur_ocr.clone() },
+        cur_ocr_chip_key: if app.cur_ocr == "llm" {
+            app.cfg.active_api_profile.clone()
+        } else {
+            app.cur_ocr.clone()
+        },
         tr_keys,
         tr_labels,
         tr_enabled,
-        cur_tr_chip_key: if app.cur_tr == "llm" { app.cfg.active_api_profile.clone() } else { app.cur_tr.clone() },
+        cur_tr_chip_key: if app.translation_heading.is_some() {
+            String::new()
+        } else if app.cur_tr == "llm" {
+            app.cfg.active_api_profile.clone()
+        } else {
+            app.cur_tr.clone()
+        },
         explanation: app.explanation.clone(),
         explaining: app.explaining,
         ocr_pending: app.ocr_pending,

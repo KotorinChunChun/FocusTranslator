@@ -5,15 +5,36 @@
 // 結果はメモリ内キャッシュ (SPEC: キャッシュヒット時 100〜200ms台)。
 // ログDB用に送受信JSON・トークン・言語・実際に使ったエンジンも返す。
 use crate::config::Config;
+use percent_encoding::percent_decode_str;
+use regex::Regex;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
-/// キャッシュキー: (エンジン, プロファイル, 翻訳元言語, 訳先言語, 原文)。
+/// キャッシュキー: (エンジン, プロファイル, 翻訳元言語, 訳先言語, 原文, 添付画像hash)。
 /// LLM翻訳プロンプトは {{source_lang}} を含むため、元言語もキーに含める
 /// (SPECv0.5.3: 元言語だけを変更した直後に古い訳文が返るのを防ぐ)。
-type CacheKey = (String, Option<String>, String, String, String);
+type CacheKey = (String, Option<String>, String, String, String, String);
 static CACHE: Mutex<Option<HashMap<CacheKey, String>>> = Mutex::new(None);
 const CACHE_MAX: usize = 500;
+
+/// `%HH` が2組以上連続する箇所を、パーセントエンコーディングされた文字列とみなす。
+/// 単独の `%20` などは通常の文章にも現れうるため対象外とする。
+static PERCENT_ENCODED_RE: OnceLock<Regex> = OnceLock::new();
+
+/// パーセントエンコーディングを含む文字列なら、文字列全体をUTF-8としてデコードする。
+/// 検知条件を満たさない場合や、デコード後が不正なUTF-8になる場合は None を返す。
+pub fn decode_percent_encoded(text: &str) -> Option<String> {
+    let re = PERCENT_ENCODED_RE
+        .get_or_init(|| Regex::new(r"(?:%[0-9A-Fa-f]{2}){2}").expect("固定正規表現は有効"));
+    if !re.is_match(text) {
+        return None;
+    }
+
+    percent_decode_str(text)
+        .decode_utf8()
+        .ok()
+        .map(|decoded| decoded.into_owned())
+}
 
 /// クラウドREST呼び出しの詳細(ログDB用)
 #[derive(Default, Clone)]
@@ -69,11 +90,17 @@ fn is_japanese_char(c: char) -> bool {
 
 /// 同一 request_json の翻訳結果がDBログに既にあれば (text, recognition_id) を返す。
 /// ログ機能OFF時はDBに触れず常に None (未初期化DBファイルを不用意に作らないため)。
-fn check_db_cache(cfg: &Config, engine: &str, profile: Option<&str>, request_json: &str) -> Option<(String, i64)> {
+fn check_db_cache(
+    cfg: &Config,
+    engine: &str,
+    profile: Option<&str>,
+    request_json: &str,
+) -> Option<(String, i64)> {
     if !cfg.log_enabled {
         return None;
     }
-    crate::logdb::find_cached_translation(engine, profile, request_json).map(|(rid, text)| (text, rid))
+    crate::logdb::find_cached_translation(engine, profile, request_json)
+        .map(|(rid, text)| (text, rid))
 }
 
 /// 翻訳方向 (source, target) を決める。常に設定通り(cfg.source_lang → cfg.target_lang)に固定し、
@@ -104,6 +131,8 @@ pub fn translate(
     cfg: &Config,
     text: &str,
     ctx: &crate::config::PromptContext,
+    image_png_b64: Option<&str>,
+    image_hash: Option<&str>,
 ) -> Result<Translated, String> {
     let mut ctx = ctx.clone();
     ctx.original_text = text.to_string();
@@ -111,8 +140,19 @@ pub fn translate(
     ctx.tr_engine.clear();
     let ctx = &ctx;
     let (source, target) = (cfg.source_lang.clone(), cfg.target_lang.clone());
-    let profile = if engine == "llm" { Some(cfg.active_api_profile.clone()) } else { None };
-    let key = (engine.to_string(), profile, source.clone(), target.clone(), text.to_string());
+    let profile = if engine == "llm" {
+        Some(cfg.active_api_profile.clone())
+    } else {
+        None
+    };
+    let key = (
+        engine.to_string(),
+        profile,
+        source.clone(),
+        target.clone(),
+        text.to_string(),
+        image_hash.unwrap_or_default().to_string(),
+    );
 
     // キャッシュ確認
     {
@@ -135,7 +175,8 @@ pub fn translate(
 
     // エラーメッセージにURL等の形でAPIキーが混入しても表示・ログへ漏れないよう伏字化する
     // (SPECv0.5.3)。
-    let result = translate_once(engine, cfg, text, &target, ctx).map_err(|e| mask_keys(cfg, &e));
+    let result = translate_once(engine, cfg, text, &target, ctx, image_png_b64, image_hash)
+        .map_err(|e| mask_keys(cfg, &e));
     match result {
         Ok((t, detail, db_rid)) => {
             let mut guard = CACHE.lock().unwrap();
@@ -165,13 +206,15 @@ fn translate_once(
     text: &str,
     target: &str,
     ctx: &crate::config::PromptContext,
+    image_png_b64: Option<&str>,
+    image_hash: Option<&str>,
 ) -> Result<(String, TransDetail, Option<i64>), String> {
     match engine {
         "local" => translate_local(cfg, text, target).map(|t| (t, TransDetail::default(), None)),
         "deepl" => translate_deepl(cfg, text, target),
         "google" => translate_google(cfg, text, target),
         // LLMの翻訳方向はプロンプトテンプレート側で cfg から埋める
-        "llm" => translate_llm(cfg, ctx),
+        "llm" => translate_llm(cfg, ctx, image_png_b64, image_hash),
         other => Err(format!("不明な翻訳エンジン: {other}")),
     }
 }
@@ -181,13 +224,21 @@ fn translate_local(_cfg: &Config, text: &str, target: &str) -> Result<String, St
     crate::onnx_translate::translate(text, target == "ja")
 }
 
-fn translate_deepl(cfg: &Config, text: &str, target: &str) -> Result<(String, TransDetail, Option<i64>), String> {
+fn translate_deepl(
+    cfg: &Config,
+    text: &str,
+    target: &str,
+) -> Result<(String, TransDetail, Option<i64>), String> {
     let key = cfg.deepl_key();
     if key.is_empty() {
         return Err("DeepL APIキーが未設定です".into());
     }
     // ":fx" で終わるキーは Free プラン
-    let host = if key.ends_with(":fx") { "api-free.deepl.com" } else { "api.deepl.com" };
+    let host = if key.ends_with(":fx") {
+        "api-free.deepl.com"
+    } else {
+        "api.deepl.com"
+    };
     let url = format!("https://{host}/v2/translate");
     let body = serde_json::json!({
         "text": [text],
@@ -197,15 +248,20 @@ fn translate_deepl(cfg: &Config, text: &str, target: &str) -> Result<(String, Tr
     // 送信前にDBキャッシュを検索し、同一request_jsonの成功済み翻訳があればAPIを呼ばない
     // (SPECv0.4.8追補: 別の親であっても検索対象)。
     if let Some((cached_text, rid)) = check_db_cache(cfg, "deepl", None, &req_json) {
-        let detail = TransDetail { request_json: Some(req_json), ..Default::default() };
+        let detail = TransDetail {
+            request_json: Some(req_json),
+            ..Default::default()
+        };
         return Ok((cached_text, detail, Some(rid)));
     }
     let mut res = ureq::post(&url)
         .header("Authorization", format!("DeepL-Auth-Key {key}"))
         .send_json(&body)
         .map_err(|e| format!("DeepL呼び出し失敗: {e}"))?;
-    let v: serde_json::Value =
-        res.body_mut().read_json().map_err(|e| format!("DeepL応答解析失敗: {e}"))?;
+    let v: serde_json::Value = res
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("DeepL応答解析失敗: {e}"))?;
     let detail = TransDetail {
         request_json: Some(req_json),
         response_json: Some(mask_keys(cfg, &v.to_string())),
@@ -218,7 +274,11 @@ fn translate_deepl(cfg: &Config, text: &str, target: &str) -> Result<(String, Tr
         .ok_or("DeepL応答に訳文がありません".into())
 }
 
-fn translate_google(cfg: &Config, text: &str, target: &str) -> Result<(String, TransDetail, Option<i64>), String> {
+fn translate_google(
+    cfg: &Config,
+    text: &str,
+    target: &str,
+) -> Result<(String, TransDetail, Option<i64>), String> {
     let key = cfg.google_key();
     if key.is_empty() {
         return Err("Google APIキーが未設定です".into());
@@ -229,15 +289,20 @@ fn translate_google(cfg: &Config, text: &str, target: &str) -> Result<(String, T
     let body = serde_json::json!({ "q": text, "target": target, "format": "text" });
     let req_json = mask_keys(cfg, &body.to_string());
     if let Some((cached_text, rid)) = check_db_cache(cfg, "google", None, &req_json) {
-        let detail = TransDetail { request_json: Some(req_json), ..Default::default() };
+        let detail = TransDetail {
+            request_json: Some(req_json),
+            ..Default::default()
+        };
         return Ok((cached_text, detail, Some(rid)));
     }
     let mut res = ureq::post(url)
         .header("X-goog-api-key", &key)
         .send_json(&body)
         .map_err(|e| format!("Google翻訳呼び出し失敗: {e}"))?;
-    let v: serde_json::Value =
-        res.body_mut().read_json().map_err(|e| format!("Google応答解析失敗: {e}"))?;
+    let v: serde_json::Value = res
+        .body_mut()
+        .read_json()
+        .map_err(|e| format!("Google応答解析失敗: {e}"))?;
     let detail = TransDetail {
         request_json: Some(req_json),
         response_json: Some(mask_keys(cfg, &v.to_string())),
@@ -254,18 +319,43 @@ fn translate_google(cfg: &Config, text: &str, target: &str) -> Result<(String, T
 fn translate_llm(
     cfg: &Config,
     ctx: &crate::config::PromptContext,
+    image_png_b64: Option<&str>,
+    image_hash: Option<&str>,
 ) -> Result<(String, TransDetail, Option<i64>), String> {
-    let prof = cfg.active_profile().ok_or("LLM APIプロファイルが設定されていません")?;
-    let prompt = cfg.fill_prompt(&prof.translate_prompt, ctx);
-    let req = crate::llm_api::LlmRequest::text(&prompt);
-    let req_json = mask_keys(cfg, &crate::llm_api::build_request_json(prof, &req));
+    let prof = cfg
+        .active_profile()
+        .ok_or("LLM APIプロファイルが設定されていません")?;
+    let mut prompt = cfg.fill_prompt(&prof.translate_prompt, ctx);
+    if image_png_b64.is_some() {
+        prompt.push_str("\n\n## 添付画像について\n添付画像は対象アプリ全体のスクリーンショットです。赤枠で囲まれた箇所が翻訳対象です。原文テキストと照合し、画面全体の文脈を考慮して翻訳してください。");
+    }
+    let req = crate::llm_api::LlmRequest {
+        prompt: &prompt,
+        image_png_b64,
+        json_mode: false,
+    };
+    // DBキャッシュ・ログには巨大なbase64本体を残さず、画像hashだけを識別子として記録する。
+    let log_image = image_hash.map(|hash| format!("sha256:{hash}"));
+    let log_req = crate::llm_api::LlmRequest {
+        prompt: &prompt,
+        image_png_b64: log_image.as_deref(),
+        json_mode: false,
+    };
+    let req_json = mask_keys(cfg, &crate::llm_api::build_request_json(prof, &log_req));
     if let Some((cached_text, rid)) = check_db_cache(cfg, "llm", Some(&prof.name), &req_json) {
-        let detail = TransDetail { request_json: Some(req_json), ..Default::default() };
+        let detail = TransDetail {
+            request_json: Some(req_json),
+            ..Default::default()
+        };
         return Ok((cached_text, detail, Some(rid)));
     }
     let res = crate::llm_api::call(prof, &req)?;
+    debug_assert!(
+        !res.request_json.is_empty(),
+        "LLM呼び出しでは送信リクエストJSONが記録される"
+    );
     let detail = TransDetail {
-        request_json: Some(mask_keys(cfg, &res.request_json)),
+        request_json: Some(req_json),
         response_json: Some(mask_keys(cfg, &res.response_json)),
         tokens_in: res.tokens_in,
         tokens_out: res.tokens_out,
@@ -275,7 +365,32 @@ fn translate_llm(
 
 #[cfg(test)]
 mod tests {
-    use super::is_source_lang_text;
+    use super::{decode_percent_encoded, is_source_lang_text};
+
+    #[test]
+    fn 連続したパーセントエンコーディングをデコードする() {
+        assert_eq!(
+            decode_percent_encoded(
+                "docs/%E6%B5%B7%E5%A4%96%E8%A3%BD%E3%82%BD%E3%83%95%E3%83%88%E3%81%AEUI%E3%81%AE%E7%BF%BB%E8%A8%B3%E3%81%8A%E3%82%88%E3%81%B3%E6%A9%9F%E8%83%BD%E8%A7%A3%E8%AA%AC.png"
+            ),
+            Some("docs/海外製ソフトのUIの翻訳および機能解説.png".to_string())
+        );
+    }
+
+    #[test]
+    fn 小文字の16進表記もデコードする() {
+        assert_eq!(decode_percent_encoded("%e3%81%82"), Some("あ".to_string()));
+    }
+
+    #[test]
+    fn 単独のパーセントエンコーディングは検知しない() {
+        assert_eq!(decode_percent_encoded("進捗%20です"), None);
+    }
+
+    #[test]
+    fn 不正なutf8はデコード結果にしない() {
+        assert_eq!(decode_percent_encoded("%FF%FF"), None);
+    }
 
     #[test]
     fn en_通常の英文は翻訳対象() {
@@ -335,4 +450,3 @@ mod tests {
         assert!(is_source_lang_text("", "12345"));
     }
 }
-

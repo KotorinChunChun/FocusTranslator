@@ -2,19 +2,17 @@
 // ElementFromPoint → TextPattern → RangeFromPoint → 行単位に拡張 → GetText
 // TextPattern が無ければ祖先を数段探索。取得不可なら text=None を返し OCR 経路へ。
 use windows::Win32::Foundation::{LPARAM, POINT, RECT, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::Ole::{
     SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetUBound, SafeArrayUnaccessData,
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTextPattern,
-    IUIAutomationTextRange, IUIAutomationTextRangeArray, IUIAutomationValuePattern,
-    TextUnit_Line, TextUnit_Paragraph, UIA_TextPatternId, UIA_ValuePatternId,
-    UIA_DocumentControlTypeId, UIA_EditControlTypeId,
-    UIA_AppBarControlTypeId, UIA_ButtonControlTypeId, UIA_CalendarControlTypeId,
-    UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId,
-    UIA_DataGridControlTypeId, UIA_DataItemControlTypeId, UIA_GroupControlTypeId,
+    IUIAutomationTextRange, IUIAutomationTextRangeArray, IUIAutomationValuePattern, TextUnit_Line,
+    TextUnit_Paragraph, UIA_AppBarControlTypeId, UIA_ButtonControlTypeId,
+    UIA_CalendarControlTypeId, UIA_CheckBoxControlTypeId, UIA_ComboBoxControlTypeId,
+    UIA_CustomControlTypeId, UIA_DataGridControlTypeId, UIA_DataItemControlTypeId,
+    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_GroupControlTypeId,
     UIA_HeaderControlTypeId, UIA_HeaderItemControlTypeId, UIA_HyperlinkControlTypeId,
     UIA_ImageControlTypeId, UIA_ListControlTypeId, UIA_ListItemControlTypeId,
     UIA_MenuBarControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
@@ -22,17 +20,21 @@ use windows::Win32::UI::Accessibility::{
     UIA_ScrollBarControlTypeId, UIA_SemanticZoomControlTypeId, UIA_SeparatorControlTypeId,
     UIA_SliderControlTypeId, UIA_SpinnerControlTypeId, UIA_SplitButtonControlTypeId,
     UIA_StatusBarControlTypeId, UIA_TabControlTypeId, UIA_TabItemControlTypeId,
-    UIA_TableControlTypeId, UIA_TextControlTypeId, UIA_ThumbControlTypeId,
+    UIA_TableControlTypeId, UIA_TextControlTypeId, UIA_TextPatternId, UIA_ThumbControlTypeId,
     UIA_TitleBarControlTypeId, UIA_ToolBarControlTypeId, UIA_ToolTipControlTypeId,
-    UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_WindowControlTypeId,
+    UIA_TreeControlTypeId, UIA_TreeItemControlTypeId, UIA_ValuePatternId, UIA_WindowControlTypeId,
 };
+use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 use windows::core::Interface;
 
 /// UIA由来テキストに混入する不可視文字か (U+FFFC: 埋め込みオブジェクトの代替文字。
 /// Teams等のリッチテキストではアイコン/アバター1個につき1文字入り、大量に混入することがある。
 /// ゼロ幅文字・BOMも同様に翻訳対象として無意味なため除去する)
 fn is_invisible_char(c: char) -> bool {
-    matches!(c, '\u{FFFC}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}')
+    matches!(
+        c,
+        '\u{FFFC}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'
+    )
 }
 
 /// カーソル位置の段落/行が特定できない場合に、UIA全文をそのまま採用してよい上限文字数。
@@ -49,7 +51,10 @@ fn should_adopt_fulltext(char_count: usize) -> bool {
 /// UIAから取得したテキストの不可視文字を除去する。除去跡が単語同士の連結にならないよう
 /// 一旦空白へ置換してから、行を保ったまま連続する空白を1つに畳む。
 fn sanitize_uia_text(s: &str) -> String {
-    let replaced: String = s.chars().map(|c| if is_invisible_char(c) { ' ' } else { c }).collect();
+    let replaced: String = s
+        .chars()
+        .map(|c| if is_invisible_char(c) { ' ' } else { c })
+        .collect();
     replaced
         .lines()
         .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -76,71 +81,95 @@ fn find_text_hit(auto: &IUIAutomation, el: IUIAutomationElement, pt: POINT) -> O
             // カーソルが要素の領域から大きく外れている場合は誤検出を防ぐ
             if let Ok(rect) = e.CurrentBoundingRectangle() {
                 let margin = 16;
-                if pt.x < rect.left - margin || pt.x > rect.right + margin || pt.y < rect.top - margin || pt.y > rect.bottom + margin {
+                if pt.x < rect.left - margin
+                    || pt.x > rect.right + margin
+                    || pt.y < rect.top - margin
+                    || pt.y > rect.bottom + margin
+                {
                     cur = walker.GetParentElement(&e).ok();
                     continue;
                 }
             }
 
-            let ctrl_type = e.CurrentControlType().unwrap_or(windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(0));
-            let is_edit = ctrl_type == UIA_EditControlTypeId || ctrl_type == UIA_DocumentControlTypeId;
+            let ctrl_type = e
+                .CurrentControlType()
+                .unwrap_or(windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID(0));
+            let is_edit =
+                ctrl_type == UIA_EditControlTypeId || ctrl_type == UIA_DocumentControlTypeId;
 
             if let Ok(unk) = e.GetCurrentPattern(UIA_TextPatternId)
-                && let Ok(tp) = unk.cast::<IUIAutomationTextPattern>() {
+                && let Ok(tp) = unk.cast::<IUIAutomationTextPattern>()
+            {
+                // 複数行Edit/Documentで、後段のRangeFromPointによる段落/行特定が
+                // 失敗した場合の最終フォールバック候補。単一行なら従来通り即採用する。
+                let mut fulltext_fallback: Option<(IUIAutomationTextRange, String)> = None;
 
-                    // 複数行Edit/Documentで、後段のRangeFromPointによる段落/行特定が
-                    // 失敗した場合の最終フォールバック候補。単一行なら従来通り即採用する。
-                    let mut fulltext_fallback: Option<(IUIAutomationTextRange, String)> = None;
-
-                    if is_edit
-                        && let Ok(doc_range) = tp.DocumentRange()
-                        && let Ok(full_text) = doc_range.GetText(-1)
-                    {
-                        let full_str = sanitize_uia_text(&full_text.to_string());
-                        let is_multiline = full_str.contains('\n') || full_str.contains('\r');
-                        let line = full_str.trim().to_string();
-                        if !is_multiline {
-                            if !line.is_empty() {
-                                return Some(TextHit { element: e, range: Some(doc_range), text: line });
-                            }
-                        } else if !line.is_empty() {
-                            fulltext_fallback = Some((doc_range, line));
+                if is_edit
+                    && let Ok(doc_range) = tp.DocumentRange()
+                    && let Ok(full_text) = doc_range.GetText(-1)
+                {
+                    let full_str = sanitize_uia_text(&full_text.to_string());
+                    let is_multiline = full_str.contains('\n') || full_str.contains('\r');
+                    let line = full_str.trim().to_string();
+                    if !is_multiline {
+                        if !line.is_empty() {
+                            return Some(TextHit {
+                                element: e,
+                                range: Some(doc_range),
+                                text: line,
+                            });
                         }
+                    } else if !line.is_empty() {
+                        fulltext_fallback = Some((doc_range, line));
                     }
-
-                    if let Ok(range) = tp.RangeFromPoint(pt) {
-                        // まず段落単位で拡張する: 右端で折り返された文も改行を跨いで
-                        // 1つの段落として正確に取れる (ユーザー要望)。
-                        // 取れない・長すぎる場合は従来の行単位へフォールバック。
-                        if let Ok(para) = range.Clone() {
-                            let _ = para.ExpandToEnclosingUnit(TextUnit_Paragraph);
-                            if let Ok(t) = para.GetText(1200) {
-                                let s = sanitize_uia_text(&t.to_string());
-                                let lines: Vec<String> =
-                                    s.lines().map(|l| l.trim().to_string()).collect();
-                                let joined = crate::ocr::join_paragraph(&lines);
-                                if !joined.is_empty() && joined.chars().count() <= 800 {
-                                    return Some(TextHit { element: e, range: Some(para), text: joined });
-                                }
-                            }
-                        }
-                        let _ = range.ExpandToEnclosingUnit(TextUnit_Line);
-                        if let Ok(text) = range.GetText(512) {
-                            let s = sanitize_uia_text(&text.to_string());
-                            let line = first_meaningful_line(&s);
-                            if !line.is_empty() {
-                                return Some(TextHit { element: e, range: Some(range), text: line });
-                            }
-                        }
-                    }
-
-                    // 段落/行が特定できなかった。全文が短ければ(UIA_FULLTEXT_MAX以下)
-                    // OCRへ落とさずそのまま採用する (SPECv0.5追補: UIA優先強化)。
-                    if let Some((range, text)) = fulltext_fallback
-                        && should_adopt_fulltext(text.chars().count()) {
-                            return Some(TextHit { element: e, range: Some(range), text });
-                        }
                 }
+
+                if let Ok(range) = tp.RangeFromPoint(pt) {
+                    // まず段落単位で拡張する: 右端で折り返された文も改行を跨いで
+                    // 1つの段落として正確に取れる (ユーザー要望)。
+                    // 取れない・長すぎる場合は従来の行単位へフォールバック。
+                    if let Ok(para) = range.Clone() {
+                        let _ = para.ExpandToEnclosingUnit(TextUnit_Paragraph);
+                        if let Ok(t) = para.GetText(1200) {
+                            let s = sanitize_uia_text(&t.to_string());
+                            let lines: Vec<String> =
+                                s.lines().map(|l| l.trim().to_string()).collect();
+                            let joined = crate::ocr::join_paragraph(&lines);
+                            if !joined.is_empty() && joined.chars().count() <= 800 {
+                                return Some(TextHit {
+                                    element: e,
+                                    range: Some(para),
+                                    text: joined,
+                                });
+                            }
+                        }
+                    }
+                    let _ = range.ExpandToEnclosingUnit(TextUnit_Line);
+                    if let Ok(text) = range.GetText(512) {
+                        let s = sanitize_uia_text(&text.to_string());
+                        let line = first_meaningful_line(&s);
+                        if !line.is_empty() {
+                            return Some(TextHit {
+                                element: e,
+                                range: Some(range),
+                                text: line,
+                            });
+                        }
+                    }
+                }
+
+                // 段落/行が特定できなかった。全文が短ければ(UIA_FULLTEXT_MAX以下)
+                // OCRへ落とさずそのまま採用する (SPECv0.5追補: UIA優先強化)。
+                if let Some((range, text)) = fulltext_fallback
+                    && should_adopt_fulltext(text.chars().count())
+                {
+                    return Some(TextHit {
+                        element: e,
+                        range: Some(range),
+                        text,
+                    });
+                }
+            }
 
             // Win32 EDIT 等 TextPattern 非対応のコントロールでは上のTextPattern経路が
             // 何も返さない (ヒットテストは正しく命中しているが GetCurrentPattern が失敗する)。
@@ -152,7 +181,11 @@ fn find_text_hit(auto: &IUIAutomation, el: IUIAutomationElement, pt: POINT) -> O
             {
                 let line = sanitize_uia_text(&val.to_string()).trim().to_string();
                 if !line.is_empty() {
-                    return Some(TextHit { element: e, range: None, text: line });
+                    return Some(TextHit {
+                        element: e,
+                        range: None,
+                        text: line,
+                    });
                 }
             }
             cur = walker.GetParentElement(&e).ok();
@@ -251,7 +284,11 @@ fn selected_text_via_win32_edit(e: &IUIAutomationElement) -> Option<String> {
         if trimmed.chars().count() > SELECTED_TEXT_MAX {
             return Some(crate::util::truncate_chars(trimmed, SELECTED_TEXT_MAX));
         }
-        if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
     }
 }
 
@@ -289,7 +326,9 @@ pub fn probe_at_point(x: i32, y: i32) -> UiaProbe {
         selected_text: None,
     };
     unsafe {
-        let Ok(auto) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {
+        let Ok(auto) =
+            CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+        else {
             return p;
         };
         let pt = POINT { x, y };
@@ -332,7 +371,9 @@ pub fn probe_at_point(x: i32, y: i32) -> UiaProbe {
 fn range_rects(range: &IUIAutomationTextRange) -> Vec<RECT> {
     let mut out = Vec::new();
     unsafe {
-        let Ok(sa) = range.GetBoundingRectangles() else { return out };
+        let Ok(sa) = range.GetBoundingRectangles() else {
+            return out;
+        };
         if sa.is_null() {
             return out;
         }
@@ -347,7 +388,12 @@ fn range_rects(range: &IUIAutomationTextRange) -> Vec<RECT> {
                     let t = *vals.add(i + 1) as i32;
                     let w = *vals.add(i + 2) as i32;
                     let h = *vals.add(i + 3) as i32;
-                    out.push(RECT { left: l, top: t, right: l + w, bottom: t + h });
+                    out.push(RECT {
+                        left: l,
+                        top: t,
+                        right: l + w,
+                        bottom: t + h,
+                    });
                     i += 4;
                 }
             }
@@ -359,7 +405,11 @@ fn range_rects(range: &IUIAutomationTextRange) -> Vec<RECT> {
 }
 
 fn first_meaningful_line(s: &str) -> String {
-    s.lines().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("").to_string()
+    s.lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// パスノードの種別。祖先ノード(パス階層)か、末端ノードの子孫テキストを連結した合成ノードか。
@@ -400,7 +450,6 @@ pub struct UiaPathNode {
     pub rect: Option<(i32, i32, i32, i32)>,
 }
 
-
 /// 子孫走査の上限(パフォーマンスと無関係テキスト混入の抑制のため)
 const DESC_MAX_DEPTH: u32 = 6;
 const DESC_MAX_NODES: usize = 200;
@@ -413,7 +462,9 @@ const DESC_MAX_CHARS: usize = 4000;
 /// 解説機能の同一コンテキスト判定キーや認識ログにも使う。
 pub fn path_nodes_at_point(x: i32, y: i32) -> Vec<UiaPathNode> {
     unsafe {
-        let Ok(auto) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else {
+        let Ok(auto) =
+            CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+        else {
             return Vec::new();
         };
         let Ok(el) = auto.ElementFromPoint(POINT { x, y }) else {
@@ -450,7 +501,15 @@ pub fn path_nodes_at_point(x: i32, y: i32) -> Vec<UiaPathNode> {
         let mut visited = DESC_MAX_NODES;
         let mut budget = DESC_MAX_CHARS;
         let mut seen = std::collections::HashSet::new();
-        collect_descendant_texts(&walker, &leaf, DESC_MAX_DEPTH, &mut visited, &mut budget, &mut seen, &mut lines);
+        collect_descendant_texts(
+            &walker,
+            &leaf,
+            DESC_MAX_DEPTH,
+            &mut visited,
+            &mut budget,
+            &mut seen,
+            &mut lines,
+        );
         if !lines.is_empty() {
             path.push(UiaPathNode {
                 label: "子要素".into(),
@@ -477,20 +536,22 @@ fn element_own_text(e: &IUIAutomationElement) -> String {
         if let Ok(unk) = e.GetCurrentPattern(UIA_TextPatternId)
             && let Ok(tp) = unk.cast::<IUIAutomationTextPattern>()
             && let Ok(doc) = tp.DocumentRange()
-            && let Ok(t) = doc.GetText(4000) {
-                let s = sanitize_uia_text(&t.to_string());
-                if !s.trim().is_empty() {
-                    return s.trim().to_string();
-                }
+            && let Ok(t) = doc.GetText(4000)
+        {
+            let s = sanitize_uia_text(&t.to_string());
+            if !s.trim().is_empty() {
+                return s.trim().to_string();
             }
+        }
         if let Ok(unk) = e.GetCurrentPattern(UIA_ValuePatternId)
             && let Ok(vp) = unk.cast::<IUIAutomationValuePattern>()
-            && let Ok(val) = vp.CurrentValue() {
-                let s = sanitize_uia_text(&val.to_string());
-                if !s.trim().is_empty() {
-                    return s.trim().to_string();
-                }
+            && let Ok(val) = vp.CurrentValue()
+        {
+            let s = sanitize_uia_text(&val.to_string());
+            if !s.trim().is_empty() {
+                return s.trim().to_string();
             }
+        }
         e.CurrentName()
             .map(|n| sanitize_uia_text(&n.to_string()).trim().to_string())
             .unwrap_or_default()
@@ -538,10 +599,13 @@ fn collect_descendant_texts(
 /// (入力内容ログへの記録用: SPECv0.4.8追補)。
 pub fn control_type_at_point(x: i32, y: i32) -> Option<String> {
     unsafe {
-        let auto = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+        let auto = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+            .ok()?;
         let pt = POINT { x, y };
         let el = auto.ElementFromPoint(pt).ok()?;
-        let target = find_text_hit(&auto, el.clone(), pt).map(|h| h.element).unwrap_or(el);
+        let target = find_text_hit(&auto, el.clone(), pt)
+            .map(|h| h.element)
+            .unwrap_or(el);
         control_type_name(&target)
     }
 }
@@ -611,10 +675,19 @@ type ElemProps = (String, String, String, String, Option<(i32, i32, i32, i32)>);
 fn element_props(e: &IUIAutomationElement) -> ElemProps {
     unsafe {
         let control_type = control_type_name(e).unwrap_or_default();
-        let automation_id = e.CurrentAutomationId().map(|s| s.to_string()).unwrap_or_default();
+        let automation_id = e
+            .CurrentAutomationId()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
         let name = e.CurrentName().map(|s| s.to_string()).unwrap_or_default();
-        let class_name = e.CurrentClassName().map(|s| s.to_string()).unwrap_or_default();
-        let rect = e.CurrentBoundingRectangle().ok().map(|r| (r.left, r.top, r.right - r.left, r.bottom - r.top));
+        let class_name = e
+            .CurrentClassName()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let rect = e
+            .CurrentBoundingRectangle()
+            .ok()
+            .map(|r| (r.left, r.top, r.right - r.left, r.bottom - r.top));
         (control_type, automation_id, name, class_name, rect)
     }
 }
@@ -655,7 +728,10 @@ mod tests {
     #[test]
     fn removes_scattered_object_replacement_chars() {
         let s = "Lists all the teams in Microsoft Teams that you are a member of \u{FFFC} \u{FFFC} \u{FFFC}";
-        assert_eq!(sanitize_uia_text(s), "Lists all the teams in Microsoft Teams that you are a member of");
+        assert_eq!(
+            sanitize_uia_text(s),
+            "Lists all the teams in Microsoft Teams that you are a member of"
+        );
     }
 
     #[test]

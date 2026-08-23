@@ -5,10 +5,9 @@ FocusTranslator GitHub リリースノート テンプレート。
 1. このファイルをコピーし、灰色表示になっているコメント指示に従って埋める。
 2. 山括弧のプレースホルダ(例: バージョン)を実際の値に置き換える。
 3. 埋め終わったら、コメントブロックはすべて削除してから公開する。
-4. gh release create vX.X.X --title "Release vX.X.X" --notes-file <埋めたファイル> ...
-   のように --notes-file で渡す(dev/scripts/release-FocusTranslator.ps1 は現状
-   --notes "Automated release for $tagName" という簡易文言を使っているため、
-   このテンプレートで作成した本文ファイルを渡すよう呼び出し側を調整してから使う)。
+4. `.github/RELEASE_NOTES_vX.X.X.md` として保存する。
+5. `dev/scripts/release-FocusTranslator.ps1 -Publish` はこのファイルを `--notes-file` で読み、
+   remoteへpush済みのタグを検証してGitHub draftを作成する。内容確認後に手動公開する。
 
 過去のv0.5.3/v0.5.4リリースの実際の文面を踏まえたスタイル(タイトル書式・カジュアルな
 導入文・インストール方法の案内)を踏襲しつつ、「新機能・変更点」の箇条書きを追加した。

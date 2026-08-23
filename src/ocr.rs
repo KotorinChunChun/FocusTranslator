@@ -28,7 +28,10 @@ pub struct OcrOutput {
 
 impl OcrOutput {
     fn text_only(text: String) -> Self {
-        OcrOutput { text, ..Default::default() }
+        OcrOutput {
+            text,
+            ..Default::default()
+        }
     }
 }
 
@@ -78,9 +81,11 @@ pub fn run(
     img: &Captured,
     focus: Focus,
     ctx: &crate::config::PromptContext,
+    full_screenshot: bool,
 ) -> Result<OcrOutput, String> {
     // LLM経路のエラーメッセージにAPIキーが混入しても漏れないよう伏字化する (SPECv0.5.3)
-    run_inner(engine, cfg, img, focus, ctx).map_err(|e| crate::translate::mask_keys(cfg, &e))
+    run_inner(engine, cfg, img, focus, ctx, full_screenshot)
+        .map_err(|e| crate::translate::mask_keys(cfg, &e))
 }
 
 fn run_inner(
@@ -89,6 +94,7 @@ fn run_inner(
     img: &Captured,
     focus: Focus,
     ctx: &crate::config::PromptContext,
+    full_screenshot: bool,
 ) -> Result<OcrOutput, String> {
     match engine {
         "oneocr" => crate::oneocr::ocr_oneocr(img, focus).map(|(text, focus_line)| OcrOutput {
@@ -109,7 +115,7 @@ fn run_inner(
                 Err("PaddleOCRのモデルが未導入です。設定画面からインストールしてください".into())
             }
         }
-        "llm" => llm_ocr_translate(cfg, img, focus, ctx),
+        "llm" => llm_ocr_translate(cfg, img, focus, ctx, full_screenshot),
         other => Err(format!("不明なOCRエンジン: {other}")),
     }
 }
@@ -176,7 +182,11 @@ pub(crate) fn select_by_focus(
     if items.is_empty() {
         return Err("テキストを検出できませんでした".into());
     }
-    items.sort_by(|a, b| line_cy(a).partial_cmp(&line_cy(b)).unwrap_or(std::cmp::Ordering::Equal));
+    items.sort_by(|a, b| {
+        line_cy(a)
+            .partial_cmp(&line_cy(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     match focus {
         Focus::Line(fy) => {
@@ -246,9 +256,11 @@ fn normalize_line(s: &str) -> String {
                 let prev = chars[..i].iter().rev().find(|c| **c != ' ');
                 let next = chars[i + 1..].iter().find(|c| **c != ' ');
                 if let (Some(&p), Some(&n)) = (prev, next)
-                    && is_cjk_char(p) && is_cjk_char(n) {
-                        continue;
-                    }
+                    && is_cjk_char(p)
+                    && is_cjk_char(n)
+                {
+                    continue;
+                }
             }
             out.push(c);
         }
@@ -277,8 +289,13 @@ pub fn join_paragraph(lines: &[String]) -> String {
             // 行末ハイフンは連結(英文の分綴り)
             out.pop();
             out.push_str(l);
-        } else if crate::util::contains_cjk(out.chars().last().map(String::from).as_deref().unwrap_or(""))
-        {
+        } else if crate::util::contains_cjk(
+            out.chars()
+                .last()
+                .map(String::from)
+                .as_deref()
+                .unwrap_or(""),
+        ) {
             out.push_str(l);
         } else {
             out.push(' ');
@@ -301,16 +318,29 @@ pub fn crop_for_focus(img: &Captured, focus: Focus) -> std::borrow::Cow<'_, Capt
 pub fn crop_for_focus_rect(
     img: &Captured,
     focus: Focus,
-) -> (std::borrow::Cow<'_, Captured>, windows::Win32::Foundation::RECT) {
+) -> (
+    std::borrow::Cow<'_, Captured>,
+    windows::Win32::Foundation::RECT,
+) {
     use windows::Win32::Foundation::RECT;
     if let Focus::Line(fy) = focus {
         let h = 64; // 高さ64pxの帯に切り抜く(複数行を拾うのを防ぐ)
         let top = (fy - h as f32 / 2.0).round() as i32;
-        if let Some((cropped, rect)) = crate::capture::crop_with_rect(img, 0, top, img.width as i32, h) {
+        if let Some((cropped, rect)) =
+            crate::capture::crop_with_rect(img, 0, top, img.width as i32, h)
+        {
             return (std::borrow::Cow::Owned(cropped), rect);
         }
     }
-    (std::borrow::Cow::Borrowed(img), RECT { left: 0, top: 0, right: img.width as i32, bottom: img.height as i32 })
+    (
+        std::borrow::Cow::Borrowed(img),
+        RECT {
+            left: 0,
+            top: 0,
+            right: img.width as i32,
+            bottom: img.height as i32,
+        },
+    )
 }
 
 /// LLM OCR+翻訳統合モード: 画像から原文と訳文を一括取得 (SPEC §8)
@@ -319,8 +349,11 @@ pub fn llm_ocr_translate(
     img: &Captured,
     focus: Focus,
     ctx: &crate::config::PromptContext,
+    full_screenshot: bool,
 ) -> Result<OcrOutput, String> {
-    let prof = cfg.active_profile().ok_or("LLM APIプロファイルが設定されていません")?;
+    let prof = cfg
+        .active_profile()
+        .ok_or("LLM APIプロファイルが設定されていません")?;
     let target_img = crop_for_focus(img, focus);
     let png = crate::capture::to_png(&target_img);
     let b64 = B64.encode(&png);
@@ -330,27 +363,100 @@ pub fn llm_ocr_translate(
     ctx.translated_text.clear();
     ctx.tr_engine.clear();
     ctx.ocr_engine = "llm".into();
-    let prompt = cfg.fill_prompt(&prof.ocr_prompt, &ctx);
+    let mut prompt = cfg.fill_prompt(&prof.ocr_prompt, &ctx);
+    if full_screenshot {
+        prompt.push_str("\n\nThe attached image is a screenshot of the entire target application. Transcribe only the text inside the red frame and translate it using the surrounding screen as context. Keep the requested JSON response format.");
+    }
 
-    let res = crate::llm_api::call(prof, &crate::llm_api::LlmRequest {
-        prompt: &prompt,
-        image_png_b64: Some(&b64),
-        json_mode: true,
-    })?;
+    let res = crate::llm_api::call(
+        prof,
+        &crate::llm_api::LlmRequest {
+            prompt: &prompt,
+            image_png_b64: Some(&b64),
+            json_mode: true,
+        },
+    )?;
 
-    let inner: serde_json::Value =
-        serde_json::from_str(res.text.trim()).map_err(|_| "LLM応答のJSON解析に失敗".to_string())?;
-    let source = inner.get("source").and_then(|s| s.as_str()).unwrap_or("").trim().to_string();
-    let translation = inner.get("translation").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
+    let inner = parse_llm_ocr_json(&res.text)?;
+    let source = inner
+        .get("source")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let translation = inner
+        .get("translation")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if source.is_empty() {
         return Err("テキストを検出できませんでした".into());
     }
     Ok(OcrOutput {
         text: source,
-        translation: if translation.is_empty() { None } else { Some(translation) },
+        translation: if translation.is_empty() {
+            None
+        } else {
+            Some(translation)
+        },
         raw_response: Some(crate::translate::mask_keys(cfg, &res.response_json)),
         tokens_in: res.tokens_in,
         tokens_out: res.tokens_out,
         focus_line: None,
     })
+}
+
+/// CLI経由ではAPIのJSONモードを強制できないため、指示どおりのJSONがMarkdownコード
+/// フェンスで包まれて返る場合も受け入れる。最終的な中身は従来どおりserde_jsonで検証する。
+fn parse_llm_ocr_json(text: &str) -> Result<serde_json::Value, String> {
+    let trimmed = text.trim();
+    if let Ok(value) = serde_json::from_str(trimmed) {
+        return Ok(value);
+    }
+    if let Some(after_fence) = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```JSON"))
+        .or_else(|| trimmed.strip_prefix("```"))
+        && let Some(body) = after_fence.strip_suffix("```")
+        && let Ok(value) = serde_json::from_str(body.trim())
+    {
+        return Ok(value);
+    }
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}'))
+        && start < end
+        && let Ok(value) = serde_json::from_str(&trimmed[start..=end])
+    {
+        return Ok(value);
+    }
+    Err("LLM応答のJSON解析に失敗".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_llm_ocr_json;
+
+    #[test]
+    fn llm_ocrの素のjsonを解析する() {
+        let value = parse_llm_ocr_json(r#"{"source":"Hello","translation":"こんにちは"}"#).unwrap();
+        assert_eq!(value["source"], "Hello");
+    }
+
+    #[test]
+    fn llm_ocrのmarkdownフェンス付きjsonを解析する() {
+        let value = parse_llm_ocr_json(
+            "```json\n{\"source\":\"Hello\",\"translation\":\"こんにちは\"}\n```",
+        )
+        .unwrap();
+        assert_eq!(value["translation"], "こんにちは");
+    }
+
+    #[test]
+    fn llm_ocrの説明に囲まれたjsonを解析する() {
+        let value = parse_llm_ocr_json(
+            "結果です。\n{\"source\":\"Hello\",\"translation\":\"こんにちは\"}\n以上です。",
+        )
+        .unwrap();
+        assert_eq!(value["source"], "Hello");
+    }
 }
