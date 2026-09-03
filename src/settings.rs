@@ -197,6 +197,7 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
     if is_open() {
         unsafe {
             let h = hwnd();
+            populate_key_combos(h, &Config::load());
             let _ = ShowWindow(h, SW_RESTORE);
             let _ = SetForegroundWindow(h);
         }
@@ -927,8 +928,12 @@ fn apply_boss_guard(h: HWND, enabled: bool) {
     set_ctl_text(h, IDC_VERSION_INFO, &version_info_text(enabled));
 }
 
-fn populate(h: HWND) {
-    let cfg = Config::load();
+fn populate_key_combos(h: HWND, cfg: &Config) {
+    // 設定画面を再利用した場合も、キー候補を必ず最新の共通一覧へ入れ直す。
+    // 「なし」を含む14候補を古い画面状態に依存せず表示するため、追加前に内容を消す。
+    for id in [IDC_HOLDKEY, IDC_HOLDKEY2, IDC_DETECT_KEY, IDC_DETECT_KEY2] {
+        combo_reset(h, id);
+    }
     combo_fill(
         h,
         IDC_HOLDKEY,
@@ -947,6 +952,29 @@ fn populate(h: HWND) {
             .position(|k| *k == cfg.hold_key2)
             .unwrap_or(0),
     );
+    combo_fill(
+        h,
+        IDC_DETECT_KEY,
+        &KEY_OPTIONS,
+        KEY_OPTIONS
+            .iter()
+            .position(|k| *k == cfg.detect_key)
+            .unwrap_or(0),
+    );
+    combo_fill(
+        h,
+        IDC_DETECT_KEY2,
+        &KEY_OPTIONS,
+        KEY_OPTIONS
+            .iter()
+            .position(|k| *k == cfg.detect_key2)
+            .unwrap_or(0),
+    );
+}
+
+fn populate(h: HWND) {
+    let cfg = Config::load();
+    populate_key_combos(h, &cfg);
     set_ctl_text(h, IDC_POLL, &cfg.poll_ms.to_string());
     set_ctl_text(h, IDC_PIN_HOLD, &cfg.pin_hold_seconds.to_string());
     set_ctl_text(h, IDC_HOTKEY, &cfg.region_hotkey);
@@ -1028,24 +1056,6 @@ fn populate(h: HWND) {
         cfg.send_full_screenshot_to_llm,
     );
     check_set(h, IDC_DETECT_MODE, cfg.detect_enabled);
-    combo_fill(
-        h,
-        IDC_DETECT_KEY,
-        &KEY_OPTIONS,
-        KEY_OPTIONS
-            .iter()
-            .position(|k| *k == cfg.detect_key)
-            .unwrap_or(0), // 既定「なし」
-    );
-    combo_fill(
-        h,
-        IDC_DETECT_KEY2,
-        &KEY_OPTIONS,
-        KEY_OPTIONS
-            .iter()
-            .position(|k| *k == cfg.detect_key2)
-            .unwrap_or(0),
-    );
     check_set(h, IDC_PREVIEW_DETECT_MODE, cfg.preview_detect_enabled);
     combo_fill(
         h,
