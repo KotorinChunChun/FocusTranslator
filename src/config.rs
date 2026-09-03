@@ -228,8 +228,11 @@ impl ApiType {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Config {
-    /// ホールドキー: "RCtrl" | "LCtrl" | "RShift" | "RAlt" | "F8" | "Ctrl+Shift"
+    /// ホールドキー(1つ目): "なし" | "Ctrl" | "LCtrl" | "RCtrl" | "Shift" | "LShift" |
+    /// "RShift" | "Alt" | "LAlt" | "RAlt" | "Win" | "LWin" | "RWin" | "F8"
     pub hold_key: String,
+    /// ホールドキー(2つ目)。両方「なし」の場合は無効、片方だけ「なし」の場合は単独キー。
+    pub hold_key2: String,
     /// GetAsyncKeyState の監視周期 (ms)
     pub poll_ms: u32,
     /// ホールドピン留めまでの秒数 (既定: 3秒)
@@ -296,6 +299,8 @@ pub struct Config {
     /// プレビューキー: 実際の翻訳は行わず、検出範囲の枠表示だけを確認できるキー
     /// (hold_key と同じ表記に「なし」を加えたもの、既定は「なし」)
     pub detect_key: String,
+    /// プレビューキー(2つ目)。両方「なし」の場合は無効、片方だけ「なし」の場合は単独キー。
+    pub detect_key2: String,
     /// 領域表示 (プレビューキー側): プレビューキー(detect_key)押下中も枠表示するか (既定OFF)
     pub preview_detect_enabled: bool,
     /// 旧既定LCtrlから「なし」への一度限りの移行を適用済みか。
@@ -469,6 +474,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             hold_key: "RCtrl".into(),
+            hold_key2: "なし".into(),
             poll_ms: 100,
             pin_hold_seconds: 3,
             region_hotkey: "Ctrl+Alt+Shift+T".into(),
@@ -499,6 +505,7 @@ impl Default for Config {
             send_full_screenshot_to_llm: false,
             detect_enabled: false,
             detect_key: "なし".into(),
+            detect_key2: "なし".into(),
             preview_detect_enabled: false,
             preview_key_none_migrated: true,
             log_max_records: 5000,
@@ -607,6 +614,18 @@ impl Config {
                 cfg.detect_key = "なし".into();
             }
             cfg.preview_key_none_migrated = true;
+            migrated = true;
+        }
+        // v0.5.6で追加した旧形式の「Ctrl+Shift」文字列を、2つの選択欄へ移行する。
+        // 2つ目が「なし」のときだけ変換し、利用者が新形式で選んだ値は上書きしない。
+        if cfg.hold_key == "Ctrl+Shift" && cfg.hold_key2 == "なし" {
+            cfg.hold_key = "Ctrl".into();
+            cfg.hold_key2 = "Shift".into();
+            migrated = true;
+        }
+        if cfg.detect_key == "Ctrl+Shift" && cfg.detect_key2 == "なし" {
+            cfg.detect_key = "Ctrl".into();
+            cfg.detect_key2 = "Shift".into();
             migrated = true;
         }
         // 初期CLI統合時の既定名を、公式製品名「Kimi Code CLI」へ移行する。
@@ -721,18 +740,24 @@ impl Config {
             .replace("{{tr_engine}}", &ctx.tr_engine)
     }
 
-    /// キャプチャキー/プレビューキーを構成する仮想キーコード。
-    /// 複合キーはすべてのキーが押されているときに発動する。
-    pub fn key_vks(key: &str) -> Vec<i32> {
+    /// 設定欄1つ分のキー条件。左右指定のない修飾キーは左右どちらでもよい。
+    pub fn key_requirement(key: &str) -> KeyRequirement {
         match key.trim() {
-            "なし" => Vec::new(),
-            "Ctrl+Shift" => vec![0x11, 0x10],
-            "RCtrl" => vec![0xA3],
-            "LCtrl" => vec![0xA2],
-            "RShift" => vec![0xA1],
-            "RAlt" => vec![0xA5],
-            "F8" => vec![0x77],
-            _ => vec![0xA3],
+            "なし" => KeyRequirement::None,
+            "Ctrl" => KeyRequirement::Either(0xA2, 0xA3),
+            "LCtrl" => KeyRequirement::Single(0xA2),
+            "RCtrl" => KeyRequirement::Single(0xA3),
+            "Shift" => KeyRequirement::Either(0xA0, 0xA1),
+            "LShift" => KeyRequirement::Single(0xA0),
+            "RShift" => KeyRequirement::Single(0xA1),
+            "Alt" => KeyRequirement::Either(0xA4, 0xA5),
+            "LAlt" => KeyRequirement::Single(0xA4),
+            "RAlt" => KeyRequirement::Single(0xA5),
+            "Win" => KeyRequirement::Either(0x5B, 0x5C),
+            "LWin" => KeyRequirement::Single(0x5B),
+            "RWin" => KeyRequirement::Single(0x5C),
+            "F8" => KeyRequirement::Single(0x77),
+            _ => KeyRequirement::Single(0xA3),
         }
     }
 
@@ -768,6 +793,13 @@ impl Config {
             .iter()
             .any(|e| e.eq_ignore_ascii_case(exe))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyRequirement {
+    None,
+    Single(i32),
+    Either(i32, i32),
 }
 
 /// "Ctrl+Alt+Shift+T" のような表記を (MOD_*, VK) に変換
@@ -846,16 +878,61 @@ mod tests {
     fn プレビューキーは既定で無効() {
         let cfg = Config::default();
         assert_eq!(cfg.detect_key, "なし");
-        assert!(Config::key_vks(&cfg.detect_key).is_empty());
+        assert_eq!(cfg.detect_key2, "なし");
+        assert_eq!(
+            Config::key_requirement(&cfg.detect_key),
+            KeyRequirement::None
+        );
         assert!(!cfg.preview_detect_enabled);
         assert!(cfg.preview_key_none_migrated);
     }
 
     #[test]
-    fn 複合キーは_ctrlと_shiftの両方を要求する() {
-        assert_eq!(Config::key_vks("Ctrl+Shift"), vec![0x11, 0x10]);
-        assert_eq!(Config::key_vks("RCtrl"), vec![0xA3]);
-        assert!(Config::key_vks("なし").is_empty());
+    fn キー条件は左右指定と左右どちらでもを区別する() {
+        assert_eq!(
+            Config::key_requirement("Ctrl"),
+            KeyRequirement::Either(0xA2, 0xA3)
+        );
+        assert_eq!(
+            Config::key_requirement("LCtrl"),
+            KeyRequirement::Single(0xA2)
+        );
+        assert_eq!(
+            Config::key_requirement("Win"),
+            KeyRequirement::Either(0x5B, 0x5C)
+        );
+    }
+
+    #[test]
+    fn 旧形式の_ctrlと_shiftを2つのキー欄へ移行する() {
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "ft_compound_key_migration_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::set_var("FOCUSTRANSLATOR_DATA_DIR", &tmp);
+        }
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            Config::path(),
+            r#"{"hold_key":"Ctrl+Shift","detect_key":"Ctrl+Shift"}"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load();
+        assert_eq!(cfg.hold_key, "Ctrl");
+        assert_eq!(cfg.hold_key2, "Shift");
+        assert_eq!(cfg.detect_key, "Ctrl");
+        assert_eq!(cfg.detect_key2, "Shift");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::remove_var("FOCUSTRANSLATOR_DATA_DIR");
+        }
     }
 
     #[test]

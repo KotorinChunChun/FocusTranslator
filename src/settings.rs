@@ -23,6 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 
 const IDC_HOLDKEY: i32 = 101;
+const IDC_HOLDKEY2: i32 = 187;
 const IDC_POLL: i32 = 102;
 const IDC_HOTKEY: i32 = 103;
 const IDC_OCR: i32 = 104;
@@ -57,6 +58,7 @@ const IDC_PROF_KEY: i32 = 139;
 const IDC_PROF_TYPE: i32 = 140;
 const IDC_DETECT_MODE: i32 = 145;
 const IDC_DETECT_KEY: i32 = 146;
+const IDC_DETECT_KEY2: i32 = 188;
 const IDC_PREVIEW_DETECT_MODE: i32 = 147;
 const IDC_PIN_HOLD: i32 = 151;
 /// プロンプト編集ウィンドウを開くボタン (SPECv0.4.7 §6.1)
@@ -153,15 +155,9 @@ const GITHUB_REPO_URL: &str =
 const GITHUB_RELEASES_PAGE_URL: &str =
     "https://github.com/KotorinChunChun/FocusTranslator/releases";
 
-const HOLD_KEYS: [&str; 6] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8", "Ctrl+Shift"];
-const PREVIEW_KEYS: [&str; 7] = [
-    "なし",
-    "RCtrl",
-    "LCtrl",
-    "RShift",
-    "RAlt",
-    "F8",
-    "Ctrl+Shift",
+const KEY_OPTIONS: [&str; 14] = [
+    "なし", "Ctrl", "LCtrl", "RCtrl", "Shift", "LShift", "RShift", "Alt", "LAlt", "RAlt", "Win",
+    "LWin", "RWin", "F8",
 ];
 const OCR_KEYS: [&str; 4] = ["oneocr", "win", "paddle", "llm"];
 const OCR_DISP: [&str; 4] = [
@@ -346,16 +342,18 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         group(h, inst, "1. 操作", gx, GROUP1_Y, COL_W, GROUP1_H);
         let mut y = GROUP1_Y + GTOP;
         label(h, inst, "キャプチャキー", lx, y + 2, 130);
-        combo(h, inst, cx, y, 110, IDC_HOLDKEY);
-        checkbox(h, inst, "領域表示", cx + 118, y + 2, 88, IDC_DETECT_MODE);
+        combo(h, inst, cx, y, 70, IDC_HOLDKEY);
+        combo(h, inst, cx + 78, y, 70, IDC_HOLDKEY2);
+        checkbox(h, inst, "領域表示", cx + 156, y + 2, 88, IDC_DETECT_MODE);
         y += STEP;
         label(h, inst, "プレビューキー", lx, y + 2, 130);
-        combo(h, inst, cx, y, 110, IDC_DETECT_KEY);
+        combo(h, inst, cx, y, 70, IDC_DETECT_KEY);
+        combo(h, inst, cx + 78, y, 70, IDC_DETECT_KEY2);
         checkbox(
             h,
             inst,
             "領域表示",
-            cx + 118,
+            cx + 156,
             y + 2,
             88,
             IDC_PREVIEW_DETECT_MODE,
@@ -934,10 +932,19 @@ fn populate(h: HWND) {
     combo_fill(
         h,
         IDC_HOLDKEY,
-        &HOLD_KEYS,
-        HOLD_KEYS
+        &KEY_OPTIONS,
+        KEY_OPTIONS
             .iter()
             .position(|k| *k == cfg.hold_key)
+            .unwrap_or(0),
+    );
+    combo_fill(
+        h,
+        IDC_HOLDKEY2,
+        &KEY_OPTIONS,
+        KEY_OPTIONS
+            .iter()
+            .position(|k| *k == cfg.hold_key2)
             .unwrap_or(0),
     );
     set_ctl_text(h, IDC_POLL, &cfg.poll_ms.to_string());
@@ -1024,11 +1031,20 @@ fn populate(h: HWND) {
     combo_fill(
         h,
         IDC_DETECT_KEY,
-        &PREVIEW_KEYS,
-        PREVIEW_KEYS
+        &KEY_OPTIONS,
+        KEY_OPTIONS
             .iter()
             .position(|k| *k == cfg.detect_key)
             .unwrap_or(0), // 既定「なし」
+    );
+    combo_fill(
+        h,
+        IDC_DETECT_KEY2,
+        &KEY_OPTIONS,
+        KEY_OPTIONS
+            .iter()
+            .position(|k| *k == cfg.detect_key2)
+            .unwrap_or(0),
     );
     check_set(h, IDC_PREVIEW_DETECT_MODE, cfg.preview_detect_enabled);
     combo_fill(
@@ -2143,7 +2159,8 @@ fn open_url(h: HWND, url: &str) {
 
 fn save(h: HWND, ask_consent: bool) {
     let mut cfg = Config::load();
-    cfg.hold_key = HOLD_KEYS[combo_sel(h, IDC_HOLDKEY).min(HOLD_KEYS.len() - 1)].to_string();
+    cfg.hold_key = KEY_OPTIONS[combo_sel(h, IDC_HOLDKEY).min(KEY_OPTIONS.len() - 1)].to_string();
+    cfg.hold_key2 = KEY_OPTIONS[combo_sel(h, IDC_HOLDKEY2).min(KEY_OPTIONS.len() - 1)].to_string();
     cfg.poll_ms = get_ctl_text(h, IDC_POLL)
         .trim()
         .parse()
@@ -2180,7 +2197,9 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.send_full_screenshot_to_llm = check_get(h, IDC_SEND_FULL_SCREENSHOT_TO_LLM);
     cfg.detect_enabled = check_get(h, IDC_DETECT_MODE);
     cfg.detect_key =
-        PREVIEW_KEYS[combo_sel(h, IDC_DETECT_KEY).min(PREVIEW_KEYS.len() - 1)].to_string();
+        KEY_OPTIONS[combo_sel(h, IDC_DETECT_KEY).min(KEY_OPTIONS.len() - 1)].to_string();
+    cfg.detect_key2 =
+        KEY_OPTIONS[combo_sel(h, IDC_DETECT_KEY2).min(KEY_OPTIONS.len() - 1)].to_string();
     cfg.preview_detect_enabled = check_get(h, IDC_PREVIEW_DETECT_MODE);
     cfg.overlay_theme =
         THEME_KEYS[combo_sel(h, IDC_OVERLAY_THEME).min(THEME_KEYS.len() - 1)].to_string();
@@ -2266,6 +2285,31 @@ fn apply_autostart(enable: bool) {
     }
 }
 
+/// キャプチャキーとプレビューキーが同じ実効条件かを判定する。「なし」は無視し、
+/// 2つのキー欄の順番が逆でも同じ条件として扱う。
+fn same_key_condition(
+    hold_first: &str,
+    hold_second: &str,
+    preview_first: &str,
+    preview_second: &str,
+) -> bool {
+    let hold: Vec<&str> = [hold_first, hold_second]
+        .into_iter()
+        .filter(|key| *key != "なし")
+        .collect();
+    let preview: Vec<&str> = [preview_first, preview_second]
+        .into_iter()
+        .filter(|key| *key != "なし")
+        .collect();
+    if hold.is_empty() || hold.len() != preview.len() {
+        return false;
+    }
+    (hold.len() == 1 && hold[0] == preview[0])
+        || (hold.len() == 2
+            && ((hold[0] == preview[0] && hold[1] == preview[1])
+                || (hold[0] == preview[1] && hold[1] == preview[0])))
+}
+
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_COMMAND => {
@@ -2276,15 +2320,20 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             // プロファイル編集欄 (名前/種別/URL/キー/モデル) も選択中の行へ同様に自動保存する
             // (SPECv0.5.5: [commit_profile_edit] 参照。保存ボタン押し忘れ対策)。
             match id {
-                IDC_HOLDKEY | IDC_DETECT_KEY
+                IDC_HOLDKEY | IDC_HOLDKEY2 | IDC_DETECT_KEY | IDC_DETECT_KEY2
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE =>
                 {
                     // キャプチャキーとプレビューキーの重複ガード (SPECv0.5.3):
-                    // 同じキーだと挙動が未定義になるため、警告して変更前の値へ戻す。
-                    let hold_key = HOLD_KEYS[combo_sel(h, IDC_HOLDKEY).min(HOLD_KEYS.len() - 1)];
-                    let preview_key =
-                        PREVIEW_KEYS[combo_sel(h, IDC_DETECT_KEY).min(PREVIEW_KEYS.len() - 1)];
-                    if preview_key != "なし" && hold_key == preview_key {
+                    // 同じ条件だと挙動が未定義になるため、警告して変更前の値へ戻す。
+                    let hold_first =
+                        KEY_OPTIONS[combo_sel(h, IDC_HOLDKEY).min(KEY_OPTIONS.len() - 1)];
+                    let hold_second =
+                        KEY_OPTIONS[combo_sel(h, IDC_HOLDKEY2).min(KEY_OPTIONS.len() - 1)];
+                    let preview_first =
+                        KEY_OPTIONS[combo_sel(h, IDC_DETECT_KEY).min(KEY_OPTIONS.len() - 1)];
+                    let preview_second =
+                        KEY_OPTIONS[combo_sel(h, IDC_DETECT_KEY2).min(KEY_OPTIONS.len() - 1)];
+                    if same_key_condition(hold_first, hold_second, preview_first, preview_second) {
                         unsafe {
                             MessageBoxW(
                                 Some(h),
@@ -2297,17 +2346,33 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                         combo_select(
                             h,
                             IDC_HOLDKEY,
-                            HOLD_KEYS
+                            KEY_OPTIONS
                                 .iter()
                                 .position(|k| *k == cfg.hold_key)
                                 .unwrap_or(0),
                         );
                         combo_select(
                             h,
+                            IDC_HOLDKEY2,
+                            KEY_OPTIONS
+                                .iter()
+                                .position(|k| *k == cfg.hold_key2)
+                                .unwrap_or(0),
+                        );
+                        combo_select(
+                            h,
                             IDC_DETECT_KEY,
-                            PREVIEW_KEYS
+                            KEY_OPTIONS
                                 .iter()
                                 .position(|k| *k == cfg.detect_key)
+                                .unwrap_or(0),
+                        );
+                        combo_select(
+                            h,
+                            IDC_DETECT_KEY2,
+                            KEY_OPTIONS
+                                .iter()
+                                .position(|k| *k == cfg.detect_key2)
                                 .unwrap_or(0),
                         );
                     } else {
