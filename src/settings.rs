@@ -153,8 +153,16 @@ const GITHUB_REPO_URL: &str =
 const GITHUB_RELEASES_PAGE_URL: &str =
     "https://github.com/KotorinChunChun/FocusTranslator/releases";
 
-const HOLD_KEYS: [&str; 5] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
-const PREVIEW_KEYS: [&str; 6] = ["なし", "RCtrl", "LCtrl", "RShift", "RAlt", "F8"];
+const HOLD_KEYS: [&str; 6] = ["RCtrl", "LCtrl", "RShift", "RAlt", "F8", "Ctrl+Shift"];
+const PREVIEW_KEYS: [&str; 7] = [
+    "なし",
+    "RCtrl",
+    "LCtrl",
+    "RShift",
+    "RAlt",
+    "F8",
+    "Ctrl+Shift",
+];
 const OCR_KEYS: [&str; 4] = ["oneocr", "win", "paddle", "llm"];
 const OCR_DISP: [&str; 4] = [
     "OneOCR (oneocr.dll)",
@@ -338,16 +346,16 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         group(h, inst, "1. 操作", gx, GROUP1_Y, COL_W, GROUP1_H);
         let mut y = GROUP1_Y + GTOP;
         label(h, inst, "キャプチャキー", lx, y + 2, 130);
-        combo(h, inst, cx, y, 90, IDC_HOLDKEY);
-        checkbox(h, inst, "領域表示", cx + 98, y + 2, 88, IDC_DETECT_MODE);
+        combo(h, inst, cx, y, 110, IDC_HOLDKEY);
+        checkbox(h, inst, "領域表示", cx + 118, y + 2, 88, IDC_DETECT_MODE);
         y += STEP;
         label(h, inst, "プレビューキー", lx, y + 2, 130);
-        combo(h, inst, cx, y, 90, IDC_DETECT_KEY);
+        combo(h, inst, cx, y, 110, IDC_DETECT_KEY);
         checkbox(
             h,
             inst,
             "領域表示",
-            cx + 98,
+            cx + 118,
             y + 2,
             88,
             IDC_PREVIEW_DETECT_MODE,

@@ -228,7 +228,7 @@ impl ApiType {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Config {
-    /// ホールドキー: "RCtrl" | "LCtrl" | "RShift" | "RAlt" | "F8"
+    /// ホールドキー: "RCtrl" | "LCtrl" | "RShift" | "RAlt" | "F8" | "Ctrl+Shift"
     pub hold_key: String,
     /// GetAsyncKeyState の監視周期 (ms)
     pub poll_ms: u32,
@@ -721,14 +721,19 @@ impl Config {
             .replace("{{tr_engine}}", &ctx.tr_engine)
     }
 
-    /// キャプチャキー(ホールドキー)の仮想キーコード
-    pub fn hold_vk(&self) -> i32 {
-        key_vk(&self.hold_key)
-    }
-
-    /// プレビューキーの仮想キーコード
-    pub fn detect_vk(&self) -> i32 {
-        key_vk(&self.detect_key)
+    /// キャプチャキー/プレビューキーを構成する仮想キーコード。
+    /// 複合キーはすべてのキーが押されているときに発動する。
+    pub fn key_vks(key: &str) -> Vec<i32> {
+        match key.trim() {
+            "なし" => Vec::new(),
+            "Ctrl+Shift" => vec![0x11, 0x10],
+            "RCtrl" => vec![0xA3],
+            "LCtrl" => vec![0xA2],
+            "RShift" => vec![0xA1],
+            "RAlt" => vec![0xA5],
+            "F8" => vec![0x77],
+            _ => vec![0xA3],
+        }
     }
 
     /// 範囲指定ホットキーの (修飾キー, 仮想キー)。解析失敗時は Ctrl+Alt+Shift+T。
@@ -762,18 +767,6 @@ impl Config {
         self.disabled_apps
             .iter()
             .any(|e| e.eq_ignore_ascii_case(exe))
-    }
-}
-
-/// キー名(ホールドキー/検出キー共通の表記) → 仮想キーコード
-fn key_vk(name: &str) -> i32 {
-    match name {
-        "なし" => 0,
-        "LCtrl" => 0xA2,
-        "RShift" => 0xA1,
-        "RAlt" => 0xA5,
-        "F8" => 0x77,
-        _ => 0xA3, // RCtrl
     }
 }
 
@@ -853,9 +846,16 @@ mod tests {
     fn プレビューキーは既定で無効() {
         let cfg = Config::default();
         assert_eq!(cfg.detect_key, "なし");
-        assert_eq!(cfg.detect_vk(), 0);
+        assert!(Config::key_vks(&cfg.detect_key).is_empty());
         assert!(!cfg.preview_detect_enabled);
         assert!(cfg.preview_key_none_migrated);
+    }
+
+    #[test]
+    fn 複合キーは_ctrlと_shiftの両方を要求する() {
+        assert_eq!(Config::key_vks("Ctrl+Shift"), vec![0x11, 0x10]);
+        assert_eq!(Config::key_vks("RCtrl"), vec![0xA3]);
+        assert!(Config::key_vks("なし").is_empty());
     }
 
     #[test]

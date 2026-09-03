@@ -385,6 +385,15 @@ fn tick_edit_undo_hotkey() {
     }
 }
 
+/// 設定されたキー(単一キーまたは Ctrl+Shift)がすべて押されているかを返す。
+fn configured_key_down(key: &str) -> bool {
+    let vks = Config::key_vks(key);
+    !vks.is_empty()
+        && vks
+            .iter()
+            .all(|&vk| unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 })
+}
+
 /// 100ms周期のポーリング (SPEC §4)
 pub fn tick() {
     // 範囲選択ウィンドウが前面化できなかった場合もESCを取りこぼさない。
@@ -394,7 +403,7 @@ pub fn tick() {
     }
     tick_edit_undo_hotkey();
     let action = with_app(|app| {
-        let down = unsafe { (GetAsyncKeyState(app.cfg.hold_vk()) as u16 & 0x8000) != 0 };
+        let down = configured_key_down(&app.cfg.hold_key);
         let esc = unsafe { (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0 };
 
         // ピン留め中は前面ウィンドウに依存せずESCで閉じる。
@@ -443,13 +452,8 @@ pub fn tick() {
 /// 領域検出モード (デバッグ) のポーリング
 fn tick_detect() {
     let action = with_app(|app| {
-        let preview_vk = app.cfg.detect_vk();
-        let down = unsafe {
-            (app.cfg.detect_enabled && (GetAsyncKeyState(app.cfg.hold_vk()) as u16 & 0x8000) != 0)
-                || (app.cfg.preview_detect_enabled
-                    && preview_vk != 0
-                    && (GetAsyncKeyState(preview_vk) as u16 & 0x8000) != 0)
-        };
+        let down = (app.cfg.detect_enabled && configured_key_down(&app.cfg.hold_key))
+            || (app.cfg.preview_detect_enabled && configured_key_down(&app.cfg.detect_key));
         if !down {
             if app.detect_on {
                 app.detect_on = false;
