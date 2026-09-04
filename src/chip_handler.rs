@@ -8,6 +8,7 @@ use crate::overlay;
 use crate::util;
 
 use windows::Win32::Foundation::{POINT, RECT};
+use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
 use windows::core::w;
 
 /// handle_chip 冒頭でAppから取り出す状態一式。
@@ -548,6 +549,19 @@ pub fn handle_chip(id: usize) {
         overlay::CHIP_SETTINGS => {
             let inst = with_app(|app| app.instance).unwrap_or_default();
             crate::settings::open(inst, main_hwnd());
+            return;
+        }
+        overlay::CHIP_HELP => {
+            unsafe {
+                let _ = MessageBoxW(
+                    Some(main_hwnd()),
+                    w!(
+                        "FocusTranslatorの使い方\n\n抽出：普通だと難しい箇所にあるテキストも正確に抽出できます。\n・カーソル下のUIにあるテキストの抽出\n・コピーしているテキストの抽出\n・画面に表示しきれていないテキストを抽出\n・部分選択したテキストの抽出\n・スクリーンショットからのテキストの抽出\n\n翻訳：英文を無料で即座に翻訳できます。\n・標準エンジンで高速翻訳\n・LLMで高精度翻訳\n\n解説：AIに解説を求めることができます。\n・プロンプトテンプレート編集\n・モデル変更\n・タイトルや構成情報の追加\n・スクリーンショット添付"
+                    ),
+                    w!("FocusTranslatorの使い方"),
+                    MB_OK | MB_ICONINFORMATION,
+                );
+            }
             return;
         }
         overlay::CHIP_OPEN_LOG => {
