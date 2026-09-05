@@ -145,7 +145,7 @@ const WM_PROF_CONN_RESULT: u32 = WM_APP + 20;
 const DEEPL_KEY_URL: &str = "https://www.deepl.com/en/your-account/keys";
 const GOOGLE_KEY_URL: &str = "https://console.cloud.google.com/apis/credentials";
 /// 左下欄外のバージョン情報 (SPECv0.5.2追補)。アプリ名は正式名に統一 (SPECv0.5.4 §17)。
-const APP_UPDATE_DATE: &str = "2026/9/4";
+const APP_UPDATE_DATE: &str = "2026/9/5";
 /// 開発者名 (SPECv0.5.4 §17)
 const APP_DEVELOPER: &str = "Kotorichun";
 /// 「使い方」ボタンで開くリポジトリルート (README表示。SPECv0.5.4 §11)
@@ -928,47 +928,73 @@ fn apply_boss_guard(h: HWND, enabled: bool) {
     set_ctl_text(h, IDC_VERSION_INFO, &version_info_text(enabled));
 }
 
-fn populate_key_combos(h: HWND, cfg: &Config) {
-    // 設定画面を再利用した場合も、キー候補を必ず最新の共通一覧へ入れ直す。
-    // 「なし」を含む14候補を古い画面状態に依存せず表示するため、追加前に内容を消す。
-    for id in [IDC_HOLDKEY, IDC_HOLDKEY2, IDC_DETECT_KEY, IDC_DETECT_KEY2] {
-        combo_reset(h, id);
+fn second_key_options(first: &str) -> Vec<&'static str> {
+    KEY_OPTIONS
+        .iter()
+        .copied()
+        // 「なし」は両欄を無効にするため常に残す。実キーだけ重複候補から除外する。
+        .filter(|candidate| first == "なし" || *candidate == "なし" || *candidate != first)
+        .collect()
+}
+
+fn normalized_second_key<'a>(first: &str, second: &'a str) -> &'a str {
+    if first != "なし" && first == second {
+        "なし"
+    } else {
+        second
     }
+}
+
+fn populate_key_pair(h: HWND, first_id: i32, second_id: i32, first: &str, second: &str) {
+    let first = if KEY_OPTIONS.contains(&first) {
+        first
+    } else {
+        "なし"
+    };
+    let second = normalized_second_key(first, second);
+    let second_options = second_key_options(first);
+
+    combo_reset(h, first_id);
     combo_fill(
         h,
-        IDC_HOLDKEY,
+        first_id,
         &KEY_OPTIONS,
         KEY_OPTIONS
             .iter()
-            .position(|k| *k == cfg.hold_key)
+            .position(|candidate| *candidate == first)
             .unwrap_or(0),
     );
+    combo_reset(h, second_id);
     combo_fill(
         h,
-        IDC_HOLDKEY2,
-        &KEY_OPTIONS,
-        KEY_OPTIONS
+        second_id,
+        &second_options,
+        second_options
             .iter()
-            .position(|k| *k == cfg.hold_key2)
+            .position(|candidate| *candidate == second)
             .unwrap_or(0),
     );
-    combo_fill(
+}
+
+fn selected_key(h: HWND, id: i32) -> String {
+    let cb = get_dlg_item(h, id);
+    let selected = combo_get_item_text(cb, combo_sel(h, id));
+    if KEY_OPTIONS.contains(&selected.as_str()) {
+        selected
+    } else {
+        "なし".to_string()
+    }
+}
+
+fn populate_key_combos(h: HWND, cfg: &Config) {
+    // 設定画面を再利用した場合も候補を入れ直し、第2欄から第1欄の実キーを除外する。
+    populate_key_pair(h, IDC_HOLDKEY, IDC_HOLDKEY2, &cfg.hold_key, &cfg.hold_key2);
+    populate_key_pair(
         h,
         IDC_DETECT_KEY,
-        &KEY_OPTIONS,
-        KEY_OPTIONS
-            .iter()
-            .position(|k| *k == cfg.detect_key)
-            .unwrap_or(0),
-    );
-    combo_fill(
-        h,
         IDC_DETECT_KEY2,
-        &KEY_OPTIONS,
-        KEY_OPTIONS
-            .iter()
-            .position(|k| *k == cfg.detect_key2)
-            .unwrap_or(0),
+        &cfg.detect_key,
+        &cfg.detect_key2,
     );
 }
 
@@ -2169,8 +2195,8 @@ fn open_url(h: HWND, url: &str) {
 
 fn save(h: HWND, ask_consent: bool) {
     let mut cfg = Config::load();
-    cfg.hold_key = KEY_OPTIONS[combo_sel(h, IDC_HOLDKEY).min(KEY_OPTIONS.len() - 1)].to_string();
-    cfg.hold_key2 = KEY_OPTIONS[combo_sel(h, IDC_HOLDKEY2).min(KEY_OPTIONS.len() - 1)].to_string();
+    cfg.hold_key = selected_key(h, IDC_HOLDKEY);
+    cfg.hold_key2 = selected_key(h, IDC_HOLDKEY2);
     cfg.poll_ms = get_ctl_text(h, IDC_POLL)
         .trim()
         .parse()
@@ -2206,10 +2232,8 @@ fn save(h: HWND, ask_consent: bool) {
     cfg.debug_mode = check_get(h, IDC_DEBUG_MODE);
     cfg.send_full_screenshot_to_llm = check_get(h, IDC_SEND_FULL_SCREENSHOT_TO_LLM);
     cfg.detect_enabled = check_get(h, IDC_DETECT_MODE);
-    cfg.detect_key =
-        KEY_OPTIONS[combo_sel(h, IDC_DETECT_KEY).min(KEY_OPTIONS.len() - 1)].to_string();
-    cfg.detect_key2 =
-        KEY_OPTIONS[combo_sel(h, IDC_DETECT_KEY2).min(KEY_OPTIONS.len() - 1)].to_string();
+    cfg.detect_key = selected_key(h, IDC_DETECT_KEY);
+    cfg.detect_key2 = selected_key(h, IDC_DETECT_KEY2);
     cfg.preview_detect_enabled = check_get(h, IDC_PREVIEW_DETECT_MODE);
     cfg.overlay_theme =
         THEME_KEYS[combo_sel(h, IDC_OVERLAY_THEME).min(THEME_KEYS.len() - 1)].to_string();
@@ -2295,29 +2319,45 @@ fn apply_autostart(enable: bool) {
     }
 }
 
-/// キャプチャキーとプレビューキーが同じ実効条件かを判定する。「なし」は無視し、
-/// 2つのキー欄の順番が逆でも同じ条件として扱う。
-fn same_key_condition(
-    hold_first: &str,
-    hold_second: &str,
-    preview_first: &str,
-    preview_second: &str,
-) -> bool {
-    let hold: Vec<&str> = [hold_first, hold_second]
-        .into_iter()
-        .filter(|key| *key != "なし")
-        .collect();
-    let preview: Vec<&str> = [preview_first, preview_second]
-        .into_iter()
-        .filter(|key| *key != "なし")
-        .collect();
-    if hold.is_empty() || hold.len() != preview.len() {
-        return false;
+fn current_key_conditions(h: HWND) -> (String, String, String, String) {
+    (
+        selected_key(h, IDC_HOLDKEY),
+        selected_key(h, IDC_HOLDKEY2),
+        selected_key(h, IDC_DETECT_KEY),
+        selected_key(h, IDC_DETECT_KEY2),
+    )
+}
+
+fn warn_if_key_conditions_conflict(h: HWND) {
+    let (hold_first, hold_second, preview_first, preview_second) = current_key_conditions(h);
+    if Config::key_conditions_conflict(&hold_first, &hold_second, &preview_first, &preview_second) {
+        unsafe {
+            MessageBoxW(
+                Some(h),
+                w!(
+                    "キャプチャキーとプレビューキーが競合しています。設定は保存されますが、競合中はプレビューキーは動作しません。"
+                ),
+                w!("キー設定"),
+                MB_OK | MB_ICONWARNING,
+            );
+        }
     }
-    (hold.len() == 1 && hold[0] == preview[0])
-        || (hold.len() == 2
-            && ((hold[0] == preview[0] && hold[1] == preview[1])
-                || (hold[0] == preview[1] && hold[1] == preview[0])))
+}
+
+fn handle_key_combo_change(h: HWND, changed_id: i32) {
+    let pair = match changed_id {
+        IDC_HOLDKEY | IDC_HOLDKEY2 => (IDC_HOLDKEY, IDC_HOLDKEY2),
+        IDC_DETECT_KEY | IDC_DETECT_KEY2 => (IDC_DETECT_KEY, IDC_DETECT_KEY2),
+        _ => return,
+    };
+    if changed_id == pair.0 {
+        let first = selected_key(h, pair.0);
+        let second = selected_key(h, pair.1);
+        let second = normalized_second_key(&first, &second).to_string();
+        populate_key_pair(h, pair.0, pair.1, &first, &second);
+    }
+    auto_save(h, false);
+    warn_if_key_conditions_conflict(h);
 }
 
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -2333,61 +2373,7 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 IDC_HOLDKEY | IDC_HOLDKEY2 | IDC_DETECT_KEY | IDC_DETECT_KEY2
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE =>
                 {
-                    // キャプチャキーとプレビューキーの重複ガード (SPECv0.5.3):
-                    // 同じ条件だと挙動が未定義になるため、警告して変更前の値へ戻す。
-                    let hold_first =
-                        KEY_OPTIONS[combo_sel(h, IDC_HOLDKEY).min(KEY_OPTIONS.len() - 1)];
-                    let hold_second =
-                        KEY_OPTIONS[combo_sel(h, IDC_HOLDKEY2).min(KEY_OPTIONS.len() - 1)];
-                    let preview_first =
-                        KEY_OPTIONS[combo_sel(h, IDC_DETECT_KEY).min(KEY_OPTIONS.len() - 1)];
-                    let preview_second =
-                        KEY_OPTIONS[combo_sel(h, IDC_DETECT_KEY2).min(KEY_OPTIONS.len() - 1)];
-                    if same_key_condition(hold_first, hold_second, preview_first, preview_second) {
-                        unsafe {
-                            MessageBoxW(
-                                Some(h),
-                                w!("キャプチャキーとプレビューキーに同じキーは設定できません。"),
-                                w!("キー設定"),
-                                MB_OK | MB_ICONWARNING,
-                            );
-                        }
-                        let cfg = Config::load();
-                        combo_select(
-                            h,
-                            IDC_HOLDKEY,
-                            KEY_OPTIONS
-                                .iter()
-                                .position(|k| *k == cfg.hold_key)
-                                .unwrap_or(0),
-                        );
-                        combo_select(
-                            h,
-                            IDC_HOLDKEY2,
-                            KEY_OPTIONS
-                                .iter()
-                                .position(|k| *k == cfg.hold_key2)
-                                .unwrap_or(0),
-                        );
-                        combo_select(
-                            h,
-                            IDC_DETECT_KEY,
-                            KEY_OPTIONS
-                                .iter()
-                                .position(|k| *k == cfg.detect_key)
-                                .unwrap_or(0),
-                        );
-                        combo_select(
-                            h,
-                            IDC_DETECT_KEY2,
-                            KEY_OPTIONS
-                                .iter()
-                                .position(|k| *k == cfg.detect_key2)
-                                .unwrap_or(0),
-                        );
-                    } else {
-                        auto_save(h, false);
-                    }
+                    handle_key_combo_change(h, id);
                 }
                 IDC_SRCLANG | IDC_LANG | IDC_OVERLAY_THEME
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE =>
@@ -2415,6 +2401,9 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     auto_save(h, false);
                     if id == IDC_BOSS_GUARD {
                         apply_boss_guard(h, check_get(h, IDC_BOSS_GUARD));
+                    } else if id == IDC_PREVIEW_DETECT_MODE && check_get(h, IDC_PREVIEW_DETECT_MODE)
+                    {
+                        warn_if_key_conditions_conflict(h);
                     }
                 }
                 IDC_POLL | IDC_PIN_HOLD | IDC_HOTKEY | IDC_DEEPL | IDC_GOOGLE | IDC_LOG_MAX
@@ -2941,5 +2930,33 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(h, msg, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod key_combo_tests {
+    use super::{normalized_second_key, second_key_options};
+
+    #[test]
+    fn 第2欄は第1欄の実キーだけを候補から除外する() {
+        let options = second_key_options("LCtrl");
+        assert!(options.contains(&"なし"));
+        assert!(!options.contains(&"LCtrl"));
+        assert!(options.contains(&"Ctrl"));
+        assert!(options.contains(&"RCtrl"));
+    }
+
+    #[test]
+    fn 第1欄がなしなら第2欄にもなしを残す() {
+        let options = second_key_options("なし");
+        assert!(options.contains(&"なし"));
+        assert_eq!(options.len(), 14);
+    }
+
+    #[test]
+    fn 第1欄を第2欄と同じ実キーへ変えると第2欄をなしへ戻す() {
+        assert_eq!(normalized_second_key("Shift", "Shift"), "なし");
+        assert_eq!(normalized_second_key("Shift", "RShift"), "RShift");
+        assert_eq!(normalized_second_key("なし", "なし"), "なし");
     }
 }

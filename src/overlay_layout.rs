@@ -12,8 +12,9 @@ use crate::overlay::{
 };
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK, DeleteObject, DrawTextW, GetDC, GetMonitorInfoW, HDC,
-    HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, ReleaseDC, SelectObject,
+    DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE, DT_WORDBREAK, DeleteObject, DrawTextW, GetDC,
+    GetMonitorInfoW, HDC, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    ReleaseDC, SelectObject,
 };
 
 /// オーバーレイの配色一式。config.overlay_theme ("system" | "light" | "dark") に応じて
@@ -215,6 +216,57 @@ fn measure_font(hdc: HDC, text: &str, size: i32, bold: bool, mono: bool, maxw: i
     }
 }
 
+fn measure_single_line(hdc: HDC, text: &str, size: i32, bold: bool) -> (i32, i32) {
+    unsafe {
+        let font = make_font(size, bold);
+        let old = SelectObject(hdc, HGDIOBJ(font.0));
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        if wide.is_empty() {
+            wide.push(' ' as u16);
+        }
+        let mut rect = RECT::default();
+        DrawTextW(
+            hdc,
+            &mut wide,
+            &mut rect,
+            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        SelectObject(hdc, old);
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        (rect.right - rect.left, rect.bottom - rect.top)
+    }
+}
+
+/// 1行テキストを指定幅へ収め、超過分を末尾の省略記号へ置き換える。
+fn ellipsize_single_line(
+    hdc: HDC,
+    text: &str,
+    size: i32,
+    bold: bool,
+    max_width: i32,
+) -> (String, i32, i32) {
+    let (full_width, height) = measure_single_line(hdc, text, size, bold);
+    if full_width <= max_width {
+        return (text.to_string(), full_width, height);
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut low = 0usize;
+    let mut high = chars.len();
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        let candidate = format!("{}…", chars[..mid].iter().collect::<String>());
+        if measure_single_line(hdc, &candidate, size, bold).0 <= max_width {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    let fitted = format!("{}…", chars[..low].iter().collect::<String>());
+    let (width, fitted_height) = measure_single_line(hdc, &fitted, size, bold);
+    (fitted, width.min(max_width), fitted_height)
+}
+
 pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
     unsafe {
         let thm = theme();
@@ -393,13 +445,19 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         let (log_cw, _) = measure(hdc, "ログを開く", FONT_CHIP, false, 200);
         let log_w = log_cw + 20;
         let sys_btns_w = help_w + 6 + set_w + 6 + log_w;
+        // 名前付き3ボタンに加え、ピン・閉じるボタンと全間隔、右余白まで予約する。
+        // 最終幅から逆算した help_left と同じ境界になるため、表示文がボタンへ重ならない。
+        let sys_fixed_controls_w = sys_btns_w + 6 + CLOSE_SIZE + 4 + CLOSE_SIZE + 6;
+        let max_window_w = MAXW + PAD * 2;
+        let sys_text_max_w = (max_window_w - PAD - 10 - sys_fixed_controls_w).max(0);
 
-        // テキストの描画
+        // テキストはシステム行を1行に保ち、ボタン群の手前で省略する。
         let row_h = CHIP_H;
         let mut sys_text_h = 0;
         let mut sys_text_w = 0;
         if !sys_disp.is_empty() {
-            let (tw, th) = measure(hdc, &sys_disp, FONT_HEADING, false, MAXW - sys_btns_w - 20);
+            let (fitted, tw, th) =
+                ellipsize_single_line(hdc, &sys_disp, FONT_HEADING, false, sys_text_max_w);
             sys_text_w = tw;
             sys_text_h = th;
             let text_y = y + (row_h.max(th) - th) / 2;
@@ -407,10 +465,10 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
                 rect: RECT {
                     left: PAD,
                     top: text_y,
-                    right: PAD + tw + 4,
+                    right: PAD + tw,
                     bottom: text_y + th,
                 },
-                text: sys_disp,
+                text: fitted,
                 size: FONT_HEADING,
                 color: thm.status,
                 bold: false,
@@ -420,7 +478,7 @@ pub fn compute_layout(hwnd: HWND, content: &OverlayContent) -> Layout {
         let sys_row_h = row_h.max(sys_text_h);
         // システムメッセージ行の右端ボタン (使い方・設定・ログを開く幅, 上端Y)。
         let sys_msg_btns = Some((help_w, set_w, log_w, y + (sys_row_h - CHIP_H) / 2));
-        need_w = need_w.max(PAD + sys_text_w + 10 + sys_btns_w + PAD);
+        need_w = need_w.max(PAD + sys_text_w + 10 + sys_fixed_controls_w);
         y += sys_row_h + 8;
 
         // 【入力内容】: 対象アプリ情報 + UIAパスノードボタン + OCR対象画像ボタン。コピーは見出しラベルの左端。

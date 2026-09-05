@@ -761,6 +761,43 @@ impl Config {
         }
     }
 
+    /// 2つのキー欄から作られる条件が現在押されているかを返す。
+    /// 2欄とも有効な場合は、同じ物理キーを両方の条件へ使い回さない。
+    pub fn key_condition_down(
+        first: &str,
+        second: &str,
+        mut is_down: impl FnMut(i32) -> bool,
+    ) -> bool {
+        let (masks, count) = key_condition_masks(first, second);
+        masks[..count].iter().any(|mask| {
+            PHYSICAL_KEYS
+                .iter()
+                .enumerate()
+                .all(|(index, vk)| mask & (1 << index) == 0 || is_down(*vk))
+        })
+    }
+
+    /// 片方の通常操作だけでもう片方の条件まで成立し得るキー設定を競合とみなす。
+    /// 例: `Ctrl` と `LCtrl`、`Ctrl+Shift` と `LCtrl+Shift` は競合するが、
+    /// `Ctrl` と `Shift` は同時押しを意図的に追加しない限り互いを発火させないため競合しない。
+    pub fn key_conditions_conflict(
+        first_a: &str,
+        second_a: &str,
+        first_b: &str,
+        second_b: &str,
+    ) -> bool {
+        let (a_masks, a_count) = key_condition_masks(first_a, second_a);
+        let (b_masks, b_count) = key_condition_masks(first_b, second_b);
+        if a_count == 0 || b_count == 0 {
+            return false;
+        }
+        a_masks[..a_count].iter().any(|a| {
+            b_masks[..b_count]
+                .iter()
+                .any(|b| (a & b) == *a || (a & b) == *b)
+        })
+    }
+
     /// 範囲指定ホットキーの (修飾キー, 仮想キー)。解析失敗時は Ctrl+Alt+Shift+T。
     pub fn region_hotkey_parsed(&self) -> (u32, u32) {
         parse_hotkey(&self.region_hotkey).unwrap_or((0x0002 | 0x0001 | 0x0004, b'T' as u32))
@@ -800,6 +837,64 @@ pub enum KeyRequirement {
     None,
     Single(i32),
     Either(i32, i32),
+}
+
+const PHYSICAL_KEYS: [i32; 9] = [0xA2, 0xA3, 0xA0, 0xA1, 0xA4, 0xA5, 0x5B, 0x5C, 0x77];
+
+fn requirement_candidates(requirement: KeyRequirement) -> ([i32; 2], usize) {
+    match requirement {
+        KeyRequirement::None => ([0, 0], 0),
+        KeyRequirement::Single(vk) => ([vk, 0], 1),
+        KeyRequirement::Either(left, right) => ([left, right], 2),
+    }
+}
+
+fn physical_key_mask(vk: i32) -> u16 {
+    PHYSICAL_KEYS
+        .iter()
+        .position(|candidate| *candidate == vk)
+        .map(|index| 1 << index)
+        .unwrap_or(0)
+}
+
+/// 条件を成立させる最小の物理キー集合を最大4通りまで列挙する。
+/// 同じ物理キーを2欄へ割り当てる組み合わせは除外する。
+fn key_condition_masks(first: &str, second: &str) -> ([u16; 4], usize) {
+    let first = Config::key_requirement(first);
+    let second = Config::key_requirement(second);
+    let (first_keys, first_count) = requirement_candidates(first);
+    let (second_keys, second_count) = requirement_candidates(second);
+    let mut masks = [0u16; 4];
+    let mut count = 0usize;
+
+    let (left_keys, left_count, right_keys, right_count) = match (first_count, second_count) {
+        (0, 0) => return (masks, 0),
+        (0, _) => (second_keys, second_count, [0, 0], 0),
+        (_, 0) => (first_keys, first_count, [0, 0], 0),
+        _ => (first_keys, first_count, second_keys, second_count),
+    };
+
+    if right_count == 0 {
+        for vk in left_keys.into_iter().take(left_count) {
+            masks[count] = physical_key_mask(vk);
+            count += 1;
+        }
+        return (masks, count);
+    }
+
+    for left in left_keys.into_iter().take(left_count) {
+        for right in right_keys.into_iter().take(right_count) {
+            if left == right {
+                continue;
+            }
+            let mask = physical_key_mask(left) | physical_key_mask(right);
+            if mask != 0 && !masks[..count].contains(&mask) {
+                masks[count] = mask;
+                count += 1;
+            }
+        }
+    }
+    (masks, count)
 }
 
 /// "Ctrl+Alt+Shift+T" のような表記を (MOD_*, VK) に変換
@@ -901,6 +996,51 @@ mod tests {
             Config::key_requirement("Win"),
             KeyRequirement::Either(0x5B, 0x5C)
         );
+    }
+
+    #[test]
+    fn 複合キーは異なる物理キーが両方押された場合だけ成立する() {
+        assert!(Config::key_condition_down("Ctrl", "Shift", |vk| {
+            matches!(vk, 0xA2 | 0xA1)
+        }));
+        assert!(!Config::key_condition_down("Ctrl", "LCtrl", |vk| {
+            vk == 0xA2
+        }));
+        assert!(Config::key_condition_down("Ctrl", "LCtrl", |vk| {
+            matches!(vk, 0xA2 | 0xA3)
+        }));
+        assert!(!Config::key_condition_down("LCtrl", "LCtrl", |vk| {
+            vk == 0xA2
+        }));
+        assert!(Config::key_condition_down("LCtrl", "RCtrl", |vk| {
+            matches!(vk, 0xA2 | 0xA3)
+        }));
+        assert!(!Config::key_condition_down("なし", "なし", |_| true));
+    }
+
+    #[test]
+    fn 片方の操作がもう片方も発火させるキー条件を競合と判定する() {
+        assert!(Config::key_conditions_conflict(
+            "Ctrl", "なし", "LCtrl", "なし"
+        ));
+        assert!(Config::key_conditions_conflict(
+            "Ctrl", "Shift", "LCtrl", "LShift"
+        ));
+        assert!(Config::key_conditions_conflict(
+            "Ctrl", "なし", "LCtrl", "Shift"
+        ));
+        assert!(Config::key_conditions_conflict(
+            "LCtrl", "RCtrl", "Ctrl", "なし"
+        ));
+        assert!(!Config::key_conditions_conflict(
+            "Ctrl", "なし", "Shift", "なし"
+        ));
+        assert!(!Config::key_conditions_conflict(
+            "LCtrl", "なし", "RCtrl", "なし"
+        ));
+        assert!(!Config::key_conditions_conflict(
+            "なし", "なし", "Ctrl", "なし"
+        ));
     }
 
     #[test]

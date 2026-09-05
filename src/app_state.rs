@@ -2,7 +2,7 @@
 // メインウィンドウプロシージャ・状態遷移・ポーリング・UI同期を担う。
 // チップ操作は chip_handler モジュールに委譲する。
 use crate::capture;
-use crate::config::{Config, KeyRequirement};
+use crate::config::Config;
 use crate::detect;
 use crate::engine;
 use crate::logviewer;
@@ -385,33 +385,11 @@ fn tick_edit_undo_hotkey() {
     }
 }
 
-/// 設定欄1つ分のキーが押されているかを返す。
-fn key_requirement_down(requirement: KeyRequirement) -> bool {
-    let is_down = |vk| unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 };
-    match requirement {
-        KeyRequirement::None => false,
-        KeyRequirement::Single(vk) => is_down(vk),
-        KeyRequirement::Either(left, right) => is_down(left) || is_down(right),
-    }
-}
-
 /// 2つの設定欄をAND条件で評価する。「なし」は空欄として扱い、両方「なし」の場合は無効。
 fn configured_key_down(first: &str, second: &str) -> bool {
-    let requirements = [
-        Config::key_requirement(first),
-        Config::key_requirement(second),
-    ];
-    let active = requirements
-        .iter()
-        .filter(|requirement| !matches!(requirement, KeyRequirement::None));
-    let mut any = false;
-    for requirement in active {
-        any = true;
-        if !key_requirement_down(*requirement) {
-            return false;
-        }
-    }
-    any
+    Config::key_condition_down(first, second, |vk| unsafe {
+        (GetAsyncKeyState(vk) as u16 & 0x8000) != 0
+    })
 }
 
 /// 100ms周期のポーリング (SPEC §4)
@@ -472,9 +450,16 @@ pub fn tick() {
 /// 領域検出モード (デバッグ) のポーリング
 fn tick_detect() {
     let action = with_app(|app| {
+        let preview_conflicts = Config::key_conditions_conflict(
+            &app.cfg.hold_key,
+            &app.cfg.hold_key2,
+            &app.cfg.detect_key,
+            &app.cfg.detect_key2,
+        );
         let down = (app.cfg.detect_enabled
             && configured_key_down(&app.cfg.hold_key, &app.cfg.hold_key2))
             || (app.cfg.preview_detect_enabled
+                && !preview_conflicts
                 && configured_key_down(&app.cfg.detect_key, &app.cfg.detect_key2));
         if !down {
             if app.detect_on {

@@ -9,7 +9,7 @@ use crate::util;
 
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
 /// handle_chip 冒頭でAppから取り出す状態一式。
 /// App の借用を解放してからダイアログ表示やワーカー起動を行うためのスナップショット。
@@ -29,6 +29,17 @@ struct ChipCtx {
     recog_id: Option<i64>,
     capture_id: Option<i64>,
     held_ctx: crate::worker::AppContext,
+}
+
+const HELP_DETAILS: &str = "抽出：普通だと難しい箇所にあるテキストも正確に抽出できます。\n・カーソル下のUIにあるテキストの抽出\n・コピーしているテキストの抽出\n・画面に表示しきれていないテキストを抽出\n・部分選択したテキストの抽出\n・スクリーンショットからのテキストの抽出\n\n翻訳：英文を無料で即座に翻訳できます。\n・標準エンジンで高速翻訳\n・LLMで高精度翻訳\n\n解説：AIに解説を求めることができます。\n・プロンプトテンプレート編集\n・モデル変更\n・タイトルや構成情報の追加\n・スクリーンショット添付";
+
+fn help_dialog_text(boss_guard: bool) -> (String, String) {
+    let title = if boss_guard {
+        "使い方"
+    } else {
+        "FocusTranslatorの使い方"
+    };
+    (title.to_string(), format!("{title}\n\n{HELP_DETAILS}"))
 }
 
 /// 現在のアプリ状態からプロンプト置換用コンテキストを組み立てる (SPECv0.4 §7.1)。
@@ -552,13 +563,14 @@ pub fn handle_chip(id: usize) {
             return;
         }
         overlay::CHIP_HELP => {
+            let (title, body) = help_dialog_text(c.cfg.boss_guard);
+            let title = util::to_wide(&title);
+            let body = util::to_wide(&body);
             unsafe {
                 let _ = MessageBoxW(
                     Some(main_hwnd()),
-                    w!(
-                        "FocusTranslatorの使い方\n\n抽出：普通だと難しい箇所にあるテキストも正確に抽出できます。\n・カーソル下のUIにあるテキストの抽出\n・コピーしているテキストの抽出\n・画面に表示しきれていないテキストを抽出\n・部分選択したテキストの抽出\n・スクリーンショットからのテキストの抽出\n\n翻訳：英文を無料で即座に翻訳できます。\n・標準エンジンで高速翻訳\n・LLMで高精度翻訳\n\n解説：AIに解説を求めることができます。\n・プロンプトテンプレート編集\n・モデル変更\n・タイトルや構成情報の追加\n・スクリーンショット添付"
-                    ),
-                    w!("FocusTranslatorの使い方"),
+                    PCWSTR(body.as_ptr()),
+                    PCWSTR(title.as_ptr()),
                     MB_OK | MB_ICONINFORMATION,
                 );
             }
@@ -1099,4 +1111,24 @@ fn ensure_consent_profile(profile_name: &str, with_image: bool, cfg: &Config) ->
         return true;
     }
     ensure_consent_send(!cfg.consent_text, with_image && !cfg.consent_image, cfg)
+}
+
+#[cfg(test)]
+mod help_dialog_tests {
+    use super::help_dialog_text;
+
+    #[test]
+    fn boss_guard有効時は使い方画面から製品名を隠す() {
+        let (title, body) = help_dialog_text(true);
+        assert_eq!(title, "使い方");
+        assert!(!body.contains("FocusTranslator"));
+        assert!(body.contains("スクリーンショット添付"));
+    }
+
+    #[test]
+    fn 通常時は使い方画面に製品名を表示する() {
+        let (title, body) = help_dialog_text(false);
+        assert_eq!(title, "FocusTranslatorの使い方");
+        assert!(body.starts_with("FocusTranslatorの使い方"));
+    }
 }
