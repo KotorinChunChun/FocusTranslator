@@ -1,16 +1,17 @@
 use crate::util::to_wide;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
     FONT_OUTPUT_PRECISION, FW_BOLD, FW_NORMAL, HFONT,
 };
-use windows::Win32::UI::Controls::EM_SETPASSWORDCHAR;
+use windows::Win32::UI::Controls::{COMBOBOXINFO, EM_SETPASSWORDCHAR, GetComboBoxInfo};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, CB_ADDSTRING, CB_GETCURSEL, CB_GETLBTEXT,
     CB_GETLBTEXTLEN, CB_RESETCONTENT, CB_SETCURSEL, CB_SETDROPPEDWIDTH, CBS_DROPDOWN,
     CBS_DROPDOWNLIST, CreateWindowExW, GetDlgItem, GetWindowTextLengthW, GetWindowTextW, HMENU,
-    SendMessageW, SetWindowTextW, WINDOW_STYLE, WM_SETFONT, WS_BORDER, WS_CHILD, WS_TABSTOP,
-    WS_VISIBLE,
+    LB_GETTOPINDEX, LB_SETTOPINDEX, SendMessageW, SetWindowTextW, WINDOW_STYLE, WM_MOUSEWHEEL,
+    WM_SETFONT, WS_BORDER, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
@@ -137,18 +138,65 @@ pub fn combo_h(
     dropdown_h: i32,
     id: i32,
 ) -> HWND {
-    ctl(
+    let combo = ctl(
         parent,
         instance,
         w!("COMBOBOX"),
         "",
-        WS_TABSTOP | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
+        WS_TABSTOP | WINDOW_STYLE(CBS_DROPDOWNLIST as u32 | WS_VSCROLL),
         x,
         y,
         w,
         dropdown_h,
         id,
-    )
+    );
+    enable_combo_wheel_scroll(combo);
+    combo
+}
+
+/// 標準のドロップダウンリストは環境によってホイールを処理しないため、一覧側を
+/// サブクラス化し、選択値を変えず表示位置だけを3項目ずつ移動する。
+fn enable_combo_wheel_scroll(combo: HWND) {
+    unsafe {
+        let mut info = COMBOBOXINFO {
+            cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
+            ..Default::default()
+        };
+        if GetComboBoxInfo(combo, &mut info).is_ok() {
+            let _ = SetWindowSubclass(info.hwndList, Some(combo_list_subclass_proc), 1, 0);
+        }
+    }
+}
+
+unsafe extern "system" fn combo_list_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    _ref_data: usize,
+) -> LRESULT {
+    if msg == WM_MOUSEWHEEL {
+        let delta = ((wparam.0 >> 16) as u16) as i16;
+        let top = unsafe {
+            SendMessageW(hwnd, LB_GETTOPINDEX, Some(WPARAM(0)), Some(LPARAM(0))).0 as i32
+        };
+        let next = if delta < 0 {
+            top.saturating_add(3)
+        } else {
+            top.saturating_sub(3)
+        };
+        unsafe {
+            SendMessageW(
+                hwnd,
+                LB_SETTOPINDEX,
+                Some(WPARAM(next as usize)),
+                Some(LPARAM(0)),
+            );
+        }
+        return LRESULT(0);
+    }
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
 /// ドロップダウンリスト部分の表示幅だけを広げる(閉じた状態の表示幅はコンボ自体の幅のまま)。

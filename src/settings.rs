@@ -3,8 +3,10 @@ use crate::config::Config;
 use crate::ui_helpers::*;
 use crate::util::{self, to_wide};
 use std::cell::RefCell;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Gdi::{COLOR_BTNFACE, HFONT};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    COLOR_BTNFACE, GetSysColorBrush, HDC, HFONT, SetBkMode, SetTextColor, TRANSPARENT,
+};
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
 };
@@ -18,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindow, LoadCursorW, MB_ICONINFORMATION, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_YESNO,
     MessageBoxW, PostMessageW, RegisterClassW, SM_CYSCREEN, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
     SetForegroundWindow, SetWindowTextW, ShowWindow, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_DESTROY, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WNDCLASSW, WS_CAPTION, WS_EX_TOPMOST, WS_SYSMENU,
 };
 use windows::core::{PCWSTR, w};
 
@@ -59,6 +61,8 @@ const IDC_PROF_TYPE: i32 = 140;
 const IDC_DETECT_MODE: i32 = 145;
 const IDC_DETECT_KEY: i32 = 146;
 const IDC_DETECT_KEY2: i32 = 188;
+/// キャプチャキーとプレビューキーの競合をモーダル表示せず案内する赤字ラベル。
+const IDC_KEY_CONFLICT: i32 = 189;
 const IDC_PREVIEW_DETECT_MODE: i32 = 147;
 const IDC_PIN_HOLD: i32 = 151;
 /// プロンプト編集ウィンドウを開くボタン (SPECv0.4.7 §6.1)
@@ -358,6 +362,19 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             y + 2,
             88,
             IDC_PREVIEW_DETECT_MODE,
+        );
+        y += STEP;
+        ctl(
+            h,
+            inst,
+            w!("STATIC"),
+            "",
+            WINDOW_STYLE(0),
+            lx,
+            y + 2,
+            COL_W - 24,
+            20,
+            IDC_KEY_CONFLICT,
         );
         y += STEP;
         label(h, inst, "範囲指定ホットキー", lx, y + 2, 130);
@@ -932,13 +949,26 @@ fn second_key_options(first: &str) -> Vec<&'static str> {
     KEY_OPTIONS
         .iter()
         .copied()
-        // 「なし」は両欄を無効にするため常に残す。実キーだけ重複候補から除外する。
-        .filter(|candidate| first == "なし" || *candidate == "なし" || *candidate != first)
+        // 「なし」は常に残す。左が無印修飾キーなら、右から同系統の無印・L・Rを除外する。
+        .filter(|candidate| !second_key_excluded(first, candidate))
         .collect()
 }
 
+fn second_key_excluded(first: &str, candidate: &str) -> bool {
+    if candidate == "なし" || first == "なし" {
+        return false;
+    }
+    match first {
+        "Ctrl" => matches!(candidate, "Ctrl" | "LCtrl" | "RCtrl"),
+        "Shift" => matches!(candidate, "Shift" | "LShift" | "RShift"),
+        "Alt" => matches!(candidate, "Alt" | "LAlt" | "RAlt"),
+        "Win" => matches!(candidate, "Win" | "LWin" | "RWin"),
+        _ => candidate == first,
+    }
+}
+
 fn normalized_second_key<'a>(first: &str, second: &'a str) -> &'a str {
-    if first != "なし" && first == second {
+    if second_key_excluded(first, second) {
         "なし"
     } else {
         second
@@ -996,6 +1026,7 @@ fn populate_key_combos(h: HWND, cfg: &Config) {
         &cfg.detect_key,
         &cfg.detect_key2,
     );
+    update_key_conflict_label(h);
 }
 
 fn populate(h: HWND) {
@@ -2328,20 +2359,19 @@ fn current_key_conditions(h: HWND) -> (String, String, String, String) {
     )
 }
 
-fn warn_if_key_conditions_conflict(h: HWND) {
+fn update_key_conflict_label(h: HWND) {
     let (hold_first, hold_second, preview_first, preview_second) = current_key_conditions(h);
-    if Config::key_conditions_conflict(&hold_first, &hold_second, &preview_first, &preview_second) {
-        unsafe {
-            MessageBoxW(
-                Some(h),
-                w!(
-                    "キャプチャキーとプレビューキーが競合しています。設定は保存されますが、競合中はプレビューキーは動作しません。"
-                ),
-                w!("キー設定"),
-                MB_OK | MB_ICONWARNING,
-            );
-        }
-    }
+    let message = if Config::key_conditions_conflict(
+        &hold_first,
+        &hold_second,
+        &preview_first,
+        &preview_second,
+    ) {
+        "キーが重複しています（設定は保存されます）"
+    } else {
+        ""
+    };
+    set_ctl_text(h, IDC_KEY_CONFLICT, message);
 }
 
 fn handle_key_combo_change(h: HWND, changed_id: i32) {
@@ -2357,11 +2387,24 @@ fn handle_key_combo_change(h: HWND, changed_id: i32) {
         populate_key_pair(h, pair.0, pair.1, &first, &second);
     }
     auto_save(h, false);
-    warn_if_key_conditions_conflict(h);
+    update_key_conflict_label(h);
 }
 
 unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        WM_CTLCOLORSTATIC => {
+            let conflict = get_dlg_item(h, IDC_KEY_CONFLICT);
+            if lparam.0 == conflict.0 as isize {
+                let hdc = HDC(wparam.0 as *mut _);
+                unsafe {
+                    SetTextColor(hdc, COLORREF(0x0000_00FF));
+                    SetBkMode(hdc, TRANSPARENT);
+                    let brush = GetSysColorBrush(COLOR_BTNFACE);
+                    return LRESULT(brush.0 as isize);
+                }
+            }
+            unsafe { DefWindowProcW(h, msg, wparam, lparam) }
+        }
         WM_COMMAND => {
             let id = (wparam.0 & 0xFFFF) as i32;
             let notif = ((wparam.0 >> 16) & 0xFFFF) as u32;
@@ -2401,9 +2444,6 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     auto_save(h, false);
                     if id == IDC_BOSS_GUARD {
                         apply_boss_guard(h, check_get(h, IDC_BOSS_GUARD));
-                    } else if id == IDC_PREVIEW_DETECT_MODE && check_get(h, IDC_PREVIEW_DETECT_MODE)
-                    {
-                        warn_if_key_conditions_conflict(h);
                     }
                 }
                 IDC_POLL | IDC_PIN_HOLD | IDC_HOTKEY | IDC_DEEPL | IDC_GOOGLE | IDC_LOG_MAX
@@ -2947,6 +2987,20 @@ mod key_combo_tests {
     }
 
     #[test]
+    fn 左が無印修飾キーなら右から同系統の左右候補も除外する() {
+        for (first, excluded) in [
+            ("Ctrl", ["Ctrl", "LCtrl", "RCtrl"]),
+            ("Shift", ["Shift", "LShift", "RShift"]),
+            ("Alt", ["Alt", "LAlt", "RAlt"]),
+            ("Win", ["Win", "LWin", "RWin"]),
+        ] {
+            let options = second_key_options(first);
+            assert!(options.contains(&"なし"));
+            assert!(excluded.iter().all(|key| !options.contains(key)));
+        }
+    }
+
+    #[test]
     fn 第1欄がなしなら第2欄にもなしを残す() {
         let options = second_key_options("なし");
         assert!(options.contains(&"なし"));
@@ -2956,7 +3010,9 @@ mod key_combo_tests {
     #[test]
     fn 第1欄を第2欄と同じ実キーへ変えると第2欄をなしへ戻す() {
         assert_eq!(normalized_second_key("Shift", "Shift"), "なし");
-        assert_eq!(normalized_second_key("Shift", "RShift"), "RShift");
+        assert_eq!(normalized_second_key("Shift", "LShift"), "なし");
+        assert_eq!(normalized_second_key("Shift", "RShift"), "なし");
+        assert_eq!(normalized_second_key("LShift", "RShift"), "RShift");
         assert_eq!(normalized_second_key("なし", "なし"), "なし");
     }
 }
