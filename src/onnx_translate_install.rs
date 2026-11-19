@@ -51,7 +51,10 @@ const FUGU_MT_FILES: [ModelFile; 6] = [
 ];
 
 pub fn dir() -> PathBuf {
-    util::config_dir().join("models").join("onnx_translate").join("fugu_mt")
+    util::config_dir()
+        .join("models")
+        .join("onnx_translate")
+        .join("fugu_mt")
 }
 
 /// 全ファイルが導入済みか

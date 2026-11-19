@@ -66,12 +66,15 @@ fn discard_old_db_if_needed() -> Result<(), String> {
     }
     let version: i64 = {
         let c = Connection::open(&path).map_err(|e| e.to_string())?;
-        c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0)
+        c.query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0)
     };
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
-    util::app_log(&format!("logdb: old schema v{version} detected, recreating"));
+    util::app_log(&format!(
+        "logdb: old schema v{version} detected, recreating"
+    ));
     for suffix in ["", "-wal", "-shm"] {
         let mut p = path.clone().into_os_string();
         p.push(suffix);
@@ -290,12 +293,17 @@ pub fn replace_capture_image(
     crop_rect: Option<(i32, i32, i32, i32)>,
 ) {
     with_conn((), |guard| {
-        store_capture_extras(guard, capture_id, image, &CaptureExtent {
-            full_image: None,
-            crop_rect,
-            focus_kind: crop_rect.map(|_| "all"),
-            focus_y: None,
-        });
+        store_capture_extras(
+            guard,
+            capture_id,
+            image,
+            &CaptureExtent {
+                full_image: None,
+                crop_rect,
+                focus_kind: crop_rect.map(|_| "all"),
+                focus_y: None,
+            },
+        );
     });
 }
 
@@ -337,7 +345,11 @@ pub fn log_recognition(
 /// での成功済み認識結果があれば、その (recognition_id, source_text) を返す
 /// (SPECv0.4追補: 再OCR/再ログを避けるためのキャッシュ。SPECv0.5.5でllm_profileを条件に追加)。
 /// 最新のものを優先する。
-pub fn find_cached_recognition(image_hash: &str, engine: &str, llm_profile: Option<&str>) -> Option<(i64, String)> {
+pub fn find_cached_recognition(
+    image_hash: &str,
+    engine: &str,
+    llm_profile: Option<&str>,
+) -> Option<(i64, String)> {
     with_conn_opt(|guard| {
         guard
             .query_row(
@@ -356,7 +368,11 @@ pub fn find_cached_recognition(image_hash: &str, engine: &str, llm_profile: Opti
 /// 同一 request_json (APIキーはマスク済み) の成功済み翻訳結果があれば、その
 /// (recognition_id, translated_text) を返す (SPECv0.4.8追補: 翻訳APIキャッシュ)。
 /// 対象は request_json を記録するエンジン(deepl/google/llm)のみ。最新のものを優先する。
-pub fn find_cached_translation(engine: &str, profile: Option<&str>, request_json: &str) -> Option<(i64, String)> {
+pub fn find_cached_translation(
+    engine: &str,
+    profile: Option<&str>,
+    request_json: &str,
+) -> Option<(i64, String)> {
     with_conn_opt(|guard| {
         guard
             .query_row(
@@ -373,7 +389,10 @@ pub fn find_cached_translation(engine: &str, profile: Option<&str>, request_json
 /// 同一プロファイル+同一 input_text の成功済み解説結果があれば (recognition_id, explanation_text)
 /// を返す (SPECv0.5.2追補: 解説チップのプロファイル別実行で、テンプレートが同一で input_text が
 /// 一致していても別プロファイルのキャッシュを誤って流用しないための厳密版)。
-pub fn find_cached_explanation_for_profile(profile: &str, input_text: &str) -> Option<(i64, String)> {
+pub fn find_cached_explanation_for_profile(
+    profile: &str,
+    input_text: &str,
+) -> Option<(i64, String)> {
     with_conn_opt(|guard| {
         guard
             .query_row(
@@ -426,7 +445,11 @@ pub fn llm_usage_summary(profile: &str, within_ms: i64) -> LlmUsageSummary {
              FROM explanations WHERE llm_profile = ?1 AND ts_ms >= ?2",
         ] {
             if let Ok(row) = guard.query_row(sql, rusqlite::params![profile, since], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             }) {
                 sum.count += row.0;
                 sum.tokens_in += row.1;
@@ -492,8 +515,16 @@ pub fn log_explanation(
                  success, error, tokens_in, tokens_out)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
-                recognition_id, now_ms(), llm_profile, duration_ms as i64, input_text,
-                explanation_text, success as i64, error, tokens_in, tokens_out
+                recognition_id,
+                now_ms(),
+                llm_profile,
+                duration_ms as i64,
+                input_text,
+                explanation_text,
+                success as i64,
+                error,
+                tokens_in,
+                tokens_out
             ],
         ) {
             util::app_log(&format!("log_explanation failed: {e}"));
@@ -509,13 +540,17 @@ pub fn rotate(max_records: u32) {
             Ok(s) => s,
             Err(_) => return,
         };
-        let collected: Vec<(i64, Option<String>, Option<String>)> = match stmt
-            .query_map(rusqlite::params![max_records as i64], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+        let collected: Vec<(i64, Option<String>, Option<String>)> =
+            match stmt.query_map(rusqlite::params![max_records as i64], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
             }) {
-            Ok(rows) => rows.flatten().collect(),
-            Err(_) => Vec::new(),
-        };
+                Ok(rows) => rows.flatten().collect(),
+                Err(_) => Vec::new(),
+            };
         drop(stmt);
         for (id, image_path, full_image_path) in collected {
             if let Some(rel) = image_path {
@@ -727,7 +762,9 @@ pub fn search_captures(query: &str, app_exe: &str, limit: usize) -> Vec<CaptureR
         params.push(Box::new(limit as i64));
 
         let p_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| &**b).collect();
-        let Ok(mut stmt) = guard.prepare(&sql) else { return Vec::new() };
+        let Ok(mut stmt) = guard.prepare(&sql) else {
+            return Vec::new();
+        };
         match stmt.query_map(p_refs.as_slice(), map_capture_row) {
             Ok(iter) => iter.flatten().collect(),
             Err(_) => Vec::new(),
@@ -824,7 +861,8 @@ pub fn latest_explanation(recognition_id: i64) -> Option<String> {
                 |r| r.get(0),
             )
             .ok()
-    }).flatten()
+    })
+    .flatten()
 }
 
 /// 認識へのユーザー付与タグを取得
@@ -886,21 +924,30 @@ pub fn delete_capture(id: i64) {
 /// 認識1件を削除 (配下の翻訳・解説はCASCADE)。
 pub fn delete_recognition(id: i64) {
     with_conn((), |guard| {
-        let _ = guard.execute("DELETE FROM recognitions WHERE id=?1", rusqlite::params![id]);
+        let _ = guard.execute(
+            "DELETE FROM recognitions WHERE id=?1",
+            rusqlite::params![id],
+        );
     });
 }
 
 /// 翻訳1件を削除。
 pub fn delete_translation(id: i64) {
     with_conn((), |guard| {
-        let _ = guard.execute("DELETE FROM translations WHERE id=?1", rusqlite::params![id]);
+        let _ = guard.execute(
+            "DELETE FROM translations WHERE id=?1",
+            rusqlite::params![id],
+        );
     });
 }
 
 /// 解説1件を削除 (ログビューア拡張: 解説結果ブロックの選択削除)。
 pub fn delete_explanation(id: i64) {
     with_conn((), |guard| {
-        let _ = guard.execute("DELETE FROM explanations WHERE id=?1", rusqlite::params![id]);
+        let _ = guard.execute(
+            "DELETE FROM explanations WHERE id=?1",
+            rusqlite::params![id],
+        );
     });
 }
 
@@ -944,7 +991,9 @@ mod tests {
     #[test]
     fn tree_record_cascade_rotate_clear() {
         // 環境変数切替中に onnx テスト等が config_dir() を参照しないよう直列化する
-        let _guard = crate::util::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("ft_logdb_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe {
@@ -953,30 +1002,89 @@ mod tests {
 
         // 4工程ツリー: capture → recognition → translation / explanation
         let cid = log_capture(
-            "hold", Some("game.exe"), Some("Game Window"), Some("Root > Panel"), Some("[]"), Some("Edit"), Some("選択テキスト"), None, false,
+            "hold",
+            Some("game.exe"),
+            Some("Game Window"),
+            Some("Root > Panel"),
+            Some("[]"),
+            Some("Edit"),
+            Some("選択テキスト"),
+            None,
+            false,
             CaptureExtent::default(),
         )
         .expect("capture id");
-        let rid = log_recognition(cid, "ocr", "win", 200, Some("hello"), None, Some("hash-a"), None).expect("recognition id");
+        let rid = log_recognition(
+            cid,
+            "ocr",
+            "win",
+            200,
+            Some("hello"),
+            None,
+            Some("hash-a"),
+            None,
+        )
+        .expect("recognition id");
         log_translation(
-            rid, "llm", Some("prof1"), "en", "ja", 300, false, Some("こんにちは"), None,
-            Some("{\"req\":1}"), Some("{\"res\":2}"), Some(10), Some(5),
+            rid,
+            "llm",
+            Some("prof1"),
+            "en",
+            "ja",
+            300,
+            false,
+            Some("こんにちは"),
+            None,
+            Some("{\"req\":1}"),
+            Some("{\"res\":2}"),
+            Some(10),
+            Some(5),
         );
-        log_explanation(rid, "prof1", 400, "prompt text", Some("解説文"), None, Some(20), Some(15));
-        log_explanation(rid, "prof1", 400, "prompt text", None, Some("timeout"), None, None);
+        log_explanation(
+            rid,
+            "prof1",
+            400,
+            "prompt text",
+            Some("解説文"),
+            None,
+            Some(20),
+            Some(15),
+        );
+        log_explanation(
+            rid,
+            "prof1",
+            400,
+            "prompt text",
+            None,
+            Some("timeout"),
+            None,
+            None,
+        );
 
         // LLM使用状況の集計 (SPECv0.5.5): 翻訳1件(10/5) + 解説2件(20/15, NULL/NULL) を合算する
         let usage = llm_usage_summary("prof1", 3_600_000);
         assert_eq!(usage.count, 3, "翻訳1件+解説2件");
         assert_eq!(usage.tokens_in, 30);
         assert_eq!(usage.tokens_out, 20);
-        assert_eq!(llm_usage_summary("prof2", 3_600_000).count, 0, "プロファイルが違えば集計されない");
-        assert_eq!(llm_usage_summary("prof1", -1).count, 0, "集計対象期間の外なら0件");
+        assert_eq!(
+            llm_usage_summary("prof2", 3_600_000).count,
+            0,
+            "プロファイルが違えば集計されない"
+        );
+        assert_eq!(
+            llm_usage_summary("prof1", -1).count,
+            0,
+            "集計対象期間の外なら0件"
+        );
 
         let caps = search_captures("", "", 10);
         assert_eq!(caps.len(), 1);
         assert_eq!(caps[0].app_exe.as_deref(), Some("game.exe"));
-        assert_eq!(caps[0].control_type.as_deref(), Some("Edit"), "コントロール種類が記録される");
+        assert_eq!(
+            caps[0].control_type.as_deref(),
+            Some("Edit"),
+            "コントロール種類が記録される"
+        );
         let recs = recognitions_for(cid);
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].source_text, "hello");
@@ -1003,17 +1111,48 @@ mod tests {
         assert_eq!(recognitions_for(cid)[0].tags, "重要");
 
         // 再OCR相当: 同じ capture に認識行を追加
-        let rid2 = log_recognition(cid, "ocr", "paddle", 100, Some("hello2"), None, Some("hash-b"), None).unwrap();
+        let rid2 = log_recognition(
+            cid,
+            "ocr",
+            "paddle",
+            100,
+            Some("hello2"),
+            None,
+            Some("hash-b"),
+            None,
+        )
+        .unwrap();
         assert_eq!(recognitions_for(cid).len(), 2);
 
         // 同一画像+同一エンジンの既存認識はキャッシュとして取得できる (再OCR回避, SPECv0.4追補)
-        assert_eq!(find_cached_recognition("hash-a", "win", None), Some((rid, "hello".to_string())));
-        assert_eq!(find_cached_recognition("hash-a", "paddle", None), None, "エンジンが違えばヒットしない");
-        assert_eq!(find_cached_recognition("hash-x", "win", None), None, "ハッシュが違えばヒットしない");
+        assert_eq!(
+            find_cached_recognition("hash-a", "win", None),
+            Some((rid, "hello".to_string()))
+        );
+        assert_eq!(
+            find_cached_recognition("hash-a", "paddle", None),
+            None,
+            "エンジンが違えばヒットしない"
+        );
+        assert_eq!(
+            find_cached_recognition("hash-x", "win", None),
+            None,
+            "ハッシュが違えばヒットしない"
+        );
 
         // 同一画像+engine="llm"でもプロファイルが違えばキャッシュを流用しない (SPECv0.5.5:
         // GeminiとLocalLLM等を切り替えたときに別プロファイルの結果を誤って再利用するバグの修正)
-        let rid_llm_a = log_recognition(cid, "ocr", "llm", 150, Some("hello from Gemini"), None, Some("hash-c"), Some("Gemini")).unwrap();
+        let rid_llm_a = log_recognition(
+            cid,
+            "ocr",
+            "llm",
+            150,
+            Some("hello from Gemini"),
+            None,
+            Some("hash-c"),
+            Some("Gemini"),
+        )
+        .unwrap();
         assert_eq!(
             find_cached_recognition("hash-c", "llm", Some("Gemini")),
             Some((rid_llm_a, "hello from Gemini".to_string())),
@@ -1031,14 +1170,24 @@ mod tests {
             Some((rid, "こんにちは".to_string())),
             "同一request_jsonの成功済み翻訳がヒットする"
         );
-        assert_eq!(find_cached_translation("llm", Some("prof1"), "{\"req\":no-match}"), None);
+        assert_eq!(
+            find_cached_translation("llm", Some("prof1"), "{\"req\":no-match}"),
+            None
+        );
         assert_eq!(
             find_cached_explanation_for_profile("prof1", "prompt text"),
             Some((rid, "解説文".to_string())),
             "同一プロファイル+同一input_textの成功済み解説がヒットする(失敗ログは無視)"
         );
-        assert_eq!(find_cached_explanation_for_profile("prof2", "prompt text"), None, "プロファイルが違えばヒットしない");
-        assert_eq!(find_cached_explanation_for_profile("prof1", "no-match"), None);
+        assert_eq!(
+            find_cached_explanation_for_profile("prof2", "prompt text"),
+            None,
+            "プロファイルが違えばヒットしない"
+        );
+        assert_eq!(
+            find_cached_explanation_for_profile("prof1", "no-match"),
+            None
+        );
 
         // CASCADE削除: recognition を消すと配下の翻訳・解説も消える
         delete_recognition(rid);
@@ -1055,13 +1204,44 @@ mod tests {
         // ローテーション: captures 件数で絞り、配下はCASCADE
         let mut last_rid = 0;
         for i in 0..4 {
-            let c = log_capture("hold", None, None, None, None, None, None, None, false, CaptureExtent::default()).unwrap();
-            last_rid = log_recognition(c, "ocr", "win", 100, Some(&format!("line{i}")), None, None, None).unwrap();
+            let c = log_capture(
+                "hold",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                CaptureExtent::default(),
+            )
+            .unwrap();
+            last_rid = log_recognition(
+                c,
+                "ocr",
+                "win",
+                100,
+                Some(&format!("line{i}")),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         }
         rotate(2);
-        assert_eq!(search_captures("", "", 100).len(), 2, "rotate should cap captures");
+        assert_eq!(
+            search_captures("", "", 100).len(),
+            2,
+            "rotate should cap captures"
+        );
         // 最新の capture の認識は残っている
-        assert_eq!(recognitions_for(search_captures("", "", 1)[0].id).last().map(|r| r.id), Some(last_rid));
+        assert_eq!(
+            recognitions_for(search_captures("", "", 1)[0].id)
+                .last()
+                .map(|r| r.id),
+            Some(last_rid)
+        );
 
         // 全削除
         clear_all();

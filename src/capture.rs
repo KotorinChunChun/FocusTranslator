@@ -28,6 +28,9 @@ pub struct Captured {
     pub bgra: Vec<u8>,
 }
 
+/// LLMへ送信する対象アプリ全体スクリーンショットの長辺上限 (px)。
+pub const LLM_SCREENSHOT_MAX_DIM: u32 = 1600;
+
 /// 画像内容のハッシュ値 (SPECv0.4追補: 同一画像+同一エンジンでの再OCR判定に使う)。
 /// サイズ + ピクセル列をそのままSHA-256にかけるだけで、同一内容なら常に同じ値になる。
 pub fn hash_hex(img: &Captured) -> String {
@@ -134,7 +137,9 @@ pub fn capture_window(hwnd: HWND) -> Result<Captured, String> {
         }
         let result = (|| -> Result<Captured, String> {
             let frame = frame.ok_or("フレーム取得に失敗しました")?;
-            let surface = frame.Surface().map_err(|e| format!("Surface取得失敗: {e}"))?;
+            let surface = frame
+                .Surface()
+                .map_err(|e| format!("Surface取得失敗: {e}"))?;
             let access: IDirect3DDxgiInterfaceAccess = surface
                 .cast()
                 .map_err(|e| format!("DXGIアクセス失敗: {e}"))?;
@@ -171,7 +176,11 @@ pub fn capture_window(hwnd: HWND) -> Result<Captured, String> {
                 std::ptr::copy_nonoverlapping(s, d, (w * 4) as usize);
             }
             context.Unmap(&staging, 0);
-            Ok(Captured { width: w, height: h, bgra })
+            Ok(Captured {
+                width: w,
+                height: h,
+                bgra,
+            })
         })();
 
         // セッション停止(Close)。失敗は無視。
@@ -207,8 +216,20 @@ pub fn crop_with_rect(img: &Captured, x: i32, y: i32, w: i32, h: i32) -> Option<
         let d = (row * cw) as usize * 4;
         out[d..d + (cw * 4) as usize].copy_from_slice(&img.bgra[s..s + (cw * 4) as usize]);
     }
-    let rect = RECT { left: x0 as i32, top: y0 as i32, right: x1 as i32, bottom: y1 as i32 };
-    Some((Captured { width: cw, height: ch, bgra: out }, rect))
+    let rect = RECT {
+        left: x0 as i32,
+        top: y0 as i32,
+        right: x1 as i32,
+        bottom: y1 as i32,
+    };
+    Some((
+        Captured {
+            width: cw,
+            height: ch,
+            bgra: out,
+        },
+        rect,
+    ))
 }
 
 /// 長辺が max_dim を超える場合にアスペクト比を保って縮小する (SPECv0.5.3:
@@ -247,7 +268,11 @@ pub fn downscale_max(img: &Captured, max_dim: u32) -> Captured {
             }
         }
     }
-    Captured { width: nw, height: nh, bgra: out }
+    Captured {
+        width: nw,
+        height: nh,
+        bgra: out,
+    }
 }
 
 /// 画像へ赤枠を描き込む (SPECv0.5.3: 解説プロンプトで「赤枠内が対象」と示すため)。
@@ -285,8 +310,26 @@ pub fn draw_red_frame(img: &mut Captured, rect: RECT, thickness: i32) {
     }
 }
 
-/// BGRA → PNG エンコード(外部OCR/Gemini送信用)
-pub fn to_png(img: &Captured) -> Vec<u8> {
+/// LLMへ送る対象アプリ全体画像を組み立てる。
+///
+/// 長辺を `max_dim` 以下へ縮小してから、同じ比率で変換した対象矩形を赤枠で示す。
+/// 枠を縮小後に描くことで、縮小処理によって枠が細くなったり消えたりするのを防ぐ。
+pub fn prepare_llm_screenshot(full: &Captured, rect: RECT, max_dim: u32) -> Captured {
+    let scale_src = full.width.max(full.height).max(1);
+    let mut prepared = downscale_max(full, max_dim);
+    let scale = prepared.width.max(prepared.height) as f32 / scale_src as f32;
+    let scaled = RECT {
+        left: (rect.left as f32 * scale) as i32,
+        top: (rect.top as f32 * scale) as i32,
+        right: (rect.right as f32 * scale) as i32,
+        bottom: (rect.bottom as f32 * scale) as i32,
+    };
+    draw_red_frame(&mut prepared, scaled, 3);
+    prepared
+}
+
+/// BGRA画像を表示・PNGエンコード用のRGBAへ変換する。
+pub fn to_rgba(img: &Captured) -> Vec<u8> {
     let mut rgba = vec![0u8; img.bgra.len()];
     for i in (0..img.bgra.len()).step_by(4) {
         rgba[i] = img.bgra[i + 2];
@@ -294,6 +337,12 @@ pub fn to_png(img: &Captured) -> Vec<u8> {
         rgba[i + 2] = img.bgra[i];
         rgba[i + 3] = 255;
     }
+    rgba
+}
+
+/// BGRA → PNG エンコード(外部OCR/Gemini送信用)
+pub fn to_png(img: &Captured) -> Vec<u8> {
+    let rgba = to_rgba(img);
     let mut out = Vec::new();
     {
         let mut enc = png::Encoder::new(&mut out, img.width, img.height);
@@ -311,7 +360,11 @@ mod tests {
     use super::*;
 
     fn solid(w: u32, h: u32, bgra: [u8; 4]) -> Captured {
-        Captured { width: w, height: h, bgra: bgra.repeat((w * h) as usize) }
+        Captured {
+            width: w,
+            height: h,
+            bgra: bgra.repeat((w * h) as usize),
+        }
     }
 
     #[test]
@@ -329,7 +382,12 @@ mod tests {
     #[test]
     fn draw_red_frame_は矩形の外周へ赤枠を描く() {
         let mut img = solid(100, 100, [0, 0, 0, 255]);
-        let rect = RECT { left: 40, top: 40, right: 60, bottom: 60 };
+        let rect = RECT {
+            left: 40,
+            top: 40,
+            right: 60,
+            bottom: 60,
+        };
         draw_red_frame(&mut img, rect, 3);
         let px = |x: u32, y: u32| {
             let i = ((y * 100 + x) * 4) as usize;
@@ -339,5 +397,33 @@ mod tests {
         assert_eq!(px(50, 38), [0, 0, 255], "上枠が赤");
         assert_eq!(px(50, 50), [0, 0, 0], "矩形内部は塗り潰さない");
         assert_eq!(px(10, 10), [0, 0, 0], "枠の外は変更しない");
+    }
+
+    #[test]
+    fn prepare_llm_screenshot_は縮小後の対応位置へ赤枠を描く() {
+        let full = solid(200, 100, [10, 20, 30, 255]);
+        let out = prepare_llm_screenshot(
+            &full,
+            RECT {
+                left: 80,
+                top: 20,
+                right: 120,
+                bottom: 60,
+            },
+            100,
+        );
+        assert_eq!((out.width, out.height), (100, 50));
+        let px = |x: u32, y: u32| {
+            let i = ((y * out.width + x) * 4) as usize;
+            [out.bgra[i], out.bgra[i + 1], out.bgra[i + 2]]
+        };
+        assert_eq!(px(38, 20), [0, 0, 255], "縮小後の左枠が赤");
+        assert_eq!(px(50, 20), [10, 20, 30], "対象内部は元画像のまま");
+    }
+
+    #[test]
+    fn to_rgba_は赤青を入れ替えて不透明化する() {
+        let img = solid(1, 1, [10, 20, 30, 40]);
+        assert_eq!(to_rgba(&img), vec![30, 20, 10, 255]);
     }
 }

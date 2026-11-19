@@ -7,7 +7,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const GITHUB_LATEST_RELEASE_API: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
+const GITHUB_LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
 /// Windows CPU版バイナリのzipファイル名に含まれる目印
 const WIN_CPU_ASSET_MARKER: &str = "bin-win-cpu-x64.zip";
 /// Windows Radeon(HIP/ROCm)版バイナリのzipファイル名に含まれる目印
@@ -63,8 +64,7 @@ const MODEL_MIN_BYTES: u64 = 1_000_000_000; // 1GB
 /// テキスト/画像/音声に対応したモデルのため、この mmproj を base モデルと併せて
 /// llama-server へ渡すことで画像入力に対応できる (SPECv0.5.2追補: OCRのLLM経路が
 /// 画像を送れず失敗する問題への対応)。
-const MMPROJ_URL: &str =
-    "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf";
+const MMPROJ_URL: &str = "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf";
 const MMPROJ_FILE: &str = "mmproj-gemma-4-E2B-it-Q8_0.gguf";
 const MMPROJ_MIN_BYTES: u64 = 100_000_000; // 100MB (実サイズ約557MB)
 
@@ -102,7 +102,11 @@ pub fn installed_version() -> Option<(String, String)> {
     let mut lines = text.lines();
     let tag = lines.next()?.trim().to_string();
     let published = lines.next().unwrap_or("").trim().to_string();
-    if tag.is_empty() { None } else { Some((tag, published)) }
+    if tag.is_empty() {
+        None
+    } else {
+        Some((tag, published))
+    }
 }
 
 /// 導入済みバイナリのビルド種別。マーカーの3行目 (SPECv0.5.5で追加)。
@@ -114,7 +118,10 @@ pub fn installed_variant() -> Option<LlamaVariant> {
 
 /// バージョンマーカーファイルを書き出す (3行目にビルド種別を記録。SPECv0.5.5)
 fn write_version_marker(tag_name: &str, published_at: &str, variant: LlamaVariant) {
-    let _ = std::fs::write(version_marker_path(), format!("{tag_name}\n{published_at}\n{}\n", variant.as_str()));
+    let _ = std::fs::write(
+        version_marker_path(),
+        format!("{tag_name}\n{published_at}\n{}\n", variant.as_str()),
+    );
 }
 
 /// モデルファイルが導入済みか (既定の管理下ディレクトリのみ判定。手動選択パスは
@@ -128,7 +135,11 @@ pub fn model_installed() -> bool {
 /// (SPECv0.5.2追補)。
 pub fn resolve_model_path(override_path: &str) -> PathBuf {
     let trimmed = override_path.trim();
-    if trimmed.is_empty() { model_path() } else { PathBuf::from(trimmed) }
+    if trimmed.is_empty() {
+        model_path()
+    } else {
+        PathBuf::from(trimmed)
+    }
 }
 
 /// 既定のmmprojファイルパス (画像入力対応用)
@@ -144,7 +155,11 @@ pub fn mmproj_installed() -> bool {
 /// resolve_model_path() のmmproj版
 pub fn resolve_mmproj_path(override_path: &str) -> PathBuf {
     let trimmed = override_path.trim();
-    if trimmed.is_empty() { mmproj_path() } else { PathBuf::from(trimmed) }
+    if trimmed.is_empty() {
+        mmproj_path()
+    } else {
+        PathBuf::from(trimmed)
+    }
 }
 
 /// GitHub Releasesの最新リリース情報 (SPECv0.5.5: 更新確認のためversion/公開日も保持する)
@@ -162,14 +177,21 @@ pub struct LatestRelease {
 fn find_asset_url(assets: &[serde_json::Value], pred: impl Fn(&str) -> bool) -> Option<String> {
     assets.iter().find_map(|a| {
         let name = a["name"].as_str()?;
-        if pred(name) { a["browser_download_url"].as_str().map(|s| s.to_string()) } else { None }
+        if pred(name) {
+            a["browser_download_url"].as_str().map(|s| s.to_string())
+        } else {
+            None
+        }
     })
 }
 
 /// ビルド種別に応じて、ダウンロードすべきzip URL一覧(CUDAのみ2件)を解決する。
 /// CUDA版は必要ドライバのバージョンが低いほうが互換性が広いため、公開されている
 /// CUDAツールキットバージョンのうち最小のものを既定候補にする。
-fn resolve_zip_urls(variant: LlamaVariant, assets: &[serde_json::Value]) -> Result<Vec<String>, String> {
+fn resolve_zip_urls(
+    variant: LlamaVariant,
+    assets: &[serde_json::Value],
+) -> Result<Vec<String>, String> {
     match variant {
         LlamaVariant::Cpu => find_asset_url(assets, |n| n.ends_with(WIN_CPU_ASSET_MARKER))
             .map(|u| vec![u])
@@ -180,25 +202,36 @@ fn resolve_zip_urls(variant: LlamaVariant, assets: &[serde_json::Value]) -> Resu
         LlamaVariant::Cuda => {
             let mut candidates: Vec<(f64, String)> = Vec::new();
             for a in assets {
-                let Some(name) = a["name"].as_str() else { continue };
+                let Some(name) = a["name"].as_str() else {
+                    continue;
+                };
                 if !name.starts_with("llama-") || !name.contains("-bin-win-cuda-") {
                     continue;
                 }
-                let Some(ver_str) = name.split("-bin-win-cuda-").nth(1).and_then(|s| s.strip_suffix("-x64.zip")) else {
+                let Some(ver_str) = name
+                    .split("-bin-win-cuda-")
+                    .nth(1)
+                    .and_then(|s| s.strip_suffix("-x64.zip"))
+                else {
                     continue;
                 };
-                let Ok(ver) = ver_str.parse::<f64>() else { continue };
+                let Ok(ver) = ver_str.parse::<f64>() else {
+                    continue;
+                };
                 candidates.push((ver, ver_str.to_string()));
             }
             let (_, ver_str) = candidates
                 .into_iter()
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .ok_or_else(|| "Windows CUDA版のバイナリが見つかりませんでした".to_string())?;
-            let main_url = find_asset_url(assets, |n| n.contains(&format!("-bin-win-cuda-{ver_str}-x64.zip")) && n.starts_with("llama-"))
-                .ok_or_else(|| "Windows CUDA版のバイナリが見つかりませんでした".to_string())?;
+            let main_url = find_asset_url(assets, |n| {
+                n.contains(&format!("-bin-win-cuda-{ver_str}-x64.zip")) && n.starts_with("llama-")
+            })
+            .ok_or_else(|| "Windows CUDA版のバイナリが見つかりませんでした".to_string())?;
             let cudart_marker = format!("cudart-llama-bin-win-cuda-{ver_str}-x64.zip");
-            let cudart_url = find_asset_url(assets, |n| n == cudart_marker)
-                .ok_or_else(|| "CUDAランタイム(cudart)パッケージが見つかりませんでした".to_string())?;
+            let cudart_url = find_asset_url(assets, |n| n == cudart_marker).ok_or_else(|| {
+                "CUDAランタイム(cudart)パッケージが見つかりませんでした".to_string()
+            })?;
             Ok(vec![main_url, cudart_url])
         }
     }
@@ -220,9 +253,15 @@ fn fetch_latest_release(variant: LlamaVariant) -> Result<LatestRelease, String> 
         .map_err(|e| format!("リリース情報の解析に失敗しました: {e}"))?;
     let tag_name = json["tag_name"].as_str().unwrap_or("").to_string();
     let published_at = json["published_at"].as_str().unwrap_or("").to_string();
-    let assets = json["assets"].as_array().ok_or("リリース情報にアセットがありません")?;
+    let assets = json["assets"]
+        .as_array()
+        .ok_or("リリース情報にアセットがありません")?;
     let zip_urls = resolve_zip_urls(variant, assets)?;
-    Ok(LatestRelease { tag_name, published_at, zip_urls })
+    Ok(LatestRelease {
+        tag_name,
+        published_at,
+        zip_urls,
+    })
 }
 
 /// 導入済みバージョンと最新リリースを比較する (SPECv0.5.5)。タグ名が異なる(または導入済み
@@ -267,7 +306,9 @@ fn download_to_file(
         let mut downloaded = 0u64;
         let mut last_report = Instant::now();
         loop {
-            let n = reader.read(&mut buf).map_err(|e| format!("受信中にエラーが発生しました: {e}"))?;
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| format!("受信中にエラーが発生しました: {e}"))?;
             if n == 0 {
                 break;
             }
@@ -292,12 +333,16 @@ fn download_to_file(
 /// zipアーカイブを展開する(トップレベルのファイル/フォルダをすべて target_dir 直下へ展開)。
 fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<(), String> {
     let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zipの展開に失敗しました: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("zipの展開に失敗しました: {e}"))?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         // 配布zipは "build/bin/xxx.exe" のようなディレクトリ構成のことがあるため、
         // ファイル名(ベースネーム)だけを見て bin_dir 直下へフラットに展開する。
-        let Some(name) = entry.enclosed_name().and_then(|p| p.file_name().map(|f| f.to_owned())) else {
+        let Some(name) = entry
+            .enclosed_name()
+            .and_then(|p| p.file_name().map(|f| f.to_owned()))
+        else {
             continue;
         };
         if entry.is_dir() {
@@ -337,7 +382,10 @@ fn download_and_extract_binary(
 /// llama.cpp本体を指定ビルド種別で導入する。既に導入済みなら何もしない。
 /// on_progress は10秒おきに (受信済みバイト数, 合計バイト数) を通知する (SPECv0.5.3:
 /// モデル/mmprojの導入と同様に設定画面へ進捗を反映するため)。
-pub fn install_binary(variant: LlamaVariant, on_progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
+pub fn install_binary(
+    variant: LlamaVariant,
+    on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<(), String> {
     if installed() {
         return Ok(());
     }
@@ -375,7 +423,9 @@ pub fn uninstall_binary() -> Result<(), String> {
         return Ok(());
     }
     for entry in std::fs::read_dir(&dir).map_err(|e| format!("削除に失敗しました: {e}"))? {
-        let path = entry.map_err(|e| format!("削除に失敗しました: {e}"))?.path();
+        let path = entry
+            .map_err(|e| format!("削除に失敗しました: {e}"))?
+            .path();
         if path.is_dir() {
             std::fs::remove_dir_all(&path).map_err(|e| format!("削除に失敗しました: {e}"))?;
         } else {
@@ -399,7 +449,9 @@ pub fn install_model(on_progress: impl FnMut(u64, Option<u64>)) -> Result<(), St
     let size = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
     if size < MODEL_MIN_BYTES {
         let _ = std::fs::remove_file(&target);
-        return Err("ダウンロードしたモデルファイルが小さすぎます(配布元の変更の可能性があります)".into());
+        return Err(
+            "ダウンロードしたモデルファイルが小さすぎます(配布元の変更の可能性があります)".into(),
+        );
     }
     Ok(())
 }
@@ -416,8 +468,9 @@ pub fn install_mmproj(on_progress: impl FnMut(u64, Option<u64>)) -> Result<(), S
     let size = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
     if size < MMPROJ_MIN_BYTES {
         let _ = std::fs::remove_file(&target);
-        return Err("ダウンロードしたmmprojファイルが小さすぎます(配布元の変更の可能性があります)".into());
+        return Err(
+            "ダウンロードしたmmprojファイルが小さすぎます(配布元の変更の可能性があります)".into(),
+        );
     }
     Ok(())
 }
-

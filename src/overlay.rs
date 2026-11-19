@@ -11,11 +11,10 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CreateCompatibleBitmap, CreatePen,
-    CreateCompatibleDC, CreateSolidBrush, DIB_RGB_COLORS, DT_NOPREFIX,
-    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW,
-    EndPaint, FillRect, FrameRect, HALFTONE, HDC,
-    GetMonitorInfoW, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreatePen, CreateSolidBrush, DIB_RGB_COLORS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+    DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, FrameRect,
+    GetMonitorInfoW, HALFTONE, HDC, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint, PAINTSTRUCT, PS_SOLID, Polyline, RoundRect, SelectObject, SetBkMode,
     SetStretchBltMode, SetTextColor, StretchDIBits, TRANSPARENT,
 };
@@ -25,15 +24,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetClientRect, GetWindowRect,
-    IsWindowVisible, HTCLIENT,
-    HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, KillTimer, LoadCursorW, MA_NOACTIVATE, PostMessageW,
-    RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowPos,
-    ShowWindow, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST,
-    WM_PAINT, WM_TIMER,
-    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    SendMessageW, WM_NCLBUTTONDOWN, HTCAPTION,
+    HTCAPTION, HTCLIENT, HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, IsWindowVisible, KillTimer,
+    LoadCursorW, MA_NOACTIVATE, PostMessageW, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SendMessageW, SetTimer, SetWindowPos, SetWindowTextW, ShowWindow,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+    WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
 // チップID (main へ WM_APP_CHIP で通知)
 pub const CHIP_OCR_BASE: usize = 0; // 0..=4
@@ -169,9 +166,12 @@ struct EditState {
 #[derive(Default, Clone)]
 pub struct OverlayContent {
     pub main_hwnd: isize,
+    pub boss_guard: bool,
     pub anchor: (i32, i32),
     pub source: String,
     pub translation: Option<String>,
+    /// 通常の翻訳結果と異なる見出し。設定時は翻訳エンジンを未選択表示にする。
+    pub translation_heading: Option<String>,
     pub status: Option<String>,
     pub badge: Option<String>,
     pub pinned: bool,
@@ -264,7 +264,11 @@ thread_local! {
 
 /// 画像編集モードを開始する。full/rect_in_full はそれぞれ対象アプリ全体のキャプチャ画像と、
 /// その内での img の位置 (無ければ「全体画像の復元」ボタンは使えない。SPECv0.5.2追補)。
-pub fn enter_edit_mode(img: Arc<Captured>, full: Option<Arc<Captured>>, rect_in_full: Option<RECT>) {
+pub fn enter_edit_mode(
+    img: Arc<Captured>,
+    full: Option<Arc<Captured>>,
+    rect_in_full: Option<RECT>,
+) {
     EDIT.with(|e| {
         *e.borrow_mut() = Some(EditState {
             img,
@@ -323,13 +327,19 @@ pub fn take_edit_selection() -> Option<(Arc<Captured>, image_edit::Selection)> {
         match st.tool {
             EditTool::Rect => {
                 let (x0, y0, x1, y1) = st.rect?;
-                Some((st.img.clone(), image_edit::Selection::Rect { x0, y0, x1, y1 }))
+                Some((
+                    st.img.clone(),
+                    image_edit::Selection::Rect { x0, y0, x1, y1 },
+                ))
             }
             EditTool::Lasso => {
                 if st.lasso.len() < 3 {
                     None
                 } else {
-                    Some((st.img.clone(), image_edit::Selection::Lasso(st.lasso.clone())))
+                    Some((
+                        st.img.clone(),
+                        image_edit::Selection::Lasso(st.lasso.clone()),
+                    ))
                 }
             }
         }
@@ -437,7 +447,9 @@ pub fn undo_edit() -> bool {
     EDIT.with(|e| {
         let mut g = e.borrow_mut();
         let Some(st) = g.as_mut() else { return false };
-        let Some((prev_img, prev_rect)) = st.undo.pop() else { return false };
+        let Some((prev_img, prev_rect)) = st.undo.pop() else {
+            return false;
+        };
         st.img = prev_img;
         st.rect_in_full = prev_rect;
         clear_selection_state(st);
@@ -451,14 +463,18 @@ pub fn undo_edit() -> bool {
 pub fn finish_edit_session() -> Option<(Arc<Captured>, Option<RECT>)> {
     let result = EDIT.with(|e| {
         e.borrow().as_ref().and_then(|st| {
-            if st.undo.is_empty() { None } else { Some((st.img.clone(), st.rect_in_full)) }
+            if st.undo.is_empty() {
+                None
+            } else {
+                Some((st.img.clone(), st.rect_in_full))
+            }
         })
     });
     exit_edit_mode();
     result
 }
 
-pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
+pub fn create(instance: windows::Win32::Foundation::HINSTANCE, boss_guard: bool) -> HWND {
     unsafe {
         let class = w!("FocusTranslatorOverlay");
         let wc = WNDCLASSW {
@@ -470,10 +486,14 @@ pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
             ..Default::default()
         };
         RegisterClassW(&wc);
+        let title = crate::util::to_wide(crate::util::app_display_name(boss_guard));
         CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::WS_EX_TRANSPARENT,
+            WS_EX_TOPMOST
+                | WS_EX_TOOLWINDOW
+                | WS_EX_NOACTIVATE
+                | windows::Win32::UI::WindowsAndMessaging::WS_EX_TRANSPARENT,
             class,
-            w!("FocusTranslator"),
+            PCWSTR(title.as_ptr()),
             WS_POPUP,
             0,
             0,
@@ -483,7 +503,15 @@ pub fn create(instance: windows::Win32::Foundation::HINSTANCE) -> HWND {
             None,
             Some(instance),
             None,
-        ).unwrap_or_default()
+        )
+        .unwrap_or_default()
+    }
+}
+
+pub fn apply_boss_guard(hwnd: HWND, enabled: bool) {
+    let title = crate::util::to_wide(crate::util::app_display_name(enabled));
+    unsafe {
+        let _ = SetWindowTextW(hwnd, PCWSTR(title.as_ptr()));
     }
 }
 
@@ -508,9 +536,14 @@ pub fn update(hwnd: HWND, mut content: OverlayContent) {
 
     let (_cur_block, has_progress, error_only, pinned) = CONTENT.with(|c| {
         let c = c.borrow();
-        (c.editing_block, c.explaining || c.busy || (c.has_image && c.app_title.is_empty()), c.error_only, c.pinned)
+        (
+            c.editing_block,
+            c.explaining || c.busy || (c.has_image && c.app_title.is_empty()),
+            c.error_only,
+            c.pinned,
+        )
     });
-    
+
     let anchor = content.anchor;
     CONTENT.with(|c| *c.borrow_mut() = content);
     // UIAパスノードの並びが変わりうるため、古いチップIDに対するツールチップ状態は破棄する
@@ -535,7 +568,7 @@ pub fn update(hwnd: HWND, mut content: OverlayContent) {
     };
     let layout = CONTENT.with(|c| overlay_layout::compute_layout(hwnd, &c.borrow()));
     let (w, h) = (layout.w, layout.h);
-    
+
     LAYOUT.with(|l| *l.borrow_mut() = layout);
 
     let (x, y) = place(anchor, w, h, kept);
@@ -581,9 +614,15 @@ pub fn hide(hwnd: HWND) {
 /// 表示位置を決める
 fn place(anchor: (i32, i32), w: i32, h: i32, kept: Option<(i32, i32)>) -> (i32, i32) {
     unsafe {
-        let pt = POINT { x: anchor.0, y: anchor.1 };
+        let pt = POINT {
+            x: anchor.0,
+            y: anchor.1,
+        };
         let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
         let _ = GetMonitorInfoW(hmon, &mut mi);
         let wa = mi.rcWork;
 
@@ -618,8 +657,15 @@ fn place(anchor: (i32, i32), w: i32, h: i32, kept: Option<(i32, i32)>) -> (i32, 
 fn is_fixed_chip(id: usize) -> bool {
     matches!(
         id,
-        CHIP_CLOSE | CHIP_PIN | CHIP_EDIT_RECT | CHIP_EDIT_LASSO | CHIP_EDIT_RESET
-            | CHIP_EDIT_APPLY | CHIP_EDIT_CANCEL | CHIP_EDIT_UNDO | CHIP_EDIT_ERASE
+        CHIP_CLOSE
+            | CHIP_PIN
+            | CHIP_EDIT_RECT
+            | CHIP_EDIT_LASSO
+            | CHIP_EDIT_RESET
+            | CHIP_EDIT_APPLY
+            | CHIP_EDIT_CANCEL
+            | CHIP_EDIT_UNDO
+            | CHIP_EDIT_ERASE
     )
 }
 
@@ -628,7 +674,9 @@ fn hit_test_chip(x: i32, y: i32) -> Option<usize> {
     LAYOUT.with(|l| {
         let sy = CONTENT.with(|c| c.borrow().scroll_y);
         l.borrow().items.iter().find_map(|it| match it {
-            Item::Chip { rect, id, enabled, .. } => {
+            Item::Chip {
+                rect, id, enabled, ..
+            } => {
                 let mut r = *rect;
                 let off = if is_fixed_chip(*id) { 0 } else { sy };
                 r.top -= off;
@@ -660,7 +708,10 @@ fn edit_preview_map_clamped(x: i32, y: i32, rect: RECT, scale: f32) -> Option<(i
     EDIT.with(|e| {
         let g = e.borrow();
         let st = g.as_ref()?;
-        Some((ix.clamp(0, st.img.width as i32), iy.clamp(0, st.img.height as i32)))
+        Some((
+            ix.clamp(0, st.img.width as i32),
+            iy.clamp(0, st.img.height as i32),
+        ))
     })
 }
 
@@ -668,7 +719,10 @@ fn edit_preview_map_clamped(x: i32, y: i32, rect: RECT, scale: f32) -> Option<(i
 fn handle_points(rect: RECT, scale: f32, sel: (i32, i32, i32, i32)) -> [(Handle, i32, i32); 8] {
     let (x0, y0, x1, y1) = sel;
     let to_screen = |ix: i32, iy: i32| {
-        (rect.left + (ix as f32 * scale).round() as i32, rect.top + (iy as f32 * scale).round() as i32)
+        (
+            rect.left + (ix as f32 * scale).round() as i32,
+            rect.top + (iy as f32 * scale).round() as i32,
+        )
     };
     let (sx0, sy0) = to_screen(x0, y0);
     let (sx1, sy1) = to_screen(x1, y1);
@@ -768,7 +822,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 && LAYOUT.with(|l| {
                     l.borrow()
                         .edit_preview
-                        .map(|(r, _)| pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom)
+                        .map(|(r, _)| {
+                            pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom
+                        })
                         .unwrap_or(false)
                 });
             if over_preview {
@@ -789,9 +845,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         let max_scroll = (layout.content_h - layout.h).max(0);
                         if max_scroll > 0 {
                             content.scroll_y -= (delta as i32) / 2;
-                            if content.scroll_y < 0 { content.scroll_y = 0; }
-                            if content.scroll_y > max_scroll { content.scroll_y = max_scroll; }
-                            unsafe { let _ = InvalidateRect(Some(hwnd), None, true); }
+                            if content.scroll_y < 0 {
+                                content.scroll_y = 0;
+                            }
+                            if content.scroll_y > max_scroll {
+                                content.scroll_y = max_scroll;
+                            }
+                            unsafe {
+                                let _ = InvalidateRect(Some(hwnd), None, true);
+                            }
                         }
                     });
                 });
@@ -821,7 +883,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 let had_shown = TOOLTIP_SHOWN.with(|t| t.borrow_mut().take().is_some());
                 match hit {
-                    Some(id) if id >= CHIP_UIA_NODE_BASE || id == CHIP_SELECTED_TEXT || llm_profile_key_for_chip(id).is_some() => {
+                    Some(id)
+                        if id >= CHIP_UIA_NODE_BASE
+                            || id == CHIP_SELECTED_TEXT
+                            || llm_profile_key_for_chip(id).is_some() =>
+                    {
                         TOOLTIP_PENDING.with(|t| *t.borrow_mut() = Some(id));
                         unsafe {
                             SetTimer(Some(hwnd), TIMER_TOOLTIP, TOOLTIP_DELAY_MS, None);
@@ -844,7 +910,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 if !st.dragging {
                     return false;
                 }
-                let Some((rect, scale)) = LAYOUT.with(|l| l.borrow().edit_preview) else { return false };
+                let Some((rect, scale)) = LAYOUT.with(|l| l.borrow().edit_preview) else {
+                    return false;
+                };
                 let ix = ((x - rect.left) as f32 / scale).round() as i32;
                 let iy = ((y - rect.top) as f32 / scale).round() as i32;
                 let ix = ix.clamp(0, st.img.width as i32);
@@ -860,11 +928,26 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                                 Some(Handle::S) => r.3 = iy,
                                 Some(Handle::E) => r.2 = ix,
                                 Some(Handle::W) => r.0 = ix,
-                                Some(Handle::NE) => { r.1 = iy; r.2 = ix; }
-                                Some(Handle::NW) => { r.0 = ix; r.1 = iy; }
-                                Some(Handle::SE) => { r.2 = ix; r.3 = iy; }
-                                Some(Handle::SW) => { r.0 = ix; r.3 = iy; }
-                                None => { r.2 = ix; r.3 = iy; }
+                                Some(Handle::NE) => {
+                                    r.1 = iy;
+                                    r.2 = ix;
+                                }
+                                Some(Handle::NW) => {
+                                    r.0 = ix;
+                                    r.1 = iy;
+                                }
+                                Some(Handle::SE) => {
+                                    r.2 = ix;
+                                    r.3 = iy;
+                                }
+                                Some(Handle::SW) => {
+                                    r.0 = ix;
+                                    r.3 = iy;
+                                }
+                                None => {
+                                    r.2 = ix;
+                                    r.3 = iy;
+                                }
                             }
                         }
                     }
@@ -925,6 +1008,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(HTCLIENT as isize)
         }
         WM_LBUTTONDOWN => {
+            // WS_EX_NOACTIVATE のオーバーレイを操作した後もESC等の入力先が自然に戻るよう、
+            // 表示の起点となった対象アプリのトップレベルウィンドウを前面化する。
+            let _ = crate::app_state::activate_overlay_target();
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             let hit = hit_test_chip(x, y);
@@ -976,7 +1062,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 // 誤操作防止: 極小の矩形/点未満の投げ輪は選択なし扱いにする
                 if let EditTool::Rect = st.tool
                     && let Some((x0, y0, x1, y1)) = st.rect
-                    && (x1 - x0).abs() < 4 && (y1 - y0).abs() < 4
+                    && (x1 - x0).abs() < 4
+                    && (y1 - y0).abs() < 4
                 {
                     st.rect = None;
                 }
@@ -1015,7 +1102,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     && HOVER_ID.with(|h| *h.borrow()) == Some(id)
                 {
                     if let Some(profile) = llm_profile_key_for_chip(id) {
-                        LLM_USAGE_TOOLTIP.with(|t| *t.borrow_mut() = Some(llm_usage_tooltip_text(&profile)));
+                        LLM_USAGE_TOOLTIP
+                            .with(|t| *t.borrow_mut() = Some(llm_usage_tooltip_text(&profile)));
                     }
                     let (mx, my) = MOUSE_POS.with(|p| *p.borrow());
                     TOOLTIP_SHOWN.with(|t| *t.borrow_mut() = Some((id, mx, my)));
@@ -1063,7 +1151,15 @@ fn paint(hwnd: HWND) {
                 let panel_pen = CreatePen(PS_SOLID, 1, COLORREF(th.panel_border));
                 let old_brush = SelectObject(mem, HGDIOBJ(panel_bg.0));
                 let old_pen = SelectObject(mem, HGDIOBJ(panel_pen.0));
-                let _ = RoundRect(mem, r.left, r.top, r.right, r.bottom, overlay_layout::PANEL_RADIUS, overlay_layout::PANEL_RADIUS);
+                let _ = RoundRect(
+                    mem,
+                    r.left,
+                    r.top,
+                    r.right,
+                    r.bottom,
+                    overlay_layout::PANEL_RADIUS,
+                    overlay_layout::PANEL_RADIUS,
+                );
                 SelectObject(mem, old_brush);
                 SelectObject(mem, old_pen);
                 let _ = DeleteObject(HGDIOBJ(panel_bg.0));
@@ -1085,7 +1181,14 @@ fn paint(hwnd: HWND) {
         LAYOUT.with(|l| {
             for item in &l.borrow().items {
                 match item {
-                    Item::Text { rect, text, size, color, bold, mono } => {
+                    Item::Text {
+                        rect,
+                        text,
+                        size,
+                        color,
+                        bold,
+                        mono,
+                    } => {
                         let mut r = *rect;
                         r.top -= sy;
                         r.bottom -= sy;
@@ -1103,7 +1206,13 @@ fn paint(hwnd: HWND) {
                         SelectObject(mem, old);
                         let _ = DeleteObject(HGDIOBJ(font.0));
                     }
-                    Item::Chip { rect, label, active, enabled, id } => {
+                    Item::Chip {
+                        rect,
+                        label,
+                        active,
+                        enabled,
+                        id,
+                    } => {
                         let mut r = *rect;
                         let off = if is_fixed_chip(*id) { 0 } else { sy };
                         r.top -= off;
@@ -1162,13 +1271,14 @@ fn paint(hwnd: HWND) {
                             mem,
                             &mut wide,
                             &mut r,
-                            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX
+                            DT_SINGLELINE
+                                | DT_VCENTER
+                                | DT_NOPREFIX
                                 | windows::Win32::Graphics::Gdi::DT_CENTER,
                         );
                         SelectObject(mem, old);
                         let _ = DeleteObject(HGDIOBJ(font.0));
                     }
-
                 }
             }
         });
@@ -1224,7 +1334,8 @@ fn llm_profile_key_for_chip(id: usize) -> Option<String> {
         } else {
             return None;
         };
-        let is_fixed_engine = crate::engine::OCR_KEYS.contains(&key.as_str()) || crate::engine::TR_KEYS.contains(&key.as_str());
+        let is_fixed_engine = crate::engine::OCR_KEYS.contains(&key.as_str())
+            || crate::engine::TR_KEYS.contains(&key.as_str());
         (!is_fixed_engine).then(|| key.clone())
     })
 }
@@ -1254,7 +1365,9 @@ fn draw_tooltip(mem: HDC, win_w: i32, win_h: i32) {
             if id == CHIP_SELECTED_TEXT {
                 c.selected_text.clone()
             } else {
-                c.uia_nodes.get(id.wrapping_sub(CHIP_UIA_NODE_BASE)).map(|n| n.text.clone())
+                c.uia_nodes
+                    .get(id.wrapping_sub(CHIP_UIA_NODE_BASE))
+                    .map(|n| n.text.clone())
             }
         })
     };
@@ -1265,7 +1378,8 @@ fn draw_tooltip(mem: HDC, win_w: i32, win_h: i32) {
     }
     unsafe {
         let th = overlay_layout::theme();
-        let (tw, th_h) = overlay_layout::measure(mem, text, overlay_layout::FONT_INFO, false, TOOLTIP_MAX_W);
+        let (tw, th_h) =
+            overlay_layout::measure(mem, text, overlay_layout::FONT_INFO, false, TOOLTIP_MAX_W);
         let box_w = tw + TOOLTIP_PAD * 2;
         let box_h = th_h + TOOLTIP_PAD * 2;
 
@@ -1278,20 +1392,38 @@ fn draw_tooltip(mem: HDC, win_w: i32, win_h: i32) {
             // 下に収まらなければカーソルの上へ出す
             top = (my - 8 - box_h).max(4);
         }
-        let r = RECT { left, top, right: left + box_w, bottom: top + box_h };
+        let r = RECT {
+            left,
+            top,
+            right: left + box_w,
+            bottom: top + box_h,
+        };
 
         let bg = CreateSolidBrush(COLORREF(th.panel_bg));
         FillRect(mem, &r, bg);
         let _ = DeleteObject(HGDIOBJ(bg.0));
         let border = CreatePen(PS_SOLID, 1, COLORREF(th.panel_border));
         let old_pen = SelectObject(mem, HGDIOBJ(border.0));
-        let old_brush = SelectObject(mem, HGDIOBJ(windows::Win32::Graphics::Gdi::GetStockObject(windows::Win32::Graphics::Gdi::NULL_BRUSH).0));
+        let old_brush = SelectObject(
+            mem,
+            HGDIOBJ(
+                windows::Win32::Graphics::Gdi::GetStockObject(
+                    windows::Win32::Graphics::Gdi::NULL_BRUSH,
+                )
+                .0,
+            ),
+        );
         let _ = windows::Win32::Graphics::Gdi::Rectangle(mem, r.left, r.top, r.right, r.bottom);
         SelectObject(mem, old_brush);
         SelectObject(mem, old_pen);
         let _ = DeleteObject(HGDIOBJ(border.0));
 
-        let mut text_r = RECT { left: r.left + TOOLTIP_PAD, top: r.top + TOOLTIP_PAD, right: r.right - TOOLTIP_PAD, bottom: r.bottom - TOOLTIP_PAD };
+        let mut text_r = RECT {
+            left: r.left + TOOLTIP_PAD,
+            top: r.top + TOOLTIP_PAD,
+            right: r.right - TOOLTIP_PAD,
+            bottom: r.bottom - TOOLTIP_PAD,
+        };
         let font = overlay_layout::make_font(overlay_layout::FONT_INFO, false);
         let old_font = SelectObject(mem, HGDIOBJ(font.0));
         SetTextColor(mem, COLORREF(th.text));
@@ -1349,15 +1481,19 @@ fn draw_edit_preview(mem: HDC, preview: RECT, scale: f32) {
             match st.tool {
                 EditTool::Rect => {
                     if let Some(sel @ (x0, y0, x1, y1)) = st.rect {
-                        let pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
-                            .map(to_screen);
+                        let pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)].map(to_screen);
                         let _ = Polyline(mem, &pts);
 
                         // 四方+四隅のリサイズハンドル (SPECv0.4追補: 画像の四方からのトリミング)
                         const HS: i32 = 4;
                         let handle_brush = CreateSolidBrush(COLORREF(0x0050C8FF));
                         for (_, hx, hy) in handle_points(preview, scale, sel) {
-                            let hr = RECT { left: hx - HS, top: hy - HS, right: hx + HS, bottom: hy + HS };
+                            let hr = RECT {
+                                left: hx - HS,
+                                top: hy - HS,
+                                right: hx + HS,
+                                bottom: hy + HS,
+                            };
                             FillRect(mem, &hr, handle_brush);
                         }
                         let _ = DeleteObject(HGDIOBJ(handle_brush.0));

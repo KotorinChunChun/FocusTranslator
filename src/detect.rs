@@ -6,11 +6,13 @@
 // 検出結果を忠実に可視化する。
 use crate::{capture, capture_plan, uia};
 use std::cell::RefCell;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint,
-    FillRect, FrameRect, GetTextExtentPoint32W, HGDIOBJ, InvalidateRect, PAINTSTRUCT,
-    SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, FrameRect,
+    GetTextExtentPoint32W, HGDIOBJ, InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT, TextOutW,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -111,7 +113,11 @@ pub fn show(instance: HINSTANCE) {
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_COLORKEY);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             STATE.with(|s| {
-                *s.borrow_mut() = Some(State { hwnd: hwnd.0 as isize, origin: (vx, vy), info: None })
+                *s.borrow_mut() = Some(State {
+                    hwnd: hwnd.0 as isize,
+                    origin: (vx, vy),
+                    info: None,
+                })
             });
         }
     }
@@ -172,7 +178,11 @@ pub fn probe(main: isize) {
         if let Some(text) = &p.text {
             info.uia_element = p.element_rect;
             info.uia_lines = p.line_rects;
-            info.label = format!("UIA: {} | {}", p.node, crate::util::truncate_chars(text, 40));
+            info.label = format!(
+                "UIA: {} | {}",
+                p.node,
+                crate::util::truncate_chars(text, 40)
+            );
         } else if p.hover_rect.is_some() {
             info.hover_rect = p.hover_rect;
             info.label = format!("UIA: {} (TextPatternなし)", p.node);

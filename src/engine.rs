@@ -14,12 +14,20 @@ pub const TR_LABELS: [&str; 4] = ["ONNX", "DeepL", "Google", "LLM"];
 
 /// OCRエンジンキーから表示ラベルを取得する
 pub fn ocr_label(key: &str) -> &'static str {
-    OCR_KEYS.iter().position(|k| *k == key).map(|i| OCR_LABELS[i]).unwrap_or("OneOCR")
+    OCR_KEYS
+        .iter()
+        .position(|k| *k == key)
+        .map(|i| OCR_LABELS[i])
+        .unwrap_or("OneOCR")
 }
 
 /// 翻訳エンジンキーから表示ラベルを取得する
 pub fn tr_label(key: &str) -> &'static str {
-    TR_KEYS.iter().position(|k| *k == key).map(|i| TR_LABELS[i]).unwrap_or("ONNX")
+    TR_KEYS
+        .iter()
+        .position(|k| *k == key)
+        .map(|i| TR_LABELS[i])
+        .unwrap_or("ONNX")
 }
 
 /// 翻訳エンジンの表示名を生成する。LLMの場合はプロファイル名を含める。

@@ -6,6 +6,7 @@ fn main() {
         // タスクマネージャーやexeプロパティに出る表示名 (内部名は focus-translator のまま)
         res.set("ProductName", "なにこれ？（Focus Translator）");
         res.set("FileDescription", "なにこれ？（Focus Translator）");
-        res.compile().expect("アイコンリソースの埋め込みに失敗しました");
+        res.compile()
+            .expect("アイコンリソースの埋め込みに失敗しました");
     }
 }

@@ -2,7 +2,7 @@
 ; AppId は旧バージョン (AppName=Focus Translator 時代) からの上書き更新を維持するため固定
 AppId=Focus Translator
 AppName=なにこれ？（Focus Translator）
-AppVersion=0.5.5
+AppVersion=0.5.6
 AppPublisher=Kotorichun
 ; インストール先はパス互換のため内部名のまま
 DefaultDirName={autopf}\Focus Translator
@@ -11,7 +11,9 @@ OutputDir=Output
 OutputBaseFilename=focus-translator-setup
 Compression=lzma
 SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
+; x64バイナリのため32-bit Windowsを除外し、x64互換環境では64-bitモードで導入する
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\focus-translator.exe
 

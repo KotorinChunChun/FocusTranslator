@@ -78,9 +78,17 @@ pub fn lasso_crop(img: &Captured, pts: &[(i32, i32)]) -> Option<Captured> {
         return None;
     }
     // バウンディングボックス (画像内にクランプ)
-    let l = pts.iter().map(|p| p.0).min()?.clamp(0, img.width as i32 - 1);
+    let l = pts
+        .iter()
+        .map(|p| p.0)
+        .min()?
+        .clamp(0, img.width as i32 - 1);
     let r = pts.iter().map(|p| p.0).max()?.clamp(0, img.width as i32);
-    let t = pts.iter().map(|p| p.1).min()?.clamp(0, img.height as i32 - 1);
+    let t = pts
+        .iter()
+        .map(|p| p.1)
+        .min()?
+        .clamp(0, img.height as i32 - 1);
     let b = pts.iter().map(|p| p.1).max()?.clamp(0, img.height as i32);
     if r - l < MIN_SEL || b - t < MIN_SEL {
         return None;
@@ -231,7 +239,10 @@ fn scanline_spans(pts: &[(i32, i32)], y: i32, offset_x: i32) -> Vec<(i32, i32)> 
     xs.chunks(2)
         .filter_map(|c| {
             if c.len() == 2 {
-                Some((c[0].round() as i32 - offset_x, c[1].round() as i32 - offset_x))
+                Some((
+                    c[0].round() as i32 - offset_x,
+                    c[1].round() as i32 - offset_x,
+                ))
             } else {
                 None
             }
@@ -249,12 +260,21 @@ mod tests {
         for _ in 0..(w * h) {
             buf.extend_from_slice(&bgra);
         }
-        Captured { width: w, height: h, bgra: buf }
+        Captured {
+            width: w,
+            height: h,
+            bgra: buf,
+        }
     }
 
     fn px(img: &Captured, x: u32, y: u32) -> [u8; 4] {
         let p = ((y * img.width + x) * 4) as usize;
-        [img.bgra[p], img.bgra[p + 1], img.bgra[p + 2], img.bgra[p + 3]]
+        [
+            img.bgra[p],
+            img.bgra[p + 1],
+            img.bgra[p + 2],
+            img.bgra[p + 3],
+        ]
     }
 
     #[test]
@@ -314,7 +334,12 @@ mod tests {
     #[test]
     fn 矩形の消去は同サイズのまま内側だけ隣接色で塗る() {
         let img = solid(60, 60, [10, 20, 30, 255]);
-        let sel = Selection::Rect { x0: 20, y0: 20, x1: 40, y1: 40 };
+        let sel = Selection::Rect {
+            x0: 20,
+            y0: 20,
+            x1: 40,
+            y1: 40,
+        };
         let out = erase_selection(&img, &sel).unwrap();
         // サイズは変わらない (トリミングしない)
         assert_eq!((out.width, out.height), (60, 60));
@@ -338,7 +363,12 @@ mod tests {
                 }
             }
         }
-        let sel = Selection::Rect { x0: 20, y0: 20, x1: 40, y1: 40 };
+        let sel = Selection::Rect {
+            x0: 20,
+            y0: 20,
+            x1: 40,
+            y1: 40,
+        };
         let out = erase_selection(&img, &sel).unwrap();
         // 隣接色(黒)で塗られるので、選択範囲内は黒に近い値になる(遠くの白背景の影響を受けない)
         let c = px(&out, 30, 30);
@@ -348,7 +378,12 @@ mod tests {
     #[test]
     fn 小さすぎる選択の消去は無効() {
         let img = solid(60, 60, [0, 0, 0, 255]);
-        let sel = Selection::Rect { x0: 10, y0: 10, x1: 12, y1: 12 };
+        let sel = Selection::Rect {
+            x0: 10,
+            y0: 10,
+            x1: 12,
+            y1: 12,
+        };
         assert!(erase_selection(&img, &sel).is_none());
     }
 }

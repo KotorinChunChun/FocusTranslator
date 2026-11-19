@@ -78,13 +78,15 @@ fn models_dir() -> PathBuf {
 /// Xenova配布のtokenizer.jsonはPrecompiledノーマライザのcharsmapを含まないため、
 /// そのままでは構築に失敗しうる。該当ノーマライザを無効化してから読み込む。
 fn load_tokenizer(path: &Path) -> Result<Tokenizer, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("トークナイザの読込に失敗しました: {e}"))?;
-    let mut json: JsonValue =
-        serde_json::from_slice(&bytes).map_err(|e| format!("トークナイザの解析に失敗しました: {e}"))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("トークナイザの読込に失敗しました: {e}"))?;
+    let mut json: JsonValue = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("トークナイザの解析に失敗しました: {e}"))?;
     if let Some(n) = json.get_mut("normalizer")
-        && n.get("type").and_then(|t| t.as_str()) == Some("Precompiled") {
-            *n = JsonValue::Null;
-        }
+        && n.get("type").and_then(|t| t.as_str()) == Some("Precompiled")
+    {
+        *n = JsonValue::Null;
+    }
     let bytes = serde_json::to_vec(&json).map_err(|e| e.to_string())?;
     Tokenizer::from_bytes(&bytes).map_err(|e| format!("トークナイザの構築に失敗しました: {e}"))
 }
@@ -97,12 +99,18 @@ fn load_engine(cfg: &DirCfg, base: &Path) -> Result<Engine, String> {
         .and_then(|mut b| b.commit_from_file(base.join(cfg.decoder_file)))
         .map_err(|e| format!("デコーダモデルの読込に失敗しました: {e}"))?;
     let tokenizer = load_tokenizer(&base.join(cfg.tokenizer_file))?;
-    Ok(Engine { encoder: Mutex::new(encoder), decoder: Mutex::new(decoder), tokenizer })
+    Ok(Engine {
+        encoder: Mutex::new(encoder),
+        decoder: Mutex::new(decoder),
+        tokenizer,
+    })
 }
 
 fn engine_for(cfg: &DirCfg, base: &Path) -> Result<Arc<Engine>, String> {
     let key = base.join(cfg.encoder_file).to_string_lossy().to_string();
-    let mut guard = ENGINES.lock().map_err(|_| "エンジンキャッシュのロックに失敗しました".to_string())?;
+    let mut guard = ENGINES
+        .lock()
+        .map_err(|_| "エンジンキャッシュのロックに失敗しました".to_string())?;
     let map = guard.get_or_insert_with(HashMap::new);
     if let Some(e) = map.get(&key) {
         return Ok(e.clone());
@@ -127,15 +135,19 @@ fn run(eng: &Engine, cfg: &DirCfg, text: &str) -> Result<String, String> {
     let ids: Vec<i64> = if let Some(src) = cfg.src_lang_id {
         // 多言語モデル: [原文言語トークン] + 本文 + [eos] を手動で組み立てる
         // (fast tokenizerの既定post-processorは固定言語ペア用のため使わない)
-        let encoding =
-            eng.tokenizer.encode(text, false).map_err(|e| format!("トークナイズに失敗しました: {e}"))?;
+        let encoding = eng
+            .tokenizer
+            .encode(text, false)
+            .map_err(|e| format!("トークナイズに失敗しました: {e}"))?;
         let mut v = vec![src];
         v.extend(encoding.get_ids().iter().map(|&i| i as i64));
         v.push(cfg.eos_id);
         v
     } else {
-        let encoding =
-            eng.tokenizer.encode(text, true).map_err(|e| format!("トークナイズに失敗しました: {e}"))?;
+        let encoding = eng
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| format!("トークナイズに失敗しました: {e}"))?;
         encoding.get_ids().iter().map(|&i| i as i64).collect()
     };
     if ids.is_empty() {
@@ -146,8 +158,10 @@ fn run(eng: &Engine, cfg: &DirCfg, text: &str) -> Result<String, String> {
 
     // エンコーダは一度だけ実行し、隠れ状態を全生成ステップで使い回す
     let (enc_hidden, d_model): (Vec<f32>, i64) = {
-        let mut encoder =
-            eng.encoder.lock().map_err(|_| "エンコーダのロックに失敗しました".to_string())?;
+        let mut encoder = eng
+            .encoder
+            .lock()
+            .map_err(|_| "エンコーダのロックに失敗しました".to_string())?;
         let input_ids = TensorRef::from_array_view((vec![1i64, seq_len], ids.as_slice()))
             .map_err(|e| format!("入力テンソルの作成に失敗しました: {e}"))?;
         let attention_mask = TensorRef::from_array_view((vec![1i64, seq_len], attn.as_slice()))
@@ -166,8 +180,10 @@ fn run(eng: &Engine, cfg: &DirCfg, text: &str) -> Result<String, String> {
         // NLLB: 生成1トークン目は訳先言語トークンに固定する
         decoder_ids.push(forced);
     }
-    let mut decoder =
-        eng.decoder.lock().map_err(|_| "デコーダのロックに失敗しました".to_string())?;
+    let mut decoder = eng
+        .decoder
+        .lock()
+        .map_err(|_| "デコーダのロックに失敗しました".to_string())?;
 
     // キャッシュ未使用のダミー past_key_values (系列長0の空テンソル)。
     // 0要素データを持つテンソルは `from_array_view` の "raw data" 経路では作成できないため
@@ -193,13 +209,17 @@ fn run(eng: &Engine, cfg: &DirCfg, text: &str) -> Result<String, String> {
         for l in 0..cfg.num_layers {
             for kind in ["decoder", "encoder"] {
                 for part in ["key", "value"] {
-                    inputs.push((format!("past_key_values.{l}.{kind}.{part}").into(), empty_kv.view().into()));
+                    inputs.push((
+                        format!("past_key_values.{l}.{kind}.{part}").into(),
+                        empty_kv.view().into(),
+                    ));
                 }
             }
         }
 
-        let outputs =
-            decoder.run(inputs).map_err(|e| format!("デコーダの実行に失敗しました: {e}"))?;
+        let outputs = decoder
+            .run(inputs)
+            .map_err(|e| format!("デコーダの実行に失敗しました: {e}"))?;
         let (shape, logits) = outputs["logits"]
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("デコーダ出力の取得に失敗しました: {e}"))?;
@@ -263,7 +283,11 @@ fn run(eng: &Engine, cfg: &DirCfg, text: &str) -> Result<String, String> {
         .decode(&out_ids, true)
         .map_err(|e| format!("デコードに失敗しました: {e}"))?;
     let text = text.trim().to_string();
-    if text.is_empty() { Err("翻訳結果が空でした".into()) } else { Ok(text) }
+    if text.is_empty() {
+        Err("翻訳結果が空でした".into())
+    } else {
+        Ok(text)
+    }
 }
 
 #[cfg(test)]
@@ -272,7 +296,9 @@ mod tests {
 
     /// FOCUSTRANSLATOR_DATA_DIR を切り替えるテスト(logdb)との干渉を防ぐ
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::util::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
@@ -286,11 +312,20 @@ mod tests {
         let ja_text = "Rustの reqwest や、一部のPythonクライアントでは、通信先の証明書を厳格に検証するオプションが用意されています。これにより、偽の証明書を挟み込んだ通信傍受を検知し、通信を強制的に遮断してAPIキーを守ることができます。";
         let en_text = "In Rust's reqwest and some Python clients, there is an option to strictly verify the certificate of the destination. This makes it possible to detect interception using a forged certificate, forcibly cut the connection, and protect the API key.";
         println!("--- 日本語入力を en→ja モデルへ (ユーザー報告の再現) ---");
-        println!("{}", translate(ja_text, true).unwrap_or_else(|e| format!("ERR: {e}")));
+        println!(
+            "{}",
+            translate(ja_text, true).unwrap_or_else(|e| format!("ERR: {e}"))
+        );
         println!("--- 同じ日本語入力を ja→en モデルへ (正しい方向) ---");
-        println!("{}", translate(ja_text, false).unwrap_or_else(|e| format!("ERR: {e}")));
+        println!(
+            "{}",
+            translate(ja_text, false).unwrap_or_else(|e| format!("ERR: {e}"))
+        );
         println!("--- 英語入力を en→ja モデルへ (本来の用途) ---");
-        println!("{}", translate(en_text, true).unwrap_or_else(|e| format!("ERR: {e}")));
+        println!(
+            "{}",
+            translate(en_text, true).unwrap_or_else(|e| format!("ERR: {e}"))
+        );
     }
 
     #[test]
@@ -306,7 +341,10 @@ mod tests {
         let out = translate(text, true).unwrap_or_else(|e| format!("ERR: {e}"));
         println!("no-repeat probe: {out}");
         // 3-gram以上の同一並びが繰り返されないこと (no-repeat-ngram=3 の効果)
-        assert!(!out.contains("月刊 月刊 月刊"), "繰り返しループが残っている: {out}");
+        assert!(
+            !out.contains("月刊 月刊 月刊"),
+            "繰り返しループが残っている: {out}"
+        );
     }
 
     #[test]

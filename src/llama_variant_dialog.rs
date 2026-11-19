@@ -12,15 +12,14 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
-use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, BS_AUTORADIOBUTTON, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, DispatchMessageW, GetMessageW, GetWindowRect, HMENU, IDC_ARROW, IsWindow,
-    LoadCursorW, MSG, RegisterClassW, SW_SHOW, SendMessageW, SetForegroundWindow, ShowWindow,
-    TranslateMessage, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_SETFONT,
-    WNDCLASSW, WS_CAPTION, WS_CHILD, WS_EX_TOPMOST, WS_GROUP, WS_POPUPWINDOW, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
-};
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_RETURN};
+use windows::Win32::UI::WindowsAndMessaging::{
+    BM_GETCHECK, BM_SETCHECK, BS_AUTORADIOBUTTON, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, GetMessageW, GetWindowRect, HMENU, IDC_ARROW, IsWindow, LoadCursorW, MSG,
+    RegisterClassW, SW_SHOW, SendMessageW, SetForegroundWindow, ShowWindow, TranslateMessage,
+    WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_SETFONT, WNDCLASSW, WS_CAPTION,
+    WS_CHILD, WS_EX_TOPMOST, WS_GROUP, WS_POPUPWINDOW, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+};
 use windows::core::{PCWSTR, w};
 
 const IDC_RADIO_CPU: i32 = 201;
@@ -50,7 +49,9 @@ pub fn show(parent: HWND, gpu: GpuInfo) -> Option<LlamaVariant> {
             lpfnWndProc: Some(wndproc),
             hInstance: instance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH((COLOR_BTNFACE.0 + 1) as usize as *mut _),
+            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
+                (COLOR_BTNFACE.0 + 1) as usize as *mut _,
+            ),
             lpszClassName: class_name,
             ..Default::default()
         };
@@ -59,7 +60,10 @@ pub fn show(parent: HWND, gpu: GpuInfo) -> Option<LlamaVariant> {
         let (x, y) = {
             let mut r = RECT::default();
             if GetWindowRect(parent, &mut r).is_ok() {
-                (r.left + (r.right - r.left - DLG_W) / 2, r.top + (r.bottom - r.top - DLG_H) / 2)
+                (
+                    r.left + (r.right - r.left - DLG_W) / 2,
+                    r.top + (r.bottom - r.top - DLG_H) / 2,
+                )
             } else {
                 (200, 200)
             }
@@ -85,15 +89,41 @@ pub fn show(parent: HWND, gpu: GpuInfo) -> Option<LlamaVariant> {
         let _ = EnableWindow(parent, false);
 
         let font = CreateFontW(
-            18, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH.0 as u32, w!("Meiryo"),
+            18,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY,
+            DEFAULT_PITCH.0 as u32,
+            w!("Meiryo"),
         );
 
-        let mark = |present: bool| if present { "○ 対応GPUを検出" } else { "✕ 対応GPU未検出" };
+        let mark = |present: bool| {
+            if present {
+                "○ 対応GPUを検出"
+            } else {
+                "✕ 対応GPU未検出"
+            }
+        };
         let radios: [(i32, String, bool); 3] = [
             (IDC_RADIO_CPU, "CPU版 (全ての環境で動作)".to_string(), false),
-            (IDC_RADIO_CUDA, format!("CUDA版 (NVIDIA GPU)  {}", mark(gpu.nvidia)), gpu.nvidia),
-            (IDC_RADIO_RADEON, format!("Radeon版 (AMD GPU, HIP)  {}", mark(gpu.amd)), gpu.amd),
+            (
+                IDC_RADIO_CUDA,
+                format!("CUDA版 (NVIDIA GPU)  {}", mark(gpu.nvidia)),
+                gpu.nvidia,
+            ),
+            (
+                IDC_RADIO_RADEON,
+                format!("Radeon版 (AMD GPU, HIP)  {}", mark(gpu.amd)),
+                gpu.amd,
+            ),
         ];
         // 既定選択: NVIDIA検出ならCUDA、AMD検出ならRadeon、どちらも無ければCPU
         let default_id = if gpu.nvidia {
@@ -106,7 +136,10 @@ pub fn show(parent: HWND, gpu: GpuInfo) -> Option<LlamaVariant> {
 
         let mut ry = 16;
         for (i, (id, label, _)) in radios.iter().enumerate() {
-            let style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTORADIOBUTTON as u32)
+            let style = WS_CHILD
+                | WS_VISIBLE
+                | WS_TABSTOP
+                | WINDOW_STYLE(BS_AUTORADIOBUTTON as u32)
                 | if i == 0 { WS_GROUP } else { WINDOW_STYLE(0) };
             let wide = to_wide(label);
             let radio = CreateWindowExW(
@@ -124,7 +157,12 @@ pub fn show(parent: HWND, gpu: GpuInfo) -> Option<LlamaVariant> {
                 None,
             )
             .unwrap();
-            let _ = SendMessageW(radio, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(0)));
+            let _ = SendMessageW(
+                radio,
+                WM_SETFONT,
+                Some(WPARAM(font.0 as usize)),
+                Some(LPARAM(0)),
+            );
             if *id == default_id {
                 let _ = SendMessageW(radio, BM_SETCHECK, Some(WPARAM(1)), Some(LPARAM(0)));
             }
@@ -146,7 +184,12 @@ pub fn show(parent: HWND, gpu: GpuInfo) -> Option<LlamaVariant> {
             None,
         )
         .unwrap();
-        let _ = SendMessageW(ok_btn, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(0)));
+        let _ = SendMessageW(
+            ok_btn,
+            WM_SETFONT,
+            Some(WPARAM(font.0 as usize)),
+            Some(LPARAM(0)),
+        );
 
         let cancel_btn = CreateWindowExW(
             Default::default(),
@@ -163,7 +206,12 @@ pub fn show(parent: HWND, gpu: GpuInfo) -> Option<LlamaVariant> {
             None,
         )
         .unwrap();
-        let _ = SendMessageW(cancel_btn, WM_SETFONT, Some(WPARAM(font.0 as usize)), Some(LPARAM(0)));
+        let _ = SendMessageW(
+            cancel_btn,
+            WM_SETFONT,
+            Some(WPARAM(font.0 as usize)),
+            Some(LPARAM(0)),
+        );
 
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
@@ -176,10 +224,20 @@ pub fn show(parent: HWND, gpu: GpuInfo) -> Option<LlamaVariant> {
             if msg.message == WM_KEYDOWN {
                 let key = msg.wParam.0 as u16;
                 if key == VK_RETURN.0 {
-                    let _ = SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(IDC_OK as usize)), Some(LPARAM(0)));
+                    let _ = SendMessageW(
+                        hwnd,
+                        WM_COMMAND,
+                        Some(WPARAM(IDC_OK as usize)),
+                        Some(LPARAM(0)),
+                    );
                     continue;
                 } else if key == VK_ESCAPE.0 {
-                    let _ = SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(IDC_CANCEL as usize)), Some(LPARAM(0)));
+                    let _ = SendMessageW(
+                        hwnd,
+                        WM_COMMAND,
+                        Some(WPARAM(IDC_CANCEL as usize)),
+                        Some(LPARAM(0)),
+                    );
                     continue;
                 }
             }
@@ -205,7 +263,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if id == IDC_OK {
                 unsafe {
                     let checked = |ctl_id: i32| -> bool {
-                        let h = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(hwnd), ctl_id).unwrap_or_default();
+                        let h =
+                            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(hwnd), ctl_id)
+                                .unwrap_or_default();
                         SendMessageW(h, BM_GETCHECK, Some(WPARAM(0)), Some(LPARAM(0))).0 == 1
                     };
                     let variant = if checked(IDC_RADIO_CUDA) {

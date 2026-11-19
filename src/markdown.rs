@@ -12,7 +12,9 @@ pub enum BlockKind {
     Heading(u8),
     Paragraph,
     /// 箇条書き (番号付き/番号なし共通。インデント深さのみ保持)
-    ListItem { depth: u8 },
+    ListItem {
+        depth: u8,
+    },
     CodeBlock,
     Rule,
     /// 表 (GFMテーブル)。text には等幅フォント向けに桁揃えした複数行文字列が入る (SPECv0.5.4 §5)
@@ -45,10 +47,18 @@ pub fn parse(md: &str) -> Vec<Block> {
     let mut table_cur_row: Vec<String> = Vec::new();
     let mut table_cur_cell = String::new();
 
-    let flush = |blocks: &mut Vec<Block>, cur: &mut String, kind: BlockKind, all_bold: &mut bool, has_text: &mut bool| {
+    let flush = |blocks: &mut Vec<Block>,
+                 cur: &mut String,
+                 kind: BlockKind,
+                 all_bold: &mut bool,
+                 has_text: &mut bool| {
         let text = cur.trim_end().to_string();
         if !text.is_empty() {
-            blocks.push(Block { kind, text, bold: *all_bold && *has_text });
+            blocks.push(Block {
+                kind,
+                text,
+                bold: *all_bold && *has_text,
+            });
         }
         cur.clear();
         *all_bold = true;
@@ -59,23 +69,49 @@ pub fn parse(md: &str) -> Vec<Block> {
     for ev in Parser::new_ext(md, Options::ENABLE_TABLES) {
         match ev {
             Event::Start(Tag::Heading { level, .. }) => {
-                flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
+                flush(
+                    &mut blocks,
+                    &mut cur,
+                    cur_kind,
+                    &mut all_bold,
+                    &mut has_text,
+                );
                 cur_kind = BlockKind::Heading(heading_level_num(level));
             }
             Event::End(TagEnd::Heading(_)) => {
-                flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
+                flush(
+                    &mut blocks,
+                    &mut cur,
+                    cur_kind,
+                    &mut all_bold,
+                    &mut has_text,
+                );
                 cur_kind = BlockKind::Paragraph;
             }
             Event::Start(Tag::Paragraph) => {
-                flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
+                flush(
+                    &mut blocks,
+                    &mut cur,
+                    cur_kind,
+                    &mut all_bold,
+                    &mut has_text,
+                );
                 cur_kind = if list_depth > 0 {
-                    BlockKind::ListItem { depth: list_depth - 1 }
+                    BlockKind::ListItem {
+                        depth: list_depth - 1,
+                    }
                 } else {
                     BlockKind::Paragraph
                 };
             }
             Event::End(TagEnd::Paragraph) => {
-                flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
+                flush(
+                    &mut blocks,
+                    &mut cur,
+                    cur_kind,
+                    &mut all_bold,
+                    &mut has_text,
+                );
                 cur_kind = BlockKind::Paragraph;
             }
             Event::Start(Tag::List(start)) => {
@@ -87,7 +123,13 @@ pub fn parse(md: &str) -> Vec<Block> {
                 ordered_index.pop();
             }
             Event::Start(Tag::Item) => {
-                flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
+                flush(
+                    &mut blocks,
+                    &mut cur,
+                    cur_kind,
+                    &mut all_bold,
+                    &mut has_text,
+                );
                 let depth = list_depth.saturating_sub(1);
                 cur_kind = BlockKind::ListItem { depth };
                 if let Some(Some(n)) = ordered_index.last_mut() {
@@ -98,25 +140,59 @@ pub fn parse(md: &str) -> Vec<Block> {
                 }
             }
             Event::End(TagEnd::Item) => {
-                flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
+                flush(
+                    &mut blocks,
+                    &mut cur,
+                    cur_kind,
+                    &mut all_bold,
+                    &mut has_text,
+                );
                 cur_kind = BlockKind::Paragraph;
             }
             Event::Start(Tag::CodeBlock(_)) => {
-                flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
+                flush(
+                    &mut blocks,
+                    &mut cur,
+                    cur_kind,
+                    &mut all_bold,
+                    &mut has_text,
+                );
                 cur_kind = BlockKind::CodeBlock;
             }
             Event::End(TagEnd::CodeBlock) => {
-                flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
+                flush(
+                    &mut blocks,
+                    &mut cur,
+                    cur_kind,
+                    &mut all_bold,
+                    &mut has_text,
+                );
                 cur_kind = BlockKind::Paragraph;
             }
             Event::Start(Tag::Strong) => strong_depth += 1,
             Event::End(TagEnd::Strong) => strong_depth = strong_depth.saturating_sub(1),
             Event::Rule => {
-                flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
-                blocks.push(Block { kind: BlockKind::Rule, text: String::new(), bold: false });
+                flush(
+                    &mut blocks,
+                    &mut cur,
+                    cur_kind,
+                    &mut all_bold,
+                    &mut has_text,
+                );
+                blocks.push(Block {
+                    kind: BlockKind::Rule,
+                    text: String::new(),
+                    bold: false,
+                });
             }
             Event::Start(Tag::Table(_)) => {
-                flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
+                flush(
+                    &mut blocks,
+                    &mut cur,
+                    cur_kind,
+                    &mut all_bold,
+                    &mut has_text,
+                );
                 in_table = true;
                 table_rows.clear();
                 table_cur_row.clear();
@@ -125,7 +201,11 @@ pub fn parse(md: &str) -> Vec<Block> {
             Event::End(TagEnd::Table) => {
                 let text = format_table(&table_rows);
                 if !text.is_empty() {
-                    blocks.push(Block { kind: BlockKind::Table, text, bold: false });
+                    blocks.push(Block {
+                        kind: BlockKind::Table,
+                        text,
+                        bold: false,
+                    });
                 }
                 in_table = false;
                 table_rows.clear();
@@ -162,7 +242,13 @@ pub fn parse(md: &str) -> Vec<Block> {
             _ => {}
         }
     }
-    flush(&mut blocks, &mut cur, cur_kind, &mut all_bold, &mut has_text);
+    flush(
+        &mut blocks,
+        &mut cur,
+        cur_kind,
+        &mut all_bold,
+        &mut has_text,
+    );
     blocks
 }
 
