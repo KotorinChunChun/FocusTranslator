@@ -2,6 +2,7 @@
 // APIキーは DPAPI で暗号化した base64 を保存する。
 use crate::util;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub enum ApiType {
@@ -106,6 +107,9 @@ impl ApiProfile {
     /// URLのホストが localhost / 127.0.0.1 / [::1] ならローカル送信とみなし、
     /// 外部送信の同意ダイアログを出さない。URL未設定は既定の公式APIへ解決されるため外部扱い。
     pub fn is_external(&self) -> bool {
+        if self.api_type.is_cli() {
+            return true;
+        }
         let url = self.api_url.trim();
         if url.is_empty() {
             return true;
@@ -343,6 +347,38 @@ fn default_ocr_priority_apps() -> Vec<String> {
 
 fn preview_key_none_not_migrated() -> bool {
     false
+}
+
+/// 旧版で復元できる最後の設定を、最初のCLIプロファイル保存前に保持する。
+fn backup_config_before_cli(path: &std::path::Path) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+
+    let backup = path.with_file_name("config.before-cli.json");
+    if backup.try_exists()? {
+        return Ok(());
+    }
+    let previous = match std::fs::read(path) {
+        Ok(previous) => previous,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let Ok(previous_config) = serde_json::from_slice::<Config>(&previous) else {
+        return Ok(());
+    };
+    if previous_config
+        .api_profiles
+        .iter()
+        .any(|profile| profile.api_type.is_cli())
+    {
+        return Ok(());
+    }
+    let mut file = std::fs::File::create_new(&backup)?;
+    if let Err(error) = file.write_all(&previous).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(backup);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// 翻訳プロンプトの既定値 (SPECv0.5.3: 既に訳先言語ならそのまま返す指示を追加)
@@ -681,7 +717,19 @@ impl Config {
 
     pub fn save(&self) {
         if let Ok(s) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(Self::path(), s);
+            let path = Self::path();
+            if self
+                .api_profiles
+                .iter()
+                .any(|profile| profile.api_type.is_cli())
+                && let Err(error) = backup_config_before_cli(&path)
+            {
+                util::app_log(&format!(
+                    "CLI移行前の設定を退避できないため設定を保存できません: {error}"
+                ));
+                return;
+            }
+            let _ = std::fs::write(path, s);
         }
     }
 
@@ -878,6 +926,11 @@ mod tests {
         let cfg = Config::load();
         assert_eq!(cfg.detect_key, "なし");
         assert!(cfg.preview_key_none_migrated);
+        let backup = tmp.join("config.before-cli.json");
+        let previous = r#"{"detect_key":"LCtrl","preview_detect_enabled":false}"#;
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), previous);
+        cfg.save();
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), previous);
 
         let _ = std::fs::remove_dir_all(&tmp);
         unsafe {

@@ -13,6 +13,9 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+mod process_job;
+
 pub const CLI_TIMEOUT: Duration = Duration::from_secs(120);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CAPTURE_BYTES: u64 = 4 * 1024 * 1024;
@@ -556,10 +559,9 @@ fn run_process(spec: &CommandSpec, cwd: &Path, timeout: Duration) -> Result<Proc
         command.env(key, value);
     }
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
+    let (mut child, job) = process_job::spawn(&mut command)
+        .map_err(|e| format!("CLIを起動できません ({}): {e}", spec.executable.display()))?;
+    #[cfg(not(windows))]
     let mut child = command
         .spawn()
         .map_err(|e| format!("CLIを起動できません ({}): {e}", spec.executable.display()))?;
@@ -569,6 +571,8 @@ fn run_process(spec: &CommandSpec, cwd: &Path, timeout: Duration) -> Result<Proc
             Ok(Some(status)) => break status,
             Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(40)),
             Ok(None) => {
+                #[cfg(windows)]
+                drop(job);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
@@ -577,12 +581,17 @@ fn run_process(spec: &CommandSpec, cwd: &Path, timeout: Duration) -> Result<Proc
                 ));
             }
             Err(e) => {
+                #[cfg(windows)]
+                drop(job);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("CLIプロセスの状態確認に失敗しました: {e}"));
             }
         }
     };
+    // 正常終了したラッパーから残ったプロセスも、一時ファイルを読む前に終了する。
+    #[cfg(windows)]
+    drop(job);
     Ok(ProcessOutput {
         success: status.success(),
         code: status.code(),
@@ -800,6 +809,61 @@ fn update_usage(value: &serde_json::Value, input: &mut Option<i64>, output: &mut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn job_tree_fixture() {
+        match std::env::var("FOCUS_TRANSLATOR_JOB_TREE_FIXTURE").as_deref() {
+            Ok("parent") => {
+                let mut leaf = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "llm_cli::tests::job_tree_fixture"])
+                    .env("FOCUS_TRANSLATOR_JOB_TREE_FIXTURE", "leaf")
+                    .spawn()
+                    .unwrap();
+                std::fs::write("leaf.pid", leaf.id().to_string()).unwrap();
+                leaf.wait().unwrap();
+            }
+            Ok("leaf") => std::thread::sleep(Duration::from_secs(10)),
+            _ => {}
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn timeout_stops_cli_descendants() {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        };
+
+        let job_dir = JobDir::create().unwrap();
+        let spec = CommandSpec {
+            executable: std::env::current_exe().unwrap(),
+            args: ["--exact", "llm_cli::tests::job_tree_fixture"]
+                .map(Into::into)
+                .to_vec(),
+            envs: vec![("FOCUS_TRANSLATOR_JOB_TREE_FIXTURE".into(), "parent".into())],
+            stdin_text: None,
+            final_message: None,
+        };
+        let result = run_process(&spec, job_dir.path(), Duration::from_secs(2));
+        assert!(
+            matches!(result, Err(error) if error.contains("2秒")),
+            "タイムアウトしたこと"
+        );
+        let pid = std::fs::read_to_string(job_dir.path().join("leaf.pid")).unwrap();
+        match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid.parse().unwrap()) } {
+            Ok(handle) => {
+                let _guard = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+                assert_eq!(unsafe { WaitForSingleObject(handle, 1_000) }, WAIT_OBJECT_0);
+            }
+            Err(error) => assert_eq!(error.code(), ERROR_INVALID_PARAMETER.to_hresult()),
+        }
+        let scratch = job_dir.path().to_owned();
+        drop(job_dir);
+        assert!(!scratch.exists());
+    }
 
     fn profile(api_type: ApiType) -> ApiProfile {
         ApiProfile {

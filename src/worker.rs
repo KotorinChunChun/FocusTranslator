@@ -637,6 +637,10 @@ fn prepare_ocr_input<'a>(
     (std::borrow::Cow::Borrowed(img), focus, false)
 }
 
+fn full_ocr_hash(input: &Captured, full_screenshot: bool) -> Option<String> {
+    full_screenshot.then(|| format!("full:{}", crate::capture::hash_hex(input)))
+}
+
 /// UIA経路(選択文字列/カーソル位置テキスト)の採用結果を記録・送信・翻訳する共通処理。
 /// 選択文字列(経路S)とカーソル位置テキスト(経路A)のどちらも、OCRを行わず同じ形で
 /// 扱えるため recognize_cycle から共用する。
@@ -909,6 +913,10 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         let (ocr_img, ocr_focus, full_screenshot) =
             prepare_ocr_input(&cfg, &engine, &used.img, focus, prompt_image.as_ref());
         let mut out = ocr::run(&engine, &cfg, &ocr_img, ocr_focus, &pc, full_screenshot);
+        let mut full_input_hash = out
+            .as_ref()
+            .ok()
+            .and_then(|_| full_ocr_hash(&ocr_img, full_screenshot));
         if out.is_err() {
             // 既定の帯を拡大して再試行 (SPEC §6.3)
             if let Ok(wide) = capture_plan::capture_band(x, y, target, 1800, 340) {
@@ -927,6 +935,10 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                     &pc,
                     retry_full_screenshot,
                 );
+                full_input_hash = out
+                    .as_ref()
+                    .ok()
+                    .and_then(|_| full_ocr_hash(&retry_img, retry_full_screenshot));
             }
         }
         // 段落帯: OCRしたカーソル直下行を直下要素の全テキスト (UIA Name) から検索し、
@@ -944,7 +956,7 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
                 util::perf_log(cfg.perf_log, &format!("source OCR({engine}) {ms}ms"));
                 // ログにはOCR対象領域だけを保存する (全体は保持画像=再OCR用)
                 let (log_img, full_rect) = crop_for_log(used.rect, &used.img, focus);
-                let hash = crate::capture::hash_hex(&log_img);
+                let hash = full_input_hash.unwrap_or_else(|| crate::capture::hash_hex(&log_img));
                 let capture_id = log_cap(
                     &cfg,
                     "hold",
@@ -1249,11 +1261,8 @@ pub fn reocr(job: ReocrJob) {
         let prompt_image = PromptImage::new(full_img.clone(), full_rect);
         let (ocr_image, ocr_focus, full_screenshot) =
             prepare_ocr_input(&cfg, &ocr_engine, &image, focus, prompt_image.as_ref());
-        let hash = if full_screenshot {
-            crate::capture::hash_hex(&ocr_image)
-        } else {
-            crate::capture::hash_hex(&log_img)
-        };
+        let hash = full_ocr_hash(&ocr_image, full_screenshot)
+            .unwrap_or_else(|| crate::capture::hash_hex(&log_img));
         let extent = Extent {
             full: full_img.as_deref(),
             rect: full_rect,
@@ -1541,7 +1550,8 @@ pub fn region_cycle(generation: u64, rect: RECT, cfg: Config, main: isize) {
             Ok(o) => {
                 let ms = t0.elapsed().as_millis();
                 util::perf_log(cfg.perf_log, &format!("region OCR({engine}) {ms}ms"));
-                let hash = crate::capture::hash_hex(&img);
+                let hash = full_ocr_hash(&ocr_img, full_screenshot)
+                    .unwrap_or_else(|| crate::capture::hash_hex(&img));
                 let capture_id = log_cap(
                     &cfg,
                     "region",
