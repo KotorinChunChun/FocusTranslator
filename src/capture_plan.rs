@@ -178,6 +178,16 @@ pub fn capture_screen_rect(target: isize, sr: &RECT, y: i32) -> Result<Band, Str
     }
     let full = capture::capture_window(hwnd)?;
     let r = capture::window_frame_rect(hwnd);
+    crop_screen_rect(full, &r, sr, y)
+}
+
+/// 画面上の矩形を取得画像のピクセル座標へ変換して切り出す。
+pub(crate) fn crop_screen_rect(
+    full: Captured,
+    r: &RECT,
+    sr: &RECT,
+    y: i32,
+) -> Result<Band, String> {
     let rw = (r.right - r.left).max(1);
     let rh = (r.bottom - r.top).max(1);
     let scale_x = full.width as f32 / rw as f32;

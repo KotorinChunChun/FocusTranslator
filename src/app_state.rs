@@ -251,8 +251,22 @@ pub unsafe extern "system" fn wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        crate::text_capture::WM_KEY => {
+            with_app(|app| crate::text_capture::handle_key(wparam.0, &app.cfg));
+            LRESULT(0)
+        }
+        crate::text_capture::WM_MOUSE => {
+            crate::text_capture::handle_mouse(lparam);
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_TIMER
+            if crate::text_capture::is_timer(wparam.0) =>
+        {
+            with_app(|app| crate::text_capture::tick(&app.cfg));
+            LRESULT(0)
+        }
         windows::Win32::UI::WindowsAndMessaging::WM_TIMER if wparam.0 == TIMER_POLL => {
-            if !crate::management::passive() {
+            if !crate::management::passive() && !crate::text_capture::active() {
                 tick();
             }
             LRESULT(0)
@@ -292,6 +306,9 @@ pub unsafe extern "system" fn wndproc(
         }
         WM_APP_CFG => {
             reload_config(hwnd);
+            if !crate::management::passive() {
+                with_app(|app| crate::text_capture::configure(&app.cfg, app.instance, app.main));
+            }
             LRESULT(0)
         }
         windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE => {

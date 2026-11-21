@@ -107,6 +107,10 @@ impl AppContext {
     fn capture(x: i32, y: i32, target: HWND) -> Self {
         // メニューポップアップ等はオーナーを辿って親アプリの情報を補完する (SPECv0.5.4 §9b)
         let (exe, title) = util::get_app_context(target);
+        Self::with_uia(x, y, exe, title)
+    }
+
+    fn with_uia(x: i32, y: i32, exe: Option<String>, title: Option<String>) -> Self {
         let uia_nodes = uia::path_nodes_at_point(x, y);
         let control_type = uia::control_type_at_point(x, y);
         AppContext {
@@ -611,8 +615,20 @@ fn crop_for_log(band_rect: RECT, img: &Captured, focus: ocr::Focus) -> (Captured
     (cropped.into_owned(), full_rect)
 }
 
-/// OCR入力を設定に応じて従来の対象画像、または赤枠付き全体画像へ切り替える。
-/// 戻り値のboolは、OCRプロンプトへ赤枠の説明を加えるかどうかを表す。
+/// 除外アプリではコンテキスト取得を含むUIA処理を始めない。
+fn inspect_hold_target<T>(
+    cfg: &Config,
+    exe: Option<String>,
+    inspect: impl FnOnce(Option<String>) -> T,
+) -> Option<T> {
+    if exe.as_deref().is_some_and(|exe| cfg.is_disabled_app(exe)) {
+        return None;
+    }
+    Some(inspect(exe))
+}
+
+/// OCR入力を対象画像または赤枠付き全体画像へ切り替える。
+/// 全体画像を使う場合は、OCRプロンプトに赤枠の説明を加える。
 fn prepare_ocr_input<'a>(
     cfg: &Config,
     engine: &str,
@@ -808,16 +824,14 @@ pub fn recognize_cycle(generation: u64, x: i32, y: i32, target: isize, cfg: Conf
         let tr_engine = cfg.default_translator.clone();
         init_com();
         let t0 = Instant::now();
-        let mut ctx = AppContext::capture(x, y, HWND(target as *mut _));
+        let (exe, title) = util::get_app_context(HWND(target as *mut _));
         // 実行しないアプリ (SPECv0.5.5): 登録された対象アプリ上では一切認識・表示を行わない。
         // UIAプローブすら行わず即座に抜ける (無関係な処理コストも避ける)。
-        if ctx
-            .exe
-            .as_deref()
-            .is_some_and(|exe| cfg.is_disabled_app(exe))
-        {
+        let Some(mut ctx) =
+            inspect_hold_target(&cfg, exe, |exe| AppContext::with_uia(x, y, exe, title))
+        else {
             return;
-        }
+        };
         let probe = uia::probe_at_point(x, y);
         ctx.selected_text = probe.selected_text.clone();
 
@@ -1833,6 +1847,9 @@ pub fn explain(
         }
     });
 }
+
+#[cfg(test)]
+mod recognition_cli;
 
 #[cfg(test)]
 mod tests {

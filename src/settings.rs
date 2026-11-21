@@ -60,6 +60,10 @@ const IDC_DETECT_KEY: i32 = 146;
 const IDC_DETECT_KEY2: i32 = 188;
 /// キャプチャキーとプレビューキーの競合をモーダル表示せず案内する赤字ラベル。
 const IDC_KEY_CONFLICT: i32 = 189;
+const IDC_TEXT_CAPTURE_KEY: i32 = 190;
+const TEXT_CAPTURE_KEYS: [&str; 8] = [
+    "F8", "F9", "F10", "RCtrl", "LCtrl", "RShift", "RAlt", "なし",
+];
 const IDC_PREVIEW_DETECT_MODE: i32 = 147;
 const IDC_PIN_HOLD: i32 = 151;
 /// プロンプト編集ウィンドウを開くボタン (SPECv0.4.7 §6.1)
@@ -359,6 +363,9 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
             88,
             IDC_PREVIEW_DETECT_MODE,
         );
+        y += STEP;
+        label(h, inst, "テキストキャプチャキー", lx, y + 2, 140);
+        combo(h, inst, cx, y, 90, IDC_TEXT_CAPTURE_KEY);
         y += STEP;
         ctl(
             h,
@@ -1036,6 +1043,11 @@ fn populate_key_combos(h: HWND, cfg: &Config) {
 
 fn populate(h: HWND) {
     let cfg = Config::load();
+    let text_key_index = TEXT_CAPTURE_KEYS
+        .iter()
+        .position(|key| *key == cfg.text_capture_key)
+        .unwrap_or(TEXT_CAPTURE_KEYS.len() - 1);
+    combo_fill(h, IDC_TEXT_CAPTURE_KEY, &TEXT_CAPTURE_KEYS, text_key_index);
     populate_key_combos(h, &cfg);
     set_ctl_text(h, IDC_POLL, &cfg.poll_ms.to_string());
     set_ctl_text(h, IDC_PIN_HOLD, &cfg.pin_hold_seconds.to_string());
@@ -2231,6 +2243,7 @@ fn open_url(h: HWND, url: &str) {
 
 fn save(h: HWND, ask_consent: bool) {
     let mut cfg = Config::load();
+    cfg.text_capture_key = selected_text_capture_key(h).into();
     cfg.hold_key = selected_key(h, IDC_HOLDKEY);
     cfg.hold_key2 = selected_key(h, IDC_HOLDKEY2);
     cfg.poll_ms = get_ctl_text(h, IDC_POLL)
@@ -2341,6 +2354,13 @@ fn current_key_conditions(h: HWND) -> (String, String, String, String) {
     )
 }
 
+fn selected_text_capture_key(h: HWND) -> &'static str {
+    TEXT_CAPTURE_KEYS
+        .get(combo_sel(h, IDC_TEXT_CAPTURE_KEY))
+        .copied()
+        .unwrap_or("なし")
+}
+
 fn update_key_conflict_label(h: HWND) {
     let (hold_first, hold_second, preview_first, preview_second) = current_key_conditions(h);
     let message = if Config::key_conditions_conflict(
@@ -2350,6 +2370,12 @@ fn update_key_conflict_label(h: HWND) {
         &preview_second,
     ) {
         "キーが重複しています（設定は保存されます）"
+    } else if Config::text_capture_conflicts(
+        selected_text_capture_key(h),
+        (&hold_first, &hold_second),
+        (&preview_first, &preview_second),
+    ) {
+        "キーが重複しています（テキストキャプチャは無効）"
     } else {
         ""
     };
@@ -2395,6 +2421,12 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             // プロファイル編集欄 (名前/種別/URL/キー/モデル) も選択中の行へ同様に自動保存する
             // (SPECv0.5.5: [commit_profile_edit] 参照。保存ボタン押し忘れ対策)。
             match id {
+                IDC_TEXT_CAPTURE_KEY
+                    if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE =>
+                {
+                    auto_save(h, false);
+                    update_key_conflict_label(h);
+                }
                 IDC_HOLDKEY | IDC_HOLDKEY2 | IDC_DETECT_KEY | IDC_DETECT_KEY2
                     if notif == windows::Win32::UI::WindowsAndMessaging::CBN_SELCHANGE =>
                 {

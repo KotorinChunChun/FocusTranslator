@@ -72,6 +72,10 @@ cargo build --release
 
 ---
 
+## 文字認識と翻訳の隔離試験
+
+`cargo test --locked worker::recognition_cli::recognition_translation_and_exclusion -- --exact` で、固定画像の切り抜き、ループバックAPIへの認識・翻訳リクエスト、除外アプリの判定を確認できます。外部APIへの認証や実モデルは不要です。HTTPプロキシを使う場合は `NO_PROXY` に `127.0.0.1` を含めてください。
+
 ## データ保存ディレクトリ構造
 
 FocusTranslator の設定ファイル、ログ、ダウンロードしたモデルやサーバー本体は、すべてユーザーの AppData ディレクトリに保存されます。

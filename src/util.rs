@@ -95,10 +95,6 @@ pub fn config_dir() -> PathBuf {
 
 pub fn set_clipboard_text(hwnd: HWND, text: &str) -> bool {
     unsafe {
-        if OpenClipboard(Some(hwnd)).is_err() {
-            return false;
-        }
-        let _ = EmptyClipboard();
         let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let bytes = wide.len() * 2;
         let mut ok = false;
@@ -107,13 +103,18 @@ pub fn set_clipboard_text(hwnd: HWND, text: &str) -> bool {
             if !ptr.is_null() {
                 std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
                 let _ = GlobalUnlock(hmem);
-                ok = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0))).is_ok();
+                // 確保・変換が終わるまでは既存のクリップボードを変更しない。
+                if OpenClipboard(Some(hwnd)).is_ok() {
+                    if EmptyClipboard().is_ok() {
+                        ok = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0))).is_ok();
+                    }
+                    let _ = CloseClipboard();
+                }
             }
             if !ok {
                 let _ = windows::Win32::Foundation::GlobalFree(Some(HGLOBAL(hmem.0)));
             }
         }
-        let _ = CloseClipboard();
         ok
     }
 }

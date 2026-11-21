@@ -7,7 +7,10 @@
 
 # --- 開発者・AI専用資料フォルダ（丸ごとGit対象外・ローカル運用） -----------------
 # PROJECT_RULE.md / RELEASE_RULE.md / AI_CONTEXT.md / CHANGE_PLAN/ / scripts/ を含む
-dev/
+dev/*
+!dev/history/
+!dev/scripts/
+/dev/history/*/logs/
 
 # --- リリース成果物（配布は GitHub Releases で行う） ----------------------------
 release/
@@ -17,6 +20,8 @@ samples/
 
 # --- ビルド成果物・中間生成物 ---------------------------------------------------
 target/
+/tests/**/bin/
+/tests/**/obj/
 node_modules/
 dist/
 build/
@@ -55,3 +60,8 @@ tmp/
 # 個人情報・プライベートなコンテキストを含むもの（プロジェクト固有パスがあれば追記）
 .claude/
 
+
+# 継続セキュリティ調査の正本だけを追跡
+!dev/research/
+dev/research/*
+!dev/research/security-maintenance/

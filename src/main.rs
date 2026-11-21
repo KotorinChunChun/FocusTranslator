@@ -9,6 +9,7 @@ mod capture_plan;
 mod chip_handler;
 mod clipboard_text;
 mod config;
+mod copy_recognition;
 mod detect;
 mod engine;
 mod gpu_detect;
@@ -39,6 +40,7 @@ mod region;
 mod settings;
 #[cfg(test)]
 mod test_util;
+mod text_capture;
 mod translate;
 mod tray;
 mod ui_helpers;
@@ -260,6 +262,9 @@ fn main() {
     }
 
     app_state::init(cfg, instance, main, overlay);
+    if !passive {
+        app_state::with_app(|app| text_capture::configure(&app.cfg, instance, main));
+    }
     let endpoint = match management::Endpoint::start() {
         Ok(endpoint) => endpoint,
         Err(error) => {
@@ -284,6 +289,7 @@ fn main() {
                         }
                         let blocked = settings::is_open()
                             || logviewer::is_open()
+                            || text_capture::active()
                             || app_state::with_app(|app| {
                                 app.busy || app.explaining || app.mode != app_state::Mode::Idle
                             })
@@ -311,6 +317,7 @@ fn main() {
             DispatchMessageW(&msg);
         }
     }
+    text_capture::shutdown();
 }
 
 /// アンインストール時のクリーンアップ (SPECv0.5.4 §19)。

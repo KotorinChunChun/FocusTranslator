@@ -237,6 +237,8 @@ pub struct Config {
     pub hold_key: String,
     /// ホールドキー(2つ目)。両方「なし」の場合は無効、片方だけ「なし」の場合は単独キー。
     pub hold_key2: String,
+    /// 押下中の対象表示と解放時コピーに使う単独キー。
+    pub text_capture_key: String,
     /// GetAsyncKeyState の監視周期 (ms)
     pub poll_ms: u32,
     /// ホールドピン留めまでの秒数 (既定: 3秒)
@@ -511,6 +513,7 @@ impl Default for Config {
         Config {
             hold_key: "RCtrl".into(),
             hold_key2: "なし".into(),
+            text_capture_key: "F8".into(),
             poll_ms: 100,
             pin_hold_seconds: 3,
             region_hotkey: "Ctrl+Alt+Shift+T".into(),
@@ -805,6 +808,8 @@ impl Config {
             "LWin" => KeyRequirement::Single(0x5B),
             "RWin" => KeyRequirement::Single(0x5C),
             "F8" => KeyRequirement::Single(0x77),
+            "F9" => KeyRequirement::Single(0x78),
+            "F10" => KeyRequirement::Single(0x79),
             _ => KeyRequirement::Single(0xA3),
         }
     }
@@ -844,6 +849,32 @@ impl Config {
                 .iter()
                 .any(|b| (a & b) == *a || (a & b) == *b)
         })
+    }
+
+    pub fn text_capture_conflicts(key: &str, hold: (&str, &str), preview: (&str, &str)) -> bool {
+        matches!(
+            key,
+            "RCtrl" | "LCtrl" | "RShift" | "RAlt" | "F8" | "F9" | "F10"
+        ) && (Self::key_conditions_conflict(key, "なし", hold.0, hold.1)
+            || Self::key_conditions_conflict(key, "なし", preview.0, preview.1))
+    }
+
+    pub fn text_capture_vk(&self) -> i32 {
+        let key = self.text_capture_key.as_str();
+        if !matches!(
+            key,
+            "RCtrl" | "LCtrl" | "RShift" | "RAlt" | "F8" | "F9" | "F10"
+        ) || Self::text_capture_conflicts(
+            key,
+            (&self.hold_key, &self.hold_key2),
+            (&self.detect_key, &self.detect_key2),
+        ) {
+            return 0;
+        }
+        match Self::key_requirement(key) {
+            KeyRequirement::Single(vk) => vk,
+            _ => 0,
+        }
     }
 
     /// 範囲指定ホットキーの (修飾キー, 仮想キー)。解析失敗時は Ctrl+Alt+Shift+T。
@@ -887,7 +918,9 @@ pub enum KeyRequirement {
     Either(i32, i32),
 }
 
-const PHYSICAL_KEYS: [i32; 9] = [0xA2, 0xA3, 0xA0, 0xA1, 0xA4, 0xA5, 0x5B, 0x5C, 0x77];
+const PHYSICAL_KEYS: [i32; 11] = [
+    0xA2, 0xA3, 0xA0, 0xA1, 0xA4, 0xA5, 0x5B, 0x5C, 0x77, 0x78, 0x79,
+];
 
 fn requirement_candidates(requirement: KeyRequirement) -> ([i32; 2], usize) {
     match requirement {
@@ -982,6 +1015,24 @@ pub fn parse_hotkey(s: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_capture_旧設定と複合キーの競合() {
+        let mut cfg: Config =
+            serde_json::from_str(r#"{"hold_key":"RCtrl","detect_key":"LCtrl"}"#).unwrap();
+        assert_eq!(cfg.text_capture_vk(), 0x77);
+        cfg.text_capture_key = "F9".into();
+        let restored: Config = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(restored.text_capture_vk(), 0x78);
+        cfg.hold_key2 = "F9".into();
+        assert_eq!(cfg.text_capture_vk(), 0);
+        cfg.text_capture_key = "LCtrl".into();
+        cfg.hold_key = "Ctrl".into();
+        cfg.detect_key = "なし".into();
+        assert_eq!(cfg.text_capture_vk(), 0);
+        cfg.text_capture_key = "None".into();
+        assert_eq!(cfg.text_capture_vk(), 0);
+    }
 
     /// URLのホストで外部送信か否かを判定する (SPECv0.5.3: ローカルLLMは同意不要)
     #[test]

@@ -313,6 +313,34 @@ pub struct UiaProbe {
     pub selected_text: Option<String>,
 }
 
+/// コピー専用。文字のない余白を最寄りの段落へ丸めない。
+pub fn copy_text_at_point(x: i32, y: i32) -> Option<(String, Vec<RECT>)> {
+    unsafe {
+        let auto: IUIAutomation =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+        let point = POINT { x, y };
+        let element = auto.ElementFromPoint(point).ok()?;
+        if element.CurrentIsPassword().ok()?.as_bool() {
+            return None;
+        }
+        if let Some(hit) = find_text_hit(&auto, element.clone(), point) {
+            let rects = hit.range.as_ref().map(range_rects).unwrap_or_default();
+            let inside = rects
+                .iter()
+                .any(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
+            if inside {
+                let text = selected_text_of(&hit.element)
+                    .or_else(|| selected_text_via_win32_edit(&hit.element))
+                    .unwrap_or(hit.text);
+                if !text.trim().is_empty() {
+                    return Some((text, rects));
+                }
+            }
+        }
+        None
+    }
+}
+
 /// カーソル位置で line_at_point と同じ探索を行い、検出領域の矩形を返す (領域検出モード)。
 /// 呼び出し元スレッドは COM 初期化済みであること。
 pub fn probe_at_point(x: i32, y: i32) -> UiaProbe {
