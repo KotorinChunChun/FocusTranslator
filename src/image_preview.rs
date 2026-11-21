@@ -173,19 +173,13 @@ pub(crate) fn open_preview(
     BOX_RECT.with(|c| *c.borrow_mut() = box_rect);
     SCROLL.with(|c| *c.borrow_mut() = (0, 0));
     ZOOM.with(|c| *c.borrow_mut() = 1.0);
-    let title = match which {
-        ImgKind::Ocr => w!(
-            "OCR対象画像 (クリック&ドラッグ:パン / ホイール:拡大縮小 / Esc:閉じる / Ctrl+C:コピー)"
-        ),
-        ImgKind::Full => {
-            w!("全体画像 (クリック&ドラッグ:パン / ホイール:拡大縮小 / Esc:閉じる / Ctrl+C:コピー)")
-        }
-        ImgKind::LlmPrompt => {
-            w!(
-                "LLM送信画像 (クリック&ドラッグ:パン / ホイール:拡大縮小 / Esc:閉じる / Ctrl+C:コピー)"
-            )
-        }
-    };
+    let title_text = crate::window_title::WindowTitle::create(match which {
+        ImgKind::Ocr => "OCR対象画像",
+        ImgKind::Full => "全体画像",
+        ImgKind::LlmPrompt => "LLM送信画像",
+    });
+    let title_wide = crate::util::to_wide(&title_text);
+    let title = windows::core::PCWSTR(title_wide.as_ptr());
 
     // 既存のプレビューウィンドウがあれば再利用する(2つ以上開かない)
     let existing = PREVIEW_HWND.with(|c| *c.borrow());

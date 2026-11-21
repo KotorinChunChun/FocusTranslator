@@ -5,9 +5,6 @@ use crate::util::{self, to_wide};
 use std::cell::RefCell;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{COLOR_BTNFACE, HFONT};
-use windows::Win32::System::Registry::{
-    HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
-};
 use windows::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
@@ -235,9 +232,8 @@ pub fn open(instance: HINSTANCE, _main: HWND) {
         let win_y = 10;
         let win_h = win_h.min(screen_h - 40);
         let boss_guard = Config::load().boss_guard;
-        let title_w = crate::util::to_wide(&format!(
-            "{} 設定",
-            crate::util::app_display_name(boss_guard)
+        let title_w = to_wide(&crate::window_title::WindowTitle::create_with_branding(
+            "設定", boss_guard,
         ));
         if let Ok(h) = CreateWindowExW(
             ex_style,
@@ -369,7 +365,14 @@ fn build_controls(h: HWND, inst: HINSTANCE) {
         let lx = inner(gx);
         group(h, inst, "2. システム設定", gx, GROUP2_Y, COL_W, GROUP2_H);
         let mut y = GROUP2_Y + GTOP;
-        checkbox(h, inst, "起動時に常駐する", lx, y, 170, IDC_AUTOSTART);
+        checkbox(h, inst, "自動起動（本体で設定）", lx, y, 170, IDC_AUTOSTART);
+        unsafe {
+            let _ = EnableWindow(
+                windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(h), IDC_AUTOSTART)
+                    .unwrap_or_default(),
+                false,
+            );
+        }
         checkbox(h, inst, "計測ログを有効化", lx + 180, y, 160, IDC_PERFLOG);
         y += STEP;
         checkbox(
@@ -914,7 +917,9 @@ fn version_info_text(boss_guard: bool) -> String {
 }
 
 fn apply_boss_guard(h: HWND, enabled: bool) {
-    let title = to_wide(&format!("{} 設定", crate::util::app_display_name(enabled)));
+    let title = to_wide(&crate::window_title::WindowTitle::create_with_branding(
+        "設定", enabled,
+    ));
     unsafe {
         let _ = SetWindowTextW(h, PCWSTR(title.as_ptr()));
     }
@@ -2164,7 +2169,7 @@ fn save(h: HWND, ask_consent: bool) {
         cfg.default_api_profile = default_name;
     }
 
-    cfg.autostart = check_get(h, IDC_AUTOSTART);
+    // 旧単体Run設定は読み取りのみ。本体側で予約し、既存の外部予約には触れない。
     cfg.boss_guard = check_get(h, IDC_BOSS_GUARD);
     cfg.perf_log = check_get(h, IDC_PERFLOG);
     cfg.log_enabled = check_get(h, IDC_LOG_ENABLED);
@@ -2198,7 +2203,6 @@ fn save(h: HWND, ask_consent: bool) {
     }
 
     cfg.save();
-    apply_autostart(cfg.autostart);
 }
 
 fn confirm_default_consents(h: HWND, cfg: &mut Config) {
@@ -2232,28 +2236,6 @@ fn confirm_default_consents(h: HWND, cfg: &mut Config) {
                 MB_YESNO,
             );
             cfg.consent_image = r.0 == 6;
-        }
-    }
-}
-
-fn apply_autostart(enable: bool) {
-    unsafe {
-        let key = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-        let name = w!("FocusTranslator");
-        if enable {
-            if let Ok(exe) = std::env::current_exe() {
-                let wide = to_wide(&exe.to_string_lossy());
-                let _ = RegSetKeyValueW(
-                    HKEY_CURRENT_USER,
-                    key,
-                    name,
-                    REG_SZ.0,
-                    Some(wide.as_ptr() as *const _),
-                    (wide.len() * 2) as u32,
-                );
-            }
-        } else {
-            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, key, name);
         }
     }
 }

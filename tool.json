@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "focus-translator",
+  "name": "FocusTranslator",
+  "version": "0.5.6",
+  "summary": "カーソル位置や指定範囲の文字を取得してコピー・翻訳・解説する常駐ツール",
+  "category": "文字認識、翻訳",
+  "executable": "target/management/debug/focus-translator.exe",
+  "installedExecutable": "FocusTranslator.exe",
+  "appId": "KotorinToys.FocusTranslator",
+  "manual": "docs/kotorintoys-integration.md",
+  "readme": "README.md",
+  "icon": "FocusTranslator_icon_32x32.ico",
+  "distributionStatus": "unpublished",
+  "repositoryUrl": "https://github.com/KotorinChunChun/FocusTranslator",
+  "supportedEnvironment": "windows11-x64",
+  "investigationStatus": "confirmed",
+  "capabilities": ["status", "show", "stop", "silent-start"],
+  "runtimes": []
+}

@@ -252,7 +252,9 @@ pub unsafe extern "system" fn wndproc(
 ) -> LRESULT {
     match msg {
         windows::Win32::UI::WindowsAndMessaging::WM_TIMER if wparam.0 == TIMER_POLL => {
-            tick();
+            if !crate::management::passive() {
+                tick();
+            }
             LRESULT(0)
         }
         windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY if wparam.0 as i32 == HOTKEY_REGION => {
@@ -817,25 +819,33 @@ pub fn reload_config(hwnd: HWND) {
         }
         crate::overlay::apply_boss_guard(app.overlay, app.cfg.boss_guard);
         crate::logviewer::apply_boss_guard(app.cfg.boss_guard);
-        unsafe {
-            let _ = KillTimer(Some(hwnd), TIMER_POLL);
-            SetTimer(Some(hwnd), TIMER_POLL, app.cfg.poll_ms, None);
-            let _ = UnregisterHotKey(Some(hwnd), HOTKEY_REGION);
-            let (mods, vk) = app.cfg.region_hotkey_parsed();
-            if RegisterHotKey(
-                Some(hwnd),
-                HOTKEY_REGION,
-                HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT_VALUE),
-                vk,
-            )
-            .is_err()
-            {
-                MessageBoxW(
+        if !crate::management::passive() {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), TIMER_POLL);
+                SetTimer(Some(hwnd), TIMER_POLL, app.cfg.poll_ms, None);
+                let _ = UnregisterHotKey(Some(hwnd), HOTKEY_REGION);
+                let (mods, vk) = app.cfg.region_hotkey_parsed();
+                if RegisterHotKey(
                     Some(hwnd),
-                    w!("範囲指定ホットキーを登録できませんでした。他のアプリと衝突しています。"),
-                    crate::util::display_name_pcwstr(),
-                    MB_OK | MB_ICONWARNING,
-                );
+                    HOTKEY_REGION,
+                    HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT_VALUE),
+                    vk,
+                )
+                .is_err()
+                {
+                    if crate::management::hidden_startup() && !crate::settings::is_open() {
+                        crate::util::app_log("範囲指定ホットキーを再登録できませんでした。");
+                    } else {
+                        MessageBoxW(
+                            Some(hwnd),
+                            w!(
+                                "範囲指定ホットキーを登録できませんでした。他のアプリと衝突しています。"
+                            ),
+                            crate::util::display_name_pcwstr(),
+                            MB_OK | MB_ICONWARNING,
+                        );
+                    }
+                }
             }
         }
         // オーバーレイが非表示のときは同期しない。sync_overlay→overlay::update は

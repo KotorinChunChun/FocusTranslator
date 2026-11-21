@@ -29,7 +29,7 @@ pub fn to_wide(s: &str) -> Vec<u16> {
 
 /// アプリの表示名。ウィンドウタイトル・MessageBox・トレイ等のユーザー向け表記に使う。
 /// 内部名 (ウィンドウクラス名・ミューテックス名・データフォルダ等) は FocusTranslator のまま。
-pub const APP_DISPLAY_NAME: &str = "なにこれ？（Focus Translator）";
+pub const APP_DISPLAY_NAME: &str = "FocusTranslator";
 
 /// アプリの短縮表示名。オーバーレイのシステムメッセージ行など、常時表示する
 /// タイトルとして使う (括弧書きの英語名までは表示しない)。
@@ -77,6 +77,11 @@ pub static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// 設定・モデルの保存先。`FOCUSTRANSLATOR_DATA_DIR` が設定されていればそちらを使う
 /// (動作確認・自動テスト用に実際のユーザー設定と分離するため)。通常は `%APPDATA%\FocusTranslator`。
 pub fn config_dir() -> PathBuf {
+    if let Some(dir) = crate::management::settings_directory() {
+        let p = PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&p);
+        return p;
+    }
     if let Ok(dir) = std::env::var("FOCUSTRANSLATOR_DATA_DIR") {
         let p = PathBuf::from(dir);
         let _ = std::fs::create_dir_all(&p);

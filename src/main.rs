@@ -22,6 +22,8 @@ mod llm_api;
 mod llm_cli;
 mod logdb;
 mod logviewer;
+mod management;
+mod management_pipe;
 mod markdown;
 mod ocr;
 mod ocr_priority_dialog;
@@ -42,6 +44,7 @@ mod tray;
 mod ui_helpers;
 mod uia;
 mod util;
+mod window_title;
 mod worker;
 
 use config::Config;
@@ -73,8 +76,16 @@ fn main() {
     // 解放し終える前に起動してしまう可能性があるため、既存プロセスありと判定されても
     // 短時間リトライしてから諦める。通常の多重起動時はリトライ対象外で即終了する。
     let restart_wait = std::env::args().any(|a| a == "--restart-wait");
+    let hidden = management::hidden_startup();
+    let passive = management::passive();
+    let mutex_id = if management::settings_directory().is_some() {
+        format!("FocusTranslator_Singleton.{}", management::tool_id())
+    } else {
+        "FocusTranslator_Singleton".into()
+    };
+    let mutex_name = util::to_wide(&mutex_id);
     unsafe {
-        let mut mutex = CreateMutexW(None, false, w!("FocusTranslator_Singleton"));
+        let mut mutex = CreateMutexW(None, false, windows::core::PCWSTR(mutex_name.as_ptr()));
         if GetLastError() == ERROR_ALREADY_EXISTS {
             // 重複と判定されたハンドルはこの時点で閉じる。閉じずに次のCreateMutexWで
             // 上書きすると、そのハンドル自体がミューテックスを生かし続けてしまい、
@@ -84,12 +95,15 @@ fn main() {
                 let _ = CloseHandle(h);
             }
             if !restart_wait {
+                if !hidden {
+                    management::show_existing();
+                }
                 return;
             }
             let mut acquired = false;
             for _ in 0..20 {
                 std::thread::sleep(std::time::Duration::from_millis(250));
-                mutex = CreateMutexW(None, false, w!("FocusTranslator_Singleton"));
+                mutex = CreateMutexW(None, false, windows::core::PCWSTR(mutex_name.as_ptr()));
                 if GetLastError() != ERROR_ALREADY_EXISTS {
                     acquired = true;
                     break;
@@ -142,7 +156,8 @@ fn main() {
 
     // メイン(非表示)ウィンドウ
     let main = unsafe {
-        let class = w!("FocusTranslatorMain");
+        let class_wide = util::to_wide(&management::window_class());
+        let class = windows::core::PCWSTR(class_wide.as_ptr());
         let wc = WNDCLASSW {
             lpfnWndProc: Some(app_state::wndproc),
             hInstance: instance,
@@ -175,27 +190,34 @@ fn main() {
     // 範囲指定ホットキー (SPEC §11: 衝突時は通知)
     let (mods, vk) = cfg.region_hotkey_parsed();
     unsafe {
-        if RegisterHotKey(
-            Some(main),
-            app_state::HOTKEY_REGION,
-            HOT_KEY_MODIFIERS(mods | app_state::MOD_NOREPEAT_VALUE),
-            vk,
-        )
-        .is_err()
-        {
-            MessageBoxW(
+        if !passive
+            && RegisterHotKey(
                 Some(main),
-                w!(
-                    "範囲指定ホットキーを登録できませんでした。他のアプリと衝突しています。設定画面で変更してください。"
-                ),
-                util::display_name_pcwstr(),
-                MB_OK | MB_ICONWARNING,
-            );
+                app_state::HOTKEY_REGION,
+                HOT_KEY_MODIFIERS(mods | app_state::MOD_NOREPEAT_VALUE),
+                vk,
+            )
+            .is_err()
+        {
+            if hidden {
+                util::app_log(
+                    "範囲指定ホットキーを登録できませんでした。既存の割り当てを確認してください。",
+                );
+            } else {
+                MessageBoxW(
+                    Some(main),
+                    w!(
+                        "範囲指定ホットキーを登録できませんでした。他のアプリと衝突しています。設定画面で変更してください。"
+                    ),
+                    util::display_name_pcwstr(),
+                    MB_OK | MB_ICONWARNING,
+                );
+            }
         }
         SetTimer(Some(main), app_state::TIMER_POLL, cfg.poll_ms, None);
     }
 
-    if !cfg.first_launch_done {
+    if !hidden && !cfg.first_launch_done {
         unsafe {
             let msg = windows::core::HSTRING::from(
                 "初回起動です。\n高精度な画面認識(PaddleOCR)と、ONNX翻訳モデルをダウンロードしますか？\n（※画面認識は標準でOneOCR(Windows 11内蔵)を使用します。ONNXを導入しないとローカル翻訳ができません）",
@@ -222,7 +244,7 @@ fn main() {
 
     // ローカルLLMサーバーの自動起動 (SPECv0.5.2追補)。導入済みのときのみ、起動完了を
     // 待たずバックグラウンドスレッドで起動を試みる (モデル読込に数十秒かかりうるため)。
-    if cfg.llama_auto_start && llama_install::installed() {
+    if !passive && cfg.llama_auto_start && llama_install::installed() {
         let port = cfg.llama_port;
         let model = llama_install::resolve_model_path(&cfg.llama_model_path);
         // mmprojが存在すれば画像入力対応(VLM)込みで起動する。無ければテキスト専用。
@@ -238,11 +260,47 @@ fn main() {
     }
 
     app_state::init(cfg, instance, main, overlay);
+    let endpoint = match management::Endpoint::start() {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            util::app_log(&error);
+            return;
+        }
+    };
+    let origin = management::launch_origin();
+    if !hidden {
+        settings::open(instance, main);
+    }
 
     // メッセージループ
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            for event in endpoint.poll() {
+                match event {
+                    management::Event::Request(call) => {
+                        if std::time::Instant::now() >= call.deadline {
+                            continue;
+                        }
+                        let blocked = settings::is_open()
+                            || logviewer::is_open()
+                            || app_state::with_app(|app| {
+                                app.busy || app.explaining || app.mode != app_state::Mode::Idle
+                            })
+                            .unwrap_or(true);
+                        let (result, detail) = management::validate(&call.request, blocked);
+                        if result == "completed" && call.request.command == "show" {
+                            settings::open(instance, main);
+                        }
+                        call.respond(result, detail, &origin);
+                    }
+                    management::Event::Stop(deadline) => {
+                        if std::time::Instant::now() < deadline {
+                            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(main);
+                        }
+                    }
+                }
+            }
             if settings::is_open() && IsDialogMessageW(settings::hwnd(), &msg).as_bool() {
                 continue;
             }

@@ -413,7 +413,9 @@ pub fn open(
 
         let (x, y) = pos.unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
         let win_w = if mode_b { WIN_W_B } else { WIN_W_A };
-        let title = to_wide(window_title(kind, mode_b));
+        let title = to_wide(&crate::window_title::WindowTitle::create(window_title(
+            kind, mode_b,
+        )));
         // オーバーレイ/設定画面(WS_EX_TOPMOST)の背後に隠れないよう、このウィンドウもTOPMOSTにする
         let Ok(h) = CreateWindowExW(
             WS_EX_APPWINDOW | WS_EX_TOPMOST,

@@ -385,10 +385,13 @@ pub fn open(parent: HWND) {
             }
         };
 
+        let title = crate::util::to_wide(&crate::window_title::WindowTitle::create(
+            "アプリ別の動作設定",
+        ));
         let Ok(win) = CreateWindowExW(
             WS_EX_TOPMOST,
             class_name,
-            w!("アプリ別の動作設定 (OCR優先 / 実行しない)"),
+            windows::core::PCWSTR(title.as_ptr()),
             WS_POPUPWINDOW | WS_CAPTION | WS_SYSMENU,
             x,
             y,

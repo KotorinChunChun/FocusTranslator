@@ -69,10 +69,13 @@ pub fn show(parent: HWND, gpu: GpuInfo) -> Option<LlamaVariant> {
             }
         };
 
+        let title = crate::util::to_wide(&crate::window_title::WindowTitle::create(
+            "llama.cppのビルド種別を選択",
+        ));
         let Ok(hwnd) = CreateWindowExW(
             WS_EX_TOPMOST,
             class_name,
-            w!("llama.cppのビルド種別を選択"),
+            windows::core::PCWSTR(title.as_ptr()),
             WS_POPUPWINDOW | WS_CAPTION | WS_SYSMENU,
             x,
             y,

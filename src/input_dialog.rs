@@ -63,7 +63,7 @@ pub fn show(parent: HWND, title: &str, initial_text: &str) -> Option<String> {
         // 既に登録済みでも無視
         let _ = RegisterClassW(&wc);
 
-        let wide_title = to_wide(title);
+        let wide_title = to_wide(&crate::window_title::WindowTitle::create(title));
 
         // 親ウィンドウ(オーバーレイ)の中央に表示する
         let (x, y) = {

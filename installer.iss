@@ -29,7 +29,7 @@ Source: "target\release\DirectML.dll"; DestDir: "{app}"; Flags: ignoreversion sk
 Name: "{group}\なにこれ？（Focus Translator）"; Filename: "{app}\focus-translator.exe"
 Name: "{group}\{cm:UninstallProgram,なにこれ？（Focus Translator）}"; Filename: "{uninstallexe}"
 ; スタートアップに登録する常駐ソフトとするため、自動起動のショートカットを作成
-Name: "{userstartup}\なにこれ？（Focus Translator）"; Filename: "{app}\focus-translator.exe"
+; 自動起動予約はKotorinToysで管理する。新規登録しない。
 
 [Run]
 Filename: "{app}\focus-translator.exe"; Description: "なにこれ？（Focus Translator）を起動する"; Flags: nowait postinstall skipifsilent

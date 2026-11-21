@@ -181,10 +181,9 @@ pub fn open(instance: HINSTANCE) {
             }
         });
         let cfg = crate::config::Config::load();
-        let title_w = crate::util::to_wide(&format!(
-            "{} ログビューア",
-            crate::util::app_display_name(cfg.boss_guard)
-        ));
+        let title_w = crate::util::to_wide(
+            &crate::window_title::WindowTitle::create_with_branding("ログビューア", cfg.boss_guard),
+        );
         if let Ok(h) = CreateWindowExW(
             WS_EX_TOPMOST,
             class,
@@ -212,9 +211,9 @@ pub fn apply_boss_guard(enabled: bool) {
     if !is_open() {
         return;
     }
-    let title = crate::util::to_wide(&format!(
-        "{} ログビューア",
-        crate::util::app_display_name(enabled)
+    let title = crate::util::to_wide(&crate::window_title::WindowTitle::create_with_branding(
+        "ログビューア",
+        enabled,
     ));
     unsafe {
         let _ = SetWindowTextW(hwnd(), PCWSTR(title.as_ptr()));
