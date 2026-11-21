@@ -232,8 +232,11 @@ impl ApiType {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Config {
-    /// ホールドキー: "RCtrl" | "LCtrl" | "RShift" | "RAlt" | "F8"
+    /// ホールドキー(1つ目): "なし" | "Ctrl" | "LCtrl" | "RCtrl" | "Shift" | "LShift" |
+    /// "RShift" | "Alt" | "LAlt" | "RAlt" | "Win" | "LWin" | "RWin" | "F8"
     pub hold_key: String,
+    /// ホールドキー(2つ目)。両方「なし」の場合は無効、片方だけ「なし」の場合は単独キー。
+    pub hold_key2: String,
     /// GetAsyncKeyState の監視周期 (ms)
     pub poll_ms: u32,
     /// ホールドピン留めまでの秒数 (既定: 3秒)
@@ -300,6 +303,8 @@ pub struct Config {
     /// プレビューキー: 実際の翻訳は行わず、検出範囲の枠表示だけを確認できるキー
     /// (hold_key と同じ表記に「なし」を加えたもの、既定は「なし」)
     pub detect_key: String,
+    /// プレビューキー(2つ目)。両方「なし」の場合は無効、片方だけ「なし」の場合は単独キー。
+    pub detect_key2: String,
     /// 領域表示 (プレビューキー側): プレビューキー(detect_key)押下中も枠表示するか (既定OFF)
     pub preview_detect_enabled: bool,
     /// 旧既定LCtrlから「なし」への一度限りの移行を適用済みか。
@@ -505,6 +510,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             hold_key: "RCtrl".into(),
+            hold_key2: "なし".into(),
             poll_ms: 100,
             pin_hold_seconds: 3,
             region_hotkey: "Ctrl+Alt+Shift+T".into(),
@@ -535,6 +541,7 @@ impl Default for Config {
             send_full_screenshot_to_llm: false,
             detect_enabled: false,
             detect_key: "なし".into(),
+            detect_key2: "なし".into(),
             preview_detect_enabled: false,
             preview_key_none_migrated: true,
             log_max_records: 5000,
@@ -643,6 +650,18 @@ impl Config {
                 cfg.detect_key = "なし".into();
             }
             cfg.preview_key_none_migrated = true;
+            migrated = true;
+        }
+        // v0.5.6で追加した旧形式の「Ctrl+Shift」文字列を、2つの選択欄へ移行する。
+        // 2つ目が「なし」のときだけ変換し、利用者が新形式で選んだ値は上書きしない。
+        if cfg.hold_key == "Ctrl+Shift" && cfg.hold_key2 == "なし" {
+            cfg.hold_key = "Ctrl".into();
+            cfg.hold_key2 = "Shift".into();
+            migrated = true;
+        }
+        if cfg.detect_key == "Ctrl+Shift" && cfg.detect_key2 == "なし" {
+            cfg.detect_key = "Ctrl".into();
+            cfg.detect_key2 = "Shift".into();
             migrated = true;
         }
         // 初期CLI統合時の既定名を、公式製品名「Kimi Code CLI」へ移行する。
@@ -769,14 +788,62 @@ impl Config {
             .replace("{{tr_engine}}", &ctx.tr_engine)
     }
 
-    /// キャプチャキー(ホールドキー)の仮想キーコード
-    pub fn hold_vk(&self) -> i32 {
-        key_vk(&self.hold_key)
+    /// 設定欄1つ分のキー条件。左右指定のない修飾キーは左右どちらでもよい。
+    pub fn key_requirement(key: &str) -> KeyRequirement {
+        match key.trim() {
+            "なし" => KeyRequirement::None,
+            "Ctrl" => KeyRequirement::Either(0xA2, 0xA3),
+            "LCtrl" => KeyRequirement::Single(0xA2),
+            "RCtrl" => KeyRequirement::Single(0xA3),
+            "Shift" => KeyRequirement::Either(0xA0, 0xA1),
+            "LShift" => KeyRequirement::Single(0xA0),
+            "RShift" => KeyRequirement::Single(0xA1),
+            "Alt" => KeyRequirement::Either(0xA4, 0xA5),
+            "LAlt" => KeyRequirement::Single(0xA4),
+            "RAlt" => KeyRequirement::Single(0xA5),
+            "Win" => KeyRequirement::Either(0x5B, 0x5C),
+            "LWin" => KeyRequirement::Single(0x5B),
+            "RWin" => KeyRequirement::Single(0x5C),
+            "F8" => KeyRequirement::Single(0x77),
+            _ => KeyRequirement::Single(0xA3),
+        }
     }
 
-    /// プレビューキーの仮想キーコード
-    pub fn detect_vk(&self) -> i32 {
-        key_vk(&self.detect_key)
+    /// 2つのキー欄から作られる条件が現在押されているかを返す。
+    /// 2欄とも有効な場合は、同じ物理キーを両方の条件へ使い回さない。
+    pub fn key_condition_down(
+        first: &str,
+        second: &str,
+        mut is_down: impl FnMut(i32) -> bool,
+    ) -> bool {
+        let (masks, count) = key_condition_masks(first, second);
+        masks[..count].iter().any(|mask| {
+            PHYSICAL_KEYS
+                .iter()
+                .enumerate()
+                .all(|(index, vk)| mask & (1 << index) == 0 || is_down(*vk))
+        })
+    }
+
+    /// 片方の通常操作だけでもう片方の条件まで成立し得るキー設定を競合とみなす。
+    /// 例: `Ctrl` と `LCtrl`、`Ctrl+Shift` と `LCtrl+Shift` は競合するが、
+    /// `Ctrl` と `Shift` は同時押しを意図的に追加しない限り互いを発火させないため競合しない。
+    pub fn key_conditions_conflict(
+        first_a: &str,
+        second_a: &str,
+        first_b: &str,
+        second_b: &str,
+    ) -> bool {
+        let (a_masks, a_count) = key_condition_masks(first_a, second_a);
+        let (b_masks, b_count) = key_condition_masks(first_b, second_b);
+        if a_count == 0 || b_count == 0 {
+            return false;
+        }
+        a_masks[..a_count].iter().any(|a| {
+            b_masks[..b_count]
+                .iter()
+                .any(|b| (a & b) == *a || (a & b) == *b)
+        })
     }
 
     /// 範囲指定ホットキーの (修飾キー, 仮想キー)。解析失敗時は Ctrl+Alt+Shift+T。
@@ -813,16 +880,69 @@ impl Config {
     }
 }
 
-/// キー名(ホールドキー/検出キー共通の表記) → 仮想キーコード
-fn key_vk(name: &str) -> i32 {
-    match name {
-        "なし" => 0,
-        "LCtrl" => 0xA2,
-        "RShift" => 0xA1,
-        "RAlt" => 0xA5,
-        "F8" => 0x77,
-        _ => 0xA3, // RCtrl
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyRequirement {
+    None,
+    Single(i32),
+    Either(i32, i32),
+}
+
+const PHYSICAL_KEYS: [i32; 9] = [0xA2, 0xA3, 0xA0, 0xA1, 0xA4, 0xA5, 0x5B, 0x5C, 0x77];
+
+fn requirement_candidates(requirement: KeyRequirement) -> ([i32; 2], usize) {
+    match requirement {
+        KeyRequirement::None => ([0, 0], 0),
+        KeyRequirement::Single(vk) => ([vk, 0], 1),
+        KeyRequirement::Either(left, right) => ([left, right], 2),
     }
+}
+
+fn physical_key_mask(vk: i32) -> u16 {
+    PHYSICAL_KEYS
+        .iter()
+        .position(|candidate| *candidate == vk)
+        .map(|index| 1 << index)
+        .unwrap_or(0)
+}
+
+/// 条件を成立させる最小の物理キー集合を最大4通りまで列挙する。
+/// 同じ物理キーを2欄へ割り当てる組み合わせは除外する。
+fn key_condition_masks(first: &str, second: &str) -> ([u16; 4], usize) {
+    let first = Config::key_requirement(first);
+    let second = Config::key_requirement(second);
+    let (first_keys, first_count) = requirement_candidates(first);
+    let (second_keys, second_count) = requirement_candidates(second);
+    let mut masks = [0u16; 4];
+    let mut count = 0usize;
+
+    let (left_keys, left_count, right_keys, right_count) = match (first_count, second_count) {
+        (0, 0) => return (masks, 0),
+        (0, _) => (second_keys, second_count, [0, 0], 0),
+        (_, 0) => (first_keys, first_count, [0, 0], 0),
+        _ => (first_keys, first_count, second_keys, second_count),
+    };
+
+    if right_count == 0 {
+        for vk in left_keys.into_iter().take(left_count) {
+            masks[count] = physical_key_mask(vk);
+            count += 1;
+        }
+        return (masks, count);
+    }
+
+    for left in left_keys.into_iter().take(left_count) {
+        for right in right_keys.into_iter().take(right_count) {
+            if left == right {
+                continue;
+            }
+            let mask = physical_key_mask(left) | physical_key_mask(right);
+            if mask != 0 && !masks[..count].contains(&mask) {
+                masks[count] = mask;
+                count += 1;
+            }
+        }
+    }
+    (masks, count)
 }
 
 /// "Ctrl+Alt+Shift+T" のような表記を (MOD_*, VK) に変換
@@ -901,9 +1021,106 @@ mod tests {
     fn プレビューキーは既定で無効() {
         let cfg = Config::default();
         assert_eq!(cfg.detect_key, "なし");
-        assert_eq!(cfg.detect_vk(), 0);
+        assert_eq!(cfg.detect_key2, "なし");
+        assert_eq!(
+            Config::key_requirement(&cfg.detect_key),
+            KeyRequirement::None
+        );
         assert!(!cfg.preview_detect_enabled);
         assert!(cfg.preview_key_none_migrated);
+    }
+
+    #[test]
+    fn キー条件は左右指定と左右どちらでもを区別する() {
+        assert_eq!(
+            Config::key_requirement("Ctrl"),
+            KeyRequirement::Either(0xA2, 0xA3)
+        );
+        assert_eq!(
+            Config::key_requirement("LCtrl"),
+            KeyRequirement::Single(0xA2)
+        );
+        assert_eq!(
+            Config::key_requirement("Win"),
+            KeyRequirement::Either(0x5B, 0x5C)
+        );
+    }
+
+    #[test]
+    fn 複合キーは異なる物理キーが両方押された場合だけ成立する() {
+        assert!(Config::key_condition_down("Ctrl", "Shift", |vk| {
+            matches!(vk, 0xA2 | 0xA1)
+        }));
+        assert!(!Config::key_condition_down("Ctrl", "LCtrl", |vk| {
+            vk == 0xA2
+        }));
+        assert!(Config::key_condition_down("Ctrl", "LCtrl", |vk| {
+            matches!(vk, 0xA2 | 0xA3)
+        }));
+        assert!(!Config::key_condition_down("LCtrl", "LCtrl", |vk| {
+            vk == 0xA2
+        }));
+        assert!(Config::key_condition_down("LCtrl", "RCtrl", |vk| {
+            matches!(vk, 0xA2 | 0xA3)
+        }));
+        assert!(!Config::key_condition_down("なし", "なし", |_| true));
+    }
+
+    #[test]
+    fn 片方の操作がもう片方も発火させるキー条件を競合と判定する() {
+        assert!(Config::key_conditions_conflict(
+            "Ctrl", "なし", "LCtrl", "なし"
+        ));
+        assert!(Config::key_conditions_conflict(
+            "Ctrl", "Shift", "LCtrl", "LShift"
+        ));
+        assert!(Config::key_conditions_conflict(
+            "Ctrl", "なし", "LCtrl", "Shift"
+        ));
+        assert!(Config::key_conditions_conflict(
+            "LCtrl", "RCtrl", "Ctrl", "なし"
+        ));
+        assert!(!Config::key_conditions_conflict(
+            "Ctrl", "なし", "Shift", "なし"
+        ));
+        assert!(!Config::key_conditions_conflict(
+            "LCtrl", "なし", "RCtrl", "なし"
+        ));
+        assert!(!Config::key_conditions_conflict(
+            "なし", "なし", "Ctrl", "なし"
+        ));
+    }
+
+    #[test]
+    fn 旧形式の_ctrlと_shiftを2つのキー欄へ移行する() {
+        let _guard = crate::util::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "ft_compound_key_migration_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::set_var("FOCUSTRANSLATOR_DATA_DIR", &tmp);
+        }
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            Config::path(),
+            r#"{"hold_key":"Ctrl+Shift","detect_key":"Ctrl+Shift"}"#,
+        )
+        .unwrap();
+
+        let cfg = Config::load();
+        assert_eq!(cfg.hold_key, "Ctrl");
+        assert_eq!(cfg.hold_key2, "Shift");
+        assert_eq!(cfg.detect_key, "Ctrl");
+        assert_eq!(cfg.detect_key2, "Shift");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::remove_var("FOCUSTRANSLATOR_DATA_DIR");
+        }
     }
 
     #[test]

@@ -44,6 +44,7 @@ flowchart LR
         direction TB
         UI([UI分析])
         Screen([部分画面スクショ])
+        Clipboard([コピー中のテキストや画像])
         UI --> Screen
     end
 
@@ -61,6 +62,7 @@ flowchart LR
     UI -- UIA --> Text
     Screen -- OCR --> Text
     Screen -- VLM --> Text
+    Clipboard -- テキスト直接入力 / 画像OCR --> Text
 
     %% フローの接続（翻訳）
     Text -- ONNX / DeepL / LLM --> Translation
@@ -71,6 +73,7 @@ flowchart LR
     classDef ai fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#000;
 
     class UI,Screen capture;
+    class Clipboard capture;
     class Text extract;
     class Translation ai;
 
@@ -90,6 +93,7 @@ flowchart LR
         Env([アプリ固有情報])
         Screen([部分画面スクショ])
         FullScreen([アプリ全画面スクショ])
+        Clipboard([コピー中のテキストや画像])
         UI --> Env
         UI --> Screen
     end
@@ -108,12 +112,14 @@ flowchart LR
     UI -- UIA --> Text
     Screen -- OCR --> Text
     Screen -- VLM --> Text
+    Clipboard -- テキスト直接入力 / 画像OCR --> Text
 
     %% フローの接続（解説）
     Screen -- VLM --> Explanation
     Text -- LLM --> Explanation
     Env -- LLM --> Explanation
     FullScreen -- VLM --> Explanation
+    Clipboard -- LLM / VLM --> Explanation
 
     %% スタイルの調整
     classDef capture fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000;
@@ -121,6 +127,7 @@ flowchart LR
     classDef ai fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#000;
 
     class UI,Screen,Env,FullScreen capture;
+    class Clipboard capture;
     class Text extract;
     class Explanation ai;
 
@@ -144,7 +151,7 @@ flowchart LR
 
 | 機能                   | 説明                                                                                                                                                                                    |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **即時キャプチャ**     | 右Ctrlキーを押している間、カーソル下のテキスト（テキスト選択中は選択部分を優先）をUIAやOCR等で取得します。離すと消えます。                                                              |
+| **即時キャプチャ**     | 設定したキャプチャキーを押している間、カーソル下のテキスト（テキスト選択中は選択部分を優先）をUIAやOCR等で取得します。離すと消えます。既定は右Ctrlです。 |
 | **範囲指定キャプチャ** | `Ctrl+Alt+Shift+T` で範囲指定モードを起動し、ドラッグ選択した矩形を画像化しOCR処理します。選択中は重ねて起動せず、ESCで閉じられます。                                             |
 | **クリップボード取込** | コピー中のテキストや画像をボタンクリックで取り込みます。リッチテキストはMarkdownへ変換し、プレーンテキストは空白や改行を保って取り込みます。                                     |
 | **画像編集**           | スクリーンショットから必要な範囲を切り抜いてOCRの認識範囲を変更します。                                                                                                                 |
@@ -198,6 +205,8 @@ Windowsの「アプリと機能」からアンインストールできます。�
 2. 右Ctrlキーを長押し（ホールド）します。
    - アプリがカーソル直下のテキストを自動で認識し、カーソル付近に翻訳画面を表示します。
 3. キーを離すと翻訳画面が消え、すぐに元の作業に戻れます。
+
+キャプチャキーは設定画面の「1. 操作」から変更できます。2つのコンボボックスでキーを1つずつ選び、両方を押している間だけ表示することができます。片方を「なし」にすると、もう片方のキーだけで表示されます。候補一覧は縦スクロールバーとマウスホイールで移動できます。左欄で左右指定のないCtrl／Shift／Alt／Winを選ぶと、同系統の左右指定を含む候補は右欄から除外されます。
 
 > 操作のコツ
 >
@@ -260,6 +269,7 @@ Windowsの「アプリと機能」からアンインストールできます。�
 
 #### その他
 
+- **【使い方】ボタン**: テキストの抽出、翻訳、AIによる解説で利用できる主な機能を簡潔に確認できます。BossGuard有効時は、この画面にも製品名を表示しません。
 - 【設定 ⚙️】ボタンで設定画面を開けます。
 - 【ログ 📜】ボタンでログビューアー画面を開けます。
 - カラーテーマは設定画面で「Windows既定 / ライト / ダーク」から選べます。

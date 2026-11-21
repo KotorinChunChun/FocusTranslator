@@ -52,6 +52,8 @@ pub const CHIP_CLIPBOARD: usize = 128;
 pub const CHIP_SWAP_LANG: usize = 110;
 /// ログビューアを開く
 pub const CHIP_OPEN_LOG: usize = 111;
+/// 使い方を表示
+pub const CHIP_HELP: usize = 129;
 /// UIAパスノードのボタンID基点(祖先ノード最大5 + 子孫連結ノード1の範囲を確保)
 pub const CHIP_UIA_NODE_BASE: usize = 200;
 /// 画像編集(SPECv0.4 §1-§4追補): 矩形/投げ輪/選択解除/選択範囲を残す/選択範囲を消す/
