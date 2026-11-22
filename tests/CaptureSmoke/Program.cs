@@ -6,8 +6,8 @@ using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 
-// 自分で作る試験窓だけを操作する。フォーカスが外れたら入力を中止し、
-// クリップボードの元IDataObjectはメモリー内だけで保持・復元する。
+// 自分で作る試験窓だけを操作する。フォーカスが外れたら入力を中止する。
+// 既存データのあるクリップボードは使用せず、試験が書き込んだデータだけを片付ける。
 internal static class Program
 {
     [StructLayout(LayoutKind.Sequential)] struct Input { public uint Type; public Union Data; }
@@ -19,9 +19,8 @@ internal static class Program
     [DllImport("user32.dll")] static extern nint GetForegroundWindow();
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern nint FindWindow(string? cls,string? title);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(nint window);
-    [DllImport("ole32.dll")] static extern int OleGetClipboard(out nint data);
-    [DllImport("ole32.dll")] static extern int OleSetClipboard(nint data);
-    [DllImport("ole32.dll")] static extern int OleFlushClipboard();
+    [DllImport("user32.dll")] static extern nint GetClipboardOwner();
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(nint window, out uint processId);
     static readonly List<string> results=[];
     static void Check(bool ok,string message) {if(!ok) throw new IOException(message);results.Add("PASS: "+message);Console.WriteLine(results[^1]);}
     static void Pump(int milliseconds) {var clock=Stopwatch.StartNew();while(clock.ElapsedMilliseconds<milliseconds){Application.DoEvents();Thread.Sleep(10);}}
@@ -48,10 +47,9 @@ internal static class Program
         var settings=Path.Combine(logs,"settings");Directory.CreateDirectory(settings);
         File.WriteAllText(Path.Combine(settings,"config.json"),"{\"first_launch_done\":true,\"text_capture_key\":\"F8\",\"perf_log\":true}");
         var id="focus-translator-"+Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(settings))).ToLowerInvariant()[..16];
-        Process? process=null;nint original=0;bool held=false,mouseHeld=false,clipboardChanged=false;Form? fixture=null;
+        Process? process=null;bool held=false,mouseHeld=false,clipboardChanged=false;Form? fixture=null;
         try
         {
-            Marshal.ThrowExceptionForHR(OleGetClipboard(out original));
             var start=new ProcessStartInfo(Path.GetFullPath(args[0])){UseShellExecute=false};
             foreach(var arg in new[]{"--startup","--settings-dir",settings})start.ArgumentList.Add(arg);
             process=Process.Start(start)??throw new IOException("試験プロセスを開始できません。");
@@ -67,17 +65,21 @@ internal static class Program
             if(args.Length==3)Check(Wait(()=>File.Exists(args[2]),60000),"録画開始ゲートを受信");
             fixture.BringToFront();fixture.Activate();Pump(100);
             void Focused(){if(GetForegroundWindow()!=fixture.Handle)throw new IOException("試験窓以外が前面になったため入力を中止しました。");}
-            void PointAt(int x,int y){Focused();var point=fixture.PointToScreen(new(x,y));SetCursorPos(point.X,point.Y);Pump(40);}
+            void PointAt(int x,int y){Focused();var point=fixture.PointToScreen(new(x,y));if(!SetCursorPos(point.X,point.Y))throw new IOException("試験座標への移動に失敗しました。");Pump(40);}
+            if (Clipboard.GetDataObject()?.GetFormats(false).Any(format => format != "DataObject") == true)
+                throw new IOException("クリップボードに既存データがあるため中止しました。");
             clipboardChanged=true;Clipboard.SetText("focus-capture-sentinel");
-            PointAt(80,100);Key(true);held=true;
+            var labelCenter = new Point(label.Left + label.Width / 2, label.Top + label.Height / 2);
+            var blank = new Point(Math.Min(fixture.ClientSize.Width - 20, 760), 430);
+            PointAt(labelCenter.X,labelCenter.Y);Key(true);held=true;
             Check(Wait(()=>IsWindowVisible(FindWindow("FocusTranslatorDetect",null))),"押下中にフォーカス枠を表示");Pump(700);
             Check(Clipboard.GetText()=="focus-capture-sentinel","キー押下中はクリップボードを変更しない");
             Key(false);held=false;
             Check(Wait(()=>Clipboard.ContainsText()&&Clipboard.GetText().Contains("Focus capture alpha")),"キー解放でカーソル位置の文字を自動コピー");
             var copied=Clipboard.GetText();
-            PointAt(80,100);Key(true);held=true;Pump(500);PointAt(760,430);Key(false);held=false;Pump(1400);
+            PointAt(labelCenter.X,labelCenter.Y);Key(true);held=true;Pump(500);PointAt(blank.X,blank.Y);Key(false);held=false;Pump(1400);
             Check(Clipboard.GetText()==copied,"文字から余白へ移動して解放しても以前の文字を誤コピーしない");
-            PointAt(760,430);Key(true);held=true;Pump(350);Key(false);held=false;Pump(1200);
+            PointAt(blank.X,blank.Y);Key(true);held=true;Pump(350);Key(false);held=false;Pump(1200);
             Check(Clipboard.GetText()==copied,"何もない場所で解放した場合はクリップボードを保持");
             PointAt(42,174);Key(true);held=true;Pump(150);Left(true);mouseHeld=true;Pump(150);
             PointAt(500,300);Left(false);mouseHeld=false;Pump(200);Key(false);held=false;
@@ -90,8 +92,16 @@ internal static class Program
         finally
         {
             if(held)Key(false);if(mouseHeld)Left(false);Pump(500);
+            if (clipboardChanged)
+            {
+                GetWindowThreadProcessId(GetClipboardOwner(), out uint owner);
+                if (owner == (uint)Environment.ProcessId || (process is not null && owner == (uint)process.Id))
+                {
+                    try { Clipboard.Clear(); results.Add("PASS: 試験用クリップボードを消去"); }
+                    catch (ExternalException) { results.Add("FAIL: 試験用クリップボードを消去できませんでした。"); }
+                }
+            }
             if(process is {HasExited:false})try{var reply=Send(id,new{command="stop",expectedPid=process.Id});if(reply.GetProperty("result").GetString()=="accepted")process.WaitForExit(5000);}catch(Exception error){results.Add("停止未確認: "+error.Message);}
-            if(original!=0){if(clipboardChanged){var restored=OleSetClipboard(original);if(restored>=0)restored=OleFlushClipboard();results.Add(restored>=0?"PASS: 元のクリップボードIDataObjectを復元":"FAIL: 元のクリップボード復元未確認");}Marshal.Release(original);}
             fixture?.Dispose();process?.Dispose();File.WriteAllLines(Path.Combine(logs,"result.txt"),results);
         }
     }

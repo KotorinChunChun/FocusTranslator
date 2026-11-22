@@ -355,6 +355,53 @@ fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::extract_zip;
+    use std::{fs, io::Write};
+    use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+
+    #[test]
+    fn extracts_stored_and_deflated_release_files_into_the_bin_directory() {
+        let root = std::env::temp_dir().join(format!("ft_zip_test_{}", std::process::id()));
+        let output = root.join("bin");
+        fs::create_dir_all(&output).unwrap();
+        let archive_path = root.join("release.zip");
+        let mut archive = ZipWriter::new(fs::File::create(&archive_path).unwrap());
+        let options = SimpleFileOptions::default();
+        archive
+            .start_file(
+                "build/bin/llama-server.exe",
+                options.compression_method(CompressionMethod::Deflated),
+            )
+            .unwrap();
+        archive.write_all(b"server executable fixture").unwrap();
+        archive
+            .start_file(
+                "build/bin/runtime.dll",
+                options.compression_method(CompressionMethod::Stored),
+            )
+            .unwrap();
+        archive.write_all(b"runtime library fixture").unwrap();
+        drop(archive.finish().unwrap());
+
+        extract_zip(&archive_path, &output).unwrap();
+        assert_eq!(
+            fs::read(output.join("llama-server.exe")).unwrap(),
+            b"server executable fixture"
+        );
+        assert_eq!(
+            fs::read(output.join("runtime.dll")).unwrap(),
+            b"runtime library fixture"
+        );
+        fs::remove_file(output.join("llama-server.exe")).unwrap();
+        fs::remove_file(output.join("runtime.dll")).unwrap();
+        fs::remove_file(archive_path).unwrap();
+        fs::remove_dir(output).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+}
+
 /// zipをダウンロードして bin_dir へ展開し、成功したらバージョンマーカーを書く共通処理
 /// (SPECv0.5.5: 新規導入・更新の両方で使う)。CUDA版は release.zip_urls に2件
 /// (本体+cudartランタイム)入っているため、順に全て展開する。

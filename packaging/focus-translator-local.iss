@@ -7,14 +7,14 @@
 [Setup]
 AppId=KotorinToys.FocusTranslator
 AppName=FocusTranslator
-AppVersion=0.5.7
+AppVersion=0.5.8
 DefaultDirName={localappdata}\Programs\FocusTranslator
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64os
 ArchitecturesInstallIn64BitMode=x64os
 MinVersion=10.0.22000
 OutputDir={#OutputDirectory}
-OutputBaseFilename=FocusTranslator-0.5.7-setup
+OutputBaseFilename=FocusTranslator-0.5.8-setup
 Compression=lzma2/fast
 SolidCompression=yes
 CloseApplications=no

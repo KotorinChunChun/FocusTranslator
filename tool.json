@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "focus-translator",
   "name": "FocusTranslator",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "summary": "カーソル位置や指定範囲の文字を取得してコピー・翻訳・解説する常駐ツール",
   "category": "文字認識、翻訳",
   "executable": "target/management/debug/focus-translator.exe",

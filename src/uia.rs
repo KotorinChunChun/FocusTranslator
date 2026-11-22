@@ -337,7 +337,17 @@ pub fn copy_text_at_point(x: i32, y: i32) -> Option<(String, Vec<RECT>)> {
                 }
             }
         }
-        None
+        // 標準ラベルなど、TextPatternを公開しない静的テキストは要素名を使う。
+        // ボタン名やツールチップなどを本文としてコピーしないようText要素に限定する。
+        if element.CurrentControlType().ok()? != UIA_TextControlTypeId {
+            return None;
+        }
+        let rect = element.CurrentBoundingRectangle().ok()?;
+        if !crate::copy_recognition::contains(&rect, point) {
+            return None;
+        }
+        let text = sanitize_uia_text(&element.CurrentName().ok()?.to_string());
+        (!text.trim().is_empty()).then(|| (text, vec![rect]))
     }
 }
 
